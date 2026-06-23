@@ -215,11 +215,19 @@ mod platform {
             });
         }
 
-        printable_text(vk_code, key_is_pressed(VK_SHIFT)).map(|text| RecordedKeyboardInput::Text {
-            text,
-            captured_at_ms,
-            target_window: Some(windows::active_window_target()),
-        })
+        printable_text(vk_code, key_is_pressed(VK_SHIFT))
+            .map(|text| RecordedKeyboardInput::Text {
+                text,
+                captured_at_ms,
+                target_window: Some(windows::active_window_target()),
+            })
+            .or_else(|| {
+                plain_key_name(vk_code).map(|key| RecordedKeyboardInput::Key {
+                    key: key.to_string(),
+                    captured_at_ms,
+                    target_window: Some(windows::active_window_target()),
+                })
+            })
     }
 
     fn push_input(input: RecordedKeyboardInput) {
@@ -289,6 +297,21 @@ mod platform {
             VK_RETURN => Some("Enter"),
             VK_RIGHT => Some("Right"),
             VK_SPACE => Some("Space"),
+            VK_TAB => Some("Tab"),
+            VK_UP => Some("Up"),
+            _ => None,
+        }
+    }
+
+    fn plain_key_name(vk_code: u32) -> Option<&'static str> {
+        match vk_code {
+            VK_BACK => Some("Backspace"),
+            VK_DELETE => Some("Delete"),
+            VK_DOWN => Some("Down"),
+            VK_ESCAPE => Some("Esc"),
+            VK_LEFT => Some("Left"),
+            VK_RETURN => Some("Enter"),
+            VK_RIGHT => Some("Right"),
             VK_TAB => Some("Tab"),
             VK_UP => Some("Up"),
             _ => None,

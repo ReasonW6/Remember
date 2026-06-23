@@ -176,6 +176,7 @@ fn start_playback(
     flow: Flow,
     speed_multiplier: f64,
     loop_count: u32,
+    infinite_loop_confirmed: bool,
 ) -> Result<PlaybackStartPayload, String> {
     let mut player = player
         .lock()
@@ -187,6 +188,7 @@ fn start_playback(
             PlaybackOptions {
                 speed_multiplier,
                 loop_count,
+                infinite_loop_confirmed,
             },
             move |finished| {
                 let _ = finished_app.emit("playback-finished", &finished);

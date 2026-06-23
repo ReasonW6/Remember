@@ -88,6 +88,22 @@ export function updateStepHotkeyText(
   });
 }
 
+export function updateStepKeyText(
+  flow: Flow,
+  stepId: number,
+  keyText: string,
+): Flow {
+  const key = keyText.trim();
+  return updateFlowStep(flow, stepId, (step) => {
+    if (step.type !== "key") return step;
+
+    return {
+      ...step,
+      key,
+    };
+  });
+}
+
 export function updateTargetWindowMatched(flow: Flow, matched: boolean): Flow {
   return {
     ...flow,
@@ -104,16 +120,70 @@ export function insertWaitStepAfter(
   durationMs = 500,
 ) {
   const normalizedDurationMs = Math.max(0, Math.round(durationMs));
-  const nextStepId =
-    flow.steps.reduce((maxId, step) => Math.max(maxId, step.id), 0) + 1;
   const waitStep: FlowStep = {
-    id: nextStepId,
+    id: nextStepId(flow),
     type: "wait",
     action: "等待",
     durationMs: normalizedDurationMs,
     delayMs: normalizedDurationMs,
     note: "插入等待",
   };
+  return insertStepAfter(flow, afterStepId, waitStep);
+}
+
+export function insertTypeStepAfter(
+  flow: Flow,
+  afterStepId: number | null,
+  text = "新文本",
+) {
+  const typeStep: FlowStep = {
+    id: nextStepId(flow),
+    type: "type",
+    action: "文本输入",
+    text,
+    delayMs: 200,
+    note: "插入文本",
+  };
+  return insertStepAfter(flow, afterStepId, typeStep);
+}
+
+export function insertHotkeyStepAfter(
+  flow: Flow,
+  afterStepId: number | null,
+  keys = ["Ctrl", "S"],
+) {
+  const hotkeyStep: FlowStep = {
+    id: nextStepId(flow),
+    type: "hotkey",
+    action: "快捷键",
+    keys,
+    delayMs: 200,
+    note: "插入快捷键",
+  };
+  return insertStepAfter(flow, afterStepId, hotkeyStep);
+}
+
+export function insertKeyStepAfter(
+  flow: Flow,
+  afterStepId: number | null,
+  key = "Enter",
+) {
+  const keyStep: FlowStep = {
+    id: nextStepId(flow),
+    type: "key",
+    action: "按键",
+    key,
+    delayMs: 200,
+    note: "插入按键",
+  };
+  return insertStepAfter(flow, afterStepId, keyStep);
+}
+
+function insertStepAfter(
+  flow: Flow,
+  afterStepId: number | null,
+  step: FlowStep,
+) {
   const selectedIndex =
     afterStepId === null
       ? -1
@@ -125,12 +195,16 @@ export function insertWaitStepAfter(
       ...flow,
       steps: [
         ...flow.steps.slice(0, insertIndex),
-        waitStep,
+        step,
         ...flow.steps.slice(insertIndex),
       ],
     },
-    selectedStepId: waitStep.id,
+    selectedStepId: step.id,
   };
+}
+
+function nextStepId(flow: Flow) {
+  return flow.steps.reduce((maxId, step) => Math.max(maxId, step.id), 0) + 1;
 }
 
 export function deleteStep(flow: Flow, stepId: number) {

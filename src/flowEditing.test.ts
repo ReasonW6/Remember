@@ -2,10 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   deleteStep,
+  insertHotkeyStepAfter,
+  insertKeyStepAfter,
+  insertTypeStepAfter,
   insertWaitStepAfter,
   selectExistingStepId,
   updateStepClickCoordinates,
   updateStepHotkeyText,
+  updateStepKeyText,
   updateStepDelayMs,
   updateStepText,
   updateTargetWindowMatched,
@@ -117,6 +121,64 @@ test("inserts a wait step after the selected step without mutating the original 
   assert.equal(insertedStep.note, "插入等待");
   assert.equal(result.selectedStepId, 5);
   assert.equal(flow.steps.length, 4);
+});
+
+test("inserts a type step after the selected step", () => {
+  const flow = editableFlow();
+
+  const result = insertTypeStepAfter(flow, 2, "Manual note");
+  const insertedStep = result.flow.steps[2];
+
+  assert.equal(result.flow.steps.length, 5);
+  assert.equal(insertedStep.type, "type");
+  if (insertedStep.type !== "type") throw new Error("expected type step");
+  assert.equal(insertedStep.id, 5);
+  assert.equal(insertedStep.text, "Manual note");
+  assert.equal(insertedStep.delayMs, 200);
+  assert.equal(result.selectedStepId, 5);
+  assert.equal(flow.steps.length, 4);
+});
+
+test("inserts a hotkey step after the selected step", () => {
+  const flow = editableFlow();
+
+  const result = insertHotkeyStepAfter(flow, 3, ["Ctrl", "Enter"]);
+  const insertedStep = result.flow.steps[3];
+
+  assert.equal(result.flow.steps.length, 5);
+  assert.equal(insertedStep.type, "hotkey");
+  if (insertedStep.type !== "hotkey") throw new Error("expected hotkey step");
+  assert.equal(insertedStep.id, 5);
+  assert.deepEqual(insertedStep.keys, ["Ctrl", "Enter"]);
+  assert.equal(insertedStep.delayMs, 200);
+  assert.equal(result.selectedStepId, 5);
+  assert.equal(flow.steps.length, 4);
+});
+
+test("inserts a key step after the selected step", () => {
+  const flow = editableFlow();
+
+  const result = insertKeyStepAfter(flow, 2, "Enter");
+  const insertedStep = result.flow.steps[2];
+
+  assert.equal(result.flow.steps.length, 5);
+  assert.equal(insertedStep.type, "key");
+  if (insertedStep.type !== "key") throw new Error("expected key step");
+  assert.equal(insertedStep.id, 5);
+  assert.equal(insertedStep.key, "Enter");
+  assert.equal(insertedStep.delayMs, 200);
+  assert.equal(result.selectedStepId, 5);
+  assert.equal(flow.steps.length, 4);
+});
+
+test("updates a key step from editable text", () => {
+  const inserted = insertKeyStepAfter(editableFlow(), 2, "Enter");
+  const edited = updateStepKeyText(inserted.flow, inserted.selectedStepId, "Tab");
+  const keyStep = edited.steps[2];
+
+  assert.equal(keyStep.type, "key");
+  if (keyStep.type !== "key") throw new Error("expected key step");
+  assert.equal(keyStep.key, "Tab");
 });
 
 test("deletes a step and selects the next available step", () => {

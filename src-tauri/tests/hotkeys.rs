@@ -21,6 +21,7 @@ fn emergency_hotkey_trigger_interrupts_active_playback() {
             PlaybackOptions {
                 speed_multiplier: 1.0,
                 loop_count: 1,
+                infinite_loop_confirmed: false,
             },
             move |payload| sender.send(payload).expect("finished payload should send"),
         )

@@ -127,6 +127,151 @@ fn stop_recording_converts_mouse_clicks_to_steps_with_wait_timing() {
 }
 
 #[test]
+fn stop_recording_combines_fast_nearby_left_clicks_into_double_click_step() {
+    let mut recorder = RecorderState::default();
+    recorder.start().expect("recording should start");
+    let started_at_ms = recorder
+        .active_started_at_ms()
+        .expect("active session should expose start time");
+
+    recorder
+        .record_mouse_click_at(120, 240, RecordedMouseButton::Left, started_at_ms + 250)
+        .expect("first click should be recorded");
+    recorder
+        .record_mouse_click_at(122, 242, RecordedMouseButton::Left, started_at_ms + 430)
+        .expect("second click should be recorded");
+    recorder
+        .record_mouse_click_at(300, 480, RecordedMouseButton::Right, started_at_ms + 900)
+        .expect("right click should be recorded");
+
+    let stopped = recorder.stop().expect("recording should stop");
+
+    assert_eq!(stopped.flow.steps.len(), 2);
+    match &stopped.flow.steps[0] {
+        FlowStep::Click {
+            action,
+            target,
+            x,
+            y,
+            delay_ms,
+            note,
+            ..
+        } => {
+            assert_eq!(action, "双击");
+            assert_eq!(target, "(120, 240) [屏幕绝对]");
+            assert_eq!((*x, *y), (120, 240));
+            assert_eq!(*delay_ms, 250);
+            assert!(note.contains("双击"));
+        }
+        step => panic!("expected double-click step, got {step:?}"),
+    }
+    match &stopped.flow.steps[1] {
+        FlowStep::Click {
+            action, delay_ms, ..
+        } => {
+            assert_eq!(action, "右键单击");
+            assert_eq!(*delay_ms, 470);
+        }
+        step => panic!("expected right-click step, got {step:?}"),
+    }
+}
+
+#[test]
+fn stop_recording_converts_mouse_wheel_to_scroll_steps_with_wait_timing() {
+    let mut recorder = RecorderState::default();
+    recorder.start().expect("recording should start");
+    let started_at_ms = recorder
+        .active_started_at_ms()
+        .expect("active session should expose start time");
+
+    recorder
+        .record_mouse_scroll_at(220, 340, 0, -120, started_at_ms + 350)
+        .expect("vertical scroll should be recorded");
+    recorder
+        .record_mouse_scroll_at(220, 340, 120, 0, started_at_ms + 800)
+        .expect("horizontal scroll should be recorded");
+
+    let stopped = recorder.stop().expect("recording should stop");
+
+    assert_eq!(stopped.flow.steps.len(), 2);
+    match &stopped.flow.steps[0] {
+        FlowStep::Scroll {
+            action,
+            delta_x,
+            delta_y,
+            delay_ms,
+            note,
+            ..
+        } => {
+            assert_eq!(action, "滚动");
+            assert_eq!((*delta_x, *delta_y), (0, -120));
+            assert_eq!(*delay_ms, 350);
+            assert!(note.contains("鼠标滚轮"));
+        }
+        step => panic!("expected vertical scroll step, got {step:?}"),
+    }
+    match &stopped.flow.steps[1] {
+        FlowStep::Scroll {
+            delta_x,
+            delta_y,
+            delay_ms,
+            ..
+        } => {
+            assert_eq!((*delta_x, *delta_y), (120, 0));
+            assert_eq!(*delay_ms, 450);
+        }
+        step => panic!("expected horizontal scroll step, got {step:?}"),
+    }
+}
+
+#[test]
+fn stop_recording_converts_mouse_drag_to_drag_step_with_duration() {
+    let mut recorder = RecorderState::default();
+    recorder.start().expect("recording should start");
+    let started_at_ms = recorder
+        .active_started_at_ms()
+        .expect("active session should expose start time");
+
+    recorder
+        .record_mouse_drag_at(
+            120,
+            240,
+            420,
+            520,
+            RecordedMouseButton::Left,
+            started_at_ms + 300,
+            started_at_ms + 820,
+        )
+        .expect("left drag should be recorded");
+
+    let stopped = recorder.stop().expect("recording should stop");
+
+    assert_eq!(stopped.flow.steps.len(), 1);
+    match &stopped.flow.steps[0] {
+        FlowStep::Drag {
+            action,
+            target,
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            duration_ms,
+            delay_ms,
+            note,
+            ..
+        } => {
+            assert_eq!(action, "左键拖拽");
+            assert_eq!(target, "(120, 240) -> (420, 520) [屏幕绝对]");
+            assert_eq!((*start_x, *start_y, *end_x, *end_y), (120, 240, 420, 520));
+            assert_eq!(*delay_ms, 300);
+            assert_eq!(*duration_ms, 520);
+            assert!(note.contains("鼠标拖拽"));
+        }
+        step => panic!("expected drag step, got {step:?}"),
+    }
+}
+
+#[test]
 fn stop_recording_excludes_clicks_inside_app_windows() {
     let mut recorder = RecorderState::default();
     recorder.start().expect("recording should start");
@@ -216,6 +361,51 @@ fn stop_recording_merges_text_input_and_records_hotkeys_with_wait_timing() {
             assert!(note.contains("快捷键"));
         }
         step => panic!("expected hotkey step, got {step:?}"),
+    }
+}
+
+#[test]
+fn stop_recording_records_plain_control_keys_with_wait_timing() {
+    let mut recorder = RecorderState::default();
+    recorder.start().expect("recording should start");
+    let started_at_ms = recorder
+        .active_started_at_ms()
+        .expect("active session should expose start time");
+
+    recorder
+        .record_text_input_at("A", started_at_ms + 100)
+        .expect("typed character should be recorded");
+    recorder
+        .record_key_press_at("Enter", started_at_ms + 360)
+        .expect("enter should be recorded");
+    recorder
+        .record_key_press_at("Backspace", started_at_ms + 620)
+        .expect("backspace should be recorded");
+
+    let stopped = recorder.stop().expect("recording should stop");
+
+    assert_eq!(stopped.flow.steps.len(), 3);
+    match &stopped.flow.steps[1] {
+        FlowStep::Key {
+            action,
+            key,
+            delay_ms,
+            note,
+            ..
+        } => {
+            assert_eq!(action, "按键");
+            assert_eq!(key, "Enter");
+            assert_eq!(*delay_ms, 260);
+            assert!(note.contains("键盘按键"));
+        }
+        step => panic!("expected key step, got {step:?}"),
+    }
+    match &stopped.flow.steps[2] {
+        FlowStep::Key { key, delay_ms, .. } => {
+            assert_eq!(key, "Backspace");
+            assert_eq!(*delay_ms, 260);
+        }
+        step => panic!("expected key step, got {step:?}"),
     }
 }
 

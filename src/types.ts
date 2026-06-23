@@ -50,7 +50,9 @@ export interface PlaybackFinishedPayload extends AppStatusPayload {
 
 export type FlowStep =
   | ClickStep
+  | DragStep
   | TypeStep
+  | KeyStep
   | WaitStep
   | HotkeyStep
   | ScrollStep;
@@ -69,10 +71,27 @@ export interface ClickStep extends BaseStep {
   y: number;
 }
 
+export interface DragStep extends BaseStep {
+  type: "drag";
+  action: "左键拖拽" | "右键拖拽";
+  target: string;
+  startX: number;
+  startY: number;
+  endX: number;
+  endY: number;
+  durationMs: number;
+}
+
 export interface TypeStep extends BaseStep {
   type: "type";
   action: "文本输入";
   text: string;
+}
+
+export interface KeyStep extends BaseStep {
+  type: "key";
+  action: "按键";
+  key: string;
 }
 
 export interface WaitStep extends BaseStep {

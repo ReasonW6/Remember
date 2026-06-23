@@ -29,7 +29,7 @@ impl fmt::Display for PlayerError {
             Self::AlreadyPlaying => write!(formatter, "playback is already active"),
             Self::InvalidLoopCount => write!(
                 formatter,
-                "infinite playback requires explicit confirmation and is not enabled yet"
+                "infinite playback requires explicit confirmation"
             ),
             Self::InvalidSpeed => write!(formatter, "playback speed must be greater than zero"),
             Self::NotPlaying => write!(formatter, "playback is not active"),
@@ -43,6 +43,7 @@ impl std::error::Error for PlayerError {}
 pub struct PlaybackOptions {
     pub speed_multiplier: f64,
     pub loop_count: u32,
+    pub infinite_loop_confirmed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -157,6 +158,7 @@ impl PlayerState {
         let thread_input = Arc::clone(&self.input);
         let flow_name = flow.display_name.clone();
         let run_id = NEXT_PLAYBACK_RUN_ID.fetch_add(1, Ordering::Relaxed);
+        let loop_description = loop_description(options.loop_count);
         let start_payload = PlaybackStartPayload {
             run_id,
             status: "playing",
@@ -165,7 +167,7 @@ impl PlayerState {
             loop_count: options.loop_count,
             speed_multiplier: options.speed_multiplier,
             message: format!(
-                "开始回放 {flow_name}；当前安全切片会执行等待、通过目标窗口检查的点击、文本输入、热键和滚轮。"
+                "开始回放 {flow_name}；{loop_description}；当前安全切片会执行等待、通过目标窗口检查的点击、拖拽、文本输入、按键、热键和滚轮。"
             ),
         };
 
@@ -242,7 +244,7 @@ fn validate_options(options: PlaybackOptions) -> Result<(), PlayerError> {
     if !options.speed_multiplier.is_finite() || options.speed_multiplier <= 0.0 {
         return Err(PlayerError::InvalidSpeed);
     }
-    if options.loop_count == 0 {
+    if options.loop_count == 0 && !options.infinite_loop_confirmed {
         return Err(PlayerError::InvalidLoopCount);
     }
     Ok(())
@@ -256,12 +258,22 @@ fn run_playback(
     input: Arc<dyn PlaybackInput>,
     run_id: u64,
 ) -> PlaybackFinishedPayload {
-    let mut completed_steps = 0;
-    let mut skipped_steps = 0;
+    let mut completed_steps: u32 = 0;
+    let mut skipped_steps: u32 = 0;
     let mut reason = PlaybackFinishReason::Completed;
     let mut safety_message: Option<String> = None;
 
-    'playback: for _ in 0..options.loop_count {
+    let mut completed_loops: u32 = 0;
+
+    'playback: loop {
+        if options.loop_count != 0 && completed_loops >= options.loop_count {
+            break;
+        }
+
+        if options.loop_count == 0 && flow.steps.is_empty() {
+            break;
+        }
+
         for step in &flow.steps {
             if cancel_requested.load(Ordering::SeqCst) {
                 reason = current_cancel_reason(&cancel_reason);
@@ -289,7 +301,7 @@ fn run_playback(
                     {
                         reason = PlaybackFinishReason::SafetyStopped;
                         safety_message = Some(message);
-                        skipped_steps += 1;
+                        skipped_steps = skipped_steps.saturating_add(1);
                         break 'playback;
                     }
 
@@ -303,11 +315,56 @@ fn run_playback(
                             reason = PlaybackFinishReason::SafetyStopped;
                             safety_message =
                                 Some(format!("点击执行失败：{error}，已拒绝继续回放。"));
-                            skipped_steps += 1;
+                            skipped_steps = skipped_steps.saturating_add(1);
                             break 'playback;
                         }
                     }
-                    completed_steps += 1;
+                    completed_steps = completed_steps.saturating_add(1);
+                }
+                FlowStep::Drag {
+                    action,
+                    start_x,
+                    start_y,
+                    end_x,
+                    end_y,
+                    duration_ms,
+                    delay_ms,
+                    ..
+                } => {
+                    if sleep_cancelable(
+                        adjusted_duration(*delay_ms, options.speed_multiplier),
+                        &cancel_requested,
+                    ) {
+                        reason = current_cancel_reason(&cancel_reason);
+                        break 'playback;
+                    }
+
+                    let active_window = input.active_window_target();
+                    if let Err(message) = validate_input_target(&flow.target_window, &active_window)
+                    {
+                        reason = PlaybackFinishReason::SafetyStopped;
+                        safety_message = Some(message);
+                        skipped_steps = skipped_steps.saturating_add(1);
+                        break 'playback;
+                    }
+
+                    let (button, _) = click_plan(action);
+                    let adjusted_drag_duration =
+                        adjusted_duration(*duration_ms, options.speed_multiplier);
+                    if let Err(error) = input.drag(
+                        button,
+                        *start_x,
+                        *start_y,
+                        *end_x,
+                        *end_y,
+                        adjusted_drag_duration.as_millis() as u64,
+                    ) {
+                        reason = PlaybackFinishReason::SafetyStopped;
+                        safety_message = Some(format!("拖拽执行失败：{error}，已拒绝继续回放。"));
+                        skipped_steps = skipped_steps.saturating_add(1);
+                        break 'playback;
+                    }
+                    completed_steps = completed_steps.saturating_add(1);
                 }
                 FlowStep::Type { text, delay_ms, .. } => {
                     if sleep_cancelable(
@@ -323,17 +380,43 @@ fn run_playback(
                     {
                         reason = PlaybackFinishReason::SafetyStopped;
                         safety_message = Some(message);
-                        skipped_steps += 1;
+                        skipped_steps = skipped_steps.saturating_add(1);
                         break 'playback;
                     }
 
                     if let Err(error) = input.type_text(text) {
                         reason = PlaybackFinishReason::SafetyStopped;
                         safety_message = Some(format!("文本输入失败：{error}，已拒绝继续回放。"));
-                        skipped_steps += 1;
+                        skipped_steps = skipped_steps.saturating_add(1);
                         break 'playback;
                     }
-                    completed_steps += 1;
+                    completed_steps = completed_steps.saturating_add(1);
+                }
+                FlowStep::Key { key, delay_ms, .. } => {
+                    if sleep_cancelable(
+                        adjusted_duration(*delay_ms, options.speed_multiplier),
+                        &cancel_requested,
+                    ) {
+                        reason = current_cancel_reason(&cancel_reason);
+                        break 'playback;
+                    }
+
+                    let active_window = input.active_window_target();
+                    if let Err(message) = validate_input_target(&flow.target_window, &active_window)
+                    {
+                        reason = PlaybackFinishReason::SafetyStopped;
+                        safety_message = Some(message);
+                        skipped_steps = skipped_steps.saturating_add(1);
+                        break 'playback;
+                    }
+
+                    if let Err(error) = input.press_key(key) {
+                        reason = PlaybackFinishReason::SafetyStopped;
+                        safety_message = Some(format!("按键输入失败：{error}，已拒绝继续回放。"));
+                        skipped_steps = skipped_steps.saturating_add(1);
+                        break 'playback;
+                    }
+                    completed_steps = completed_steps.saturating_add(1);
                 }
                 FlowStep::Wait { duration_ms, .. } => {
                     if sleep_cancelable(
@@ -343,7 +426,7 @@ fn run_playback(
                         reason = current_cancel_reason(&cancel_reason);
                         break 'playback;
                     }
-                    completed_steps += 1;
+                    completed_steps = completed_steps.saturating_add(1);
                 }
                 FlowStep::Hotkey { keys, delay_ms, .. } => {
                     if sleep_cancelable(
@@ -359,17 +442,17 @@ fn run_playback(
                     {
                         reason = PlaybackFinishReason::SafetyStopped;
                         safety_message = Some(message);
-                        skipped_steps += 1;
+                        skipped_steps = skipped_steps.saturating_add(1);
                         break 'playback;
                     }
 
                     if let Err(error) = input.press_hotkey(keys) {
                         reason = PlaybackFinishReason::SafetyStopped;
                         safety_message = Some(format!("热键输入失败：{error}，已拒绝继续回放。"));
-                        skipped_steps += 1;
+                        skipped_steps = skipped_steps.saturating_add(1);
                         break 'playback;
                     }
-                    completed_steps += 1;
+                    completed_steps = completed_steps.saturating_add(1);
                 }
                 FlowStep::Scroll {
                     delta_x,
@@ -390,20 +473,22 @@ fn run_playback(
                     {
                         reason = PlaybackFinishReason::SafetyStopped;
                         safety_message = Some(message);
-                        skipped_steps += 1;
+                        skipped_steps = skipped_steps.saturating_add(1);
                         break 'playback;
                     }
 
                     if let Err(error) = input.scroll(*delta_x, *delta_y) {
                         reason = PlaybackFinishReason::SafetyStopped;
                         safety_message = Some(format!("滚轮输入失败：{error}，已拒绝继续回放。"));
-                        skipped_steps += 1;
+                        skipped_steps = skipped_steps.saturating_add(1);
                         break 'playback;
                     }
-                    completed_steps += 1;
+                    completed_steps = completed_steps.saturating_add(1);
                 }
             }
         }
+
+        completed_loops = completed_loops.saturating_add(1);
     }
 
     let message = finish_message(reason, completed_steps, skipped_steps, safety_message);
@@ -436,6 +521,16 @@ fn validate_input_target(expected: &TargetWindow, active: &TargetWindow) -> Resu
         ));
     }
 
+    if has_known_title(&expected.title)
+        && has_known_title(&active.title)
+        && !same_title(&expected.title, &active.title)
+    {
+        return Err(format!(
+            "目标窗口标题不同：录制时为“{}”，当前为“{}”，未执行输入操作。",
+            expected.title, active.title
+        ));
+    }
+
     Ok(())
 }
 
@@ -448,7 +543,16 @@ fn has_known_process(process: &str) -> bool {
     !process.is_empty() && process != "N/A" && !process.starts_with("PID ")
 }
 
+fn has_known_title(title: &str) -> bool {
+    let title = title.trim();
+    !title.is_empty() && title != "N/A" && title != "未知活动窗口" && title != "尚未捕获活动窗口"
+}
+
 fn same_process(expected: &str, active: &str) -> bool {
+    expected.trim().eq_ignore_ascii_case(active.trim())
+}
+
+fn same_title(expected: &str, active: &str) -> bool {
     expected.trim().eq_ignore_ascii_case(active.trim())
 }
 
@@ -472,6 +576,14 @@ fn current_cancel_reason(cancel_reason: &Mutex<PlaybackFinishReason>) -> Playbac
 fn adjusted_duration(duration_ms: u64, speed_multiplier: f64) -> Duration {
     let adjusted_ms = (duration_ms as f64 / speed_multiplier).ceil().max(0.0) as u64;
     Duration::from_millis(adjusted_ms)
+}
+
+fn loop_description(loop_count: u32) -> String {
+    if loop_count == 0 {
+        "无限循环，直到手动停止或触发紧急停止".to_string()
+    } else {
+        format!("循环 {loop_count} 次")
+    }
 }
 
 fn sleep_cancelable(duration: Duration, cancel_requested: &AtomicBool) -> bool {

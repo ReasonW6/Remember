@@ -18,6 +18,7 @@ fn wait_playback_applies_speed_and_loop_count_until_finished() {
             PlaybackOptions {
                 speed_multiplier: 2.0,
                 loop_count: 2,
+                infinite_loop_confirmed: false,
             },
             move |payload| sender.send(payload).expect("finished payload should send"),
         )
@@ -59,6 +60,7 @@ fn mixed_playback_replays_click_type_and_hotkey_steps() {
             PlaybackOptions {
                 speed_multiplier: 5.0,
                 loop_count: 1,
+                infinite_loop_confirmed: false,
             },
             move |payload| sender.send(payload).expect("finished payload should send"),
         )
@@ -98,6 +100,53 @@ fn mixed_playback_replays_click_type_and_hotkey_steps() {
 }
 
 #[test]
+fn mixed_playback_replays_drag_and_plain_key_steps() {
+    let drags = Arc::new(Mutex::new(Vec::new()));
+    let key_presses = Arc::new(Mutex::new(Vec::new()));
+    let mut player = PlayerState::with_input(Arc::new(ExtendedFakePlaybackInput {
+        active_window: target_window(),
+        drags: Arc::clone(&drags),
+        key_presses: Arc::clone(&key_presses),
+    }));
+    let (sender, receiver) = mpsc::channel();
+
+    player
+        .start(
+            drag_and_key_flow(),
+            PlaybackOptions {
+                speed_multiplier: 5.0,
+                loop_count: 1,
+                infinite_loop_confirmed: false,
+            },
+            move |payload| sender.send(payload).expect("finished payload should send"),
+        )
+        .expect("drag and key playback should start");
+
+    let finished = receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("drag and key playback should finish");
+
+    assert_eq!(finished.reason, PlaybackFinishReason::Completed);
+    assert_eq!(finished.completed_steps, 2);
+    assert_eq!(finished.skipped_steps, 0);
+    assert_eq!(
+        *drags.lock().expect("drags should lock"),
+        vec![RecordedDrag {
+            button: PlaybackMouseButton::Left,
+            start_x: 120,
+            start_y: 240,
+            end_x: 420,
+            end_y: 520,
+            duration_ms: 60,
+        }]
+    );
+    assert_eq!(
+        *key_presses.lock().expect("key presses should lock"),
+        vec!["Enter".to_string()]
+    );
+}
+
+#[test]
 fn click_playback_safety_stops_when_flow_target_is_unmatched() {
     let clicks = Arc::new(Mutex::new(Vec::new()));
     let typed_texts = Arc::new(Mutex::new(Vec::new()));
@@ -118,6 +167,7 @@ fn click_playback_safety_stops_when_flow_target_is_unmatched() {
             PlaybackOptions {
                 speed_multiplier: 5.0,
                 loop_count: 1,
+                infinite_loop_confirmed: false,
             },
             move |payload| sender.send(payload).expect("finished payload should send"),
         )
@@ -160,6 +210,7 @@ fn click_playback_safety_stops_when_active_window_differs() {
             PlaybackOptions {
                 speed_multiplier: 5.0,
                 loop_count: 1,
+                infinite_loop_confirmed: false,
             },
             move |payload| sender.send(payload).expect("finished payload should send"),
         )
@@ -174,6 +225,49 @@ fn click_playback_safety_stops_when_active_window_differs() {
     assert_eq!(finished.skipped_steps, 1);
     assert!(finished.message.contains("安全停止"));
     assert!(finished.message.contains("不同"));
+    assert!(clicks.lock().expect("clicks should lock").is_empty());
+}
+
+#[test]
+fn click_playback_safety_stops_when_same_process_title_differs() {
+    let clicks = Arc::new(Mutex::new(Vec::new()));
+    let typed_texts = Arc::new(Mutex::new(Vec::new()));
+    let hotkeys = Arc::new(Mutex::new(Vec::new()));
+    let scrolls = Arc::new(Mutex::new(Vec::new()));
+    let mut player = PlayerState::with_input(Arc::new(FakePlaybackInput {
+        active_window: TargetWindow {
+            title: "Other Document - Test".to_string(),
+            process: "test.exe".to_string(),
+            size: "800 x 600".to_string(),
+            matched: true,
+        },
+        clicks: Arc::clone(&clicks),
+        typed_texts,
+        hotkeys,
+        scrolls,
+    }));
+    let (sender, receiver) = mpsc::channel();
+
+    player
+        .start(
+            click_only_flow(target_window()),
+            PlaybackOptions {
+                speed_multiplier: 5.0,
+                loop_count: 1,
+                infinite_loop_confirmed: false,
+            },
+            move |payload| sender.send(payload).expect("finished payload should send"),
+        )
+        .expect("click playback should start");
+
+    let finished = receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("same-process wrong-title click playback should stop");
+
+    assert_eq!(finished.reason, PlaybackFinishReason::SafetyStopped);
+    assert_eq!(finished.completed_steps, 0);
+    assert_eq!(finished.skipped_steps, 1);
+    assert!(finished.message.contains("标题"));
     assert!(clicks.lock().expect("clicks should lock").is_empty());
 }
 
@@ -204,6 +298,7 @@ fn input_playback_checks_target_after_step_delay() {
             PlaybackOptions {
                 speed_multiplier: 1.0,
                 loop_count: 1,
+                infinite_loop_confirmed: false,
             },
             move |payload| sender.send(payload).expect("finished payload should send"),
         )
@@ -253,6 +348,7 @@ fn type_playback_safety_stops_when_active_window_differs() {
             PlaybackOptions {
                 speed_multiplier: 5.0,
                 loop_count: 1,
+                infinite_loop_confirmed: false,
             },
             move |payload| sender.send(payload).expect("finished payload should send"),
         )
@@ -299,6 +395,7 @@ fn hotkey_playback_safety_stops_when_active_window_differs() {
             PlaybackOptions {
                 speed_multiplier: 5.0,
                 loop_count: 1,
+                infinite_loop_confirmed: false,
             },
             move |payload| sender.send(payload).expect("finished payload should send"),
         )
@@ -337,6 +434,7 @@ fn stop_interrupts_hotkey_playback_before_sending_keys() {
             PlaybackOptions {
                 speed_multiplier: 1.0,
                 loop_count: 1,
+                infinite_loop_confirmed: false,
             },
             move |payload| sender.send(payload).expect("finished payload should send"),
         )
@@ -382,6 +480,7 @@ fn scroll_playback_safety_stops_when_active_window_differs() {
             PlaybackOptions {
                 speed_multiplier: 5.0,
                 loop_count: 1,
+                infinite_loop_confirmed: false,
             },
             move |payload| sender.send(payload).expect("finished payload should send"),
         )
@@ -420,6 +519,7 @@ fn stop_interrupts_scroll_playback_before_sending_wheel() {
             PlaybackOptions {
                 speed_multiplier: 1.0,
                 loop_count: 1,
+                infinite_loop_confirmed: false,
             },
             move |payload| sender.send(payload).expect("finished payload should send"),
         )
@@ -450,6 +550,7 @@ fn stop_interrupts_long_wait_playback() {
             PlaybackOptions {
                 speed_multiplier: 1.0,
                 loop_count: 1,
+                infinite_loop_confirmed: false,
             },
             move |payload| sender.send(payload).expect("finished payload should send"),
         )
@@ -481,6 +582,7 @@ fn emergency_stop_interrupts_with_emergency_reason() {
             PlaybackOptions {
                 speed_multiplier: 1.0,
                 loop_count: 1,
+                infinite_loop_confirmed: false,
             },
             move |payload| sender.send(payload).expect("finished payload should send"),
         )
@@ -504,7 +606,7 @@ fn emergency_stop_interrupts_with_emergency_reason() {
 }
 
 #[test]
-fn playback_rejects_zero_loop_count_until_infinite_loop_confirmation_exists() {
+fn playback_rejects_infinite_loop_without_explicit_confirmation() {
     let mut player = PlayerState::default();
     let (sender, _receiver) = mpsc::channel();
 
@@ -513,11 +615,47 @@ fn playback_rejects_zero_loop_count_until_infinite_loop_confirmation_exists() {
         PlaybackOptions {
             speed_multiplier: 1.0,
             loop_count: 0,
+            infinite_loop_confirmed: false,
         },
         move |payload| sender.send(payload).expect("finished payload should send"),
     );
 
     assert!(result.is_err());
+    assert!(!player.is_playing());
+}
+
+#[test]
+fn confirmed_infinite_loop_playback_runs_until_stopped() {
+    let mut player = PlayerState::default();
+    let (sender, receiver) = mpsc::channel();
+
+    let started = player
+        .start(
+            wait_only_flow(5),
+            PlaybackOptions {
+                speed_multiplier: 5.0,
+                loop_count: 0,
+                infinite_loop_confirmed: true,
+            },
+            move |payload| sender.send(payload).expect("finished payload should send"),
+        )
+        .expect("confirmed infinite playback should start");
+
+    assert!(player.is_playing());
+    assert_eq!(started.loop_count, 0);
+
+    thread::sleep(Duration::from_millis(30));
+    let stopped = player.stop().expect("infinite playback should stop");
+
+    assert_eq!(stopped.status, "stopped");
+
+    let finished = receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("stop should interrupt infinite playback");
+
+    assert_eq!(finished.reason, PlaybackFinishReason::Stopped);
+    assert_eq!(finished.loop_count, 0);
+    assert!(finished.completed_steps > 0);
     assert!(!player.is_playing());
 }
 
@@ -653,6 +791,36 @@ fn scroll_only_flow(target_window: TargetWindow, delay_ms: u64) -> Flow {
     }
 }
 
+fn drag_and_key_flow() -> Flow {
+    Flow {
+        version: 1,
+        name: "drag-key".to_string(),
+        display_name: "Drag Key".to_string(),
+        target_window: target_window(),
+        steps: vec![
+            FlowStep::Drag {
+                id: 1,
+                action: "左键拖拽".to_string(),
+                target: "(120, 240) -> (420, 520) [屏幕绝对]".to_string(),
+                start_x: 120,
+                start_y: 240,
+                end_x: 420,
+                end_y: 520,
+                duration_ms: 300,
+                delay_ms: 10,
+                note: "safe drag".to_string(),
+            },
+            FlowStep::Key {
+                id: 2,
+                action: "按键".to_string(),
+                key: "Enter".to_string(),
+                delay_ms: 10,
+                note: "safe key".to_string(),
+            },
+        ],
+    }
+}
+
 fn target_window() -> TargetWindow {
     TargetWindow {
         title: "Test".to_string(),
@@ -682,6 +850,75 @@ struct RecordedClick {
 struct RecordedScroll {
     delta_x: i32,
     delta_y: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RecordedDrag {
+    button: PlaybackMouseButton,
+    start_x: i32,
+    start_y: i32,
+    end_x: i32,
+    end_y: i32,
+    duration_ms: u64,
+}
+
+struct ExtendedFakePlaybackInput {
+    active_window: TargetWindow,
+    drags: Arc<Mutex<Vec<RecordedDrag>>>,
+    key_presses: Arc<Mutex<Vec<String>>>,
+}
+
+impl PlaybackInput for ExtendedFakePlaybackInput {
+    fn active_window_target(&self) -> TargetWindow {
+        self.active_window.clone()
+    }
+
+    fn click(&self, _button: PlaybackMouseButton, _x: i32, _y: i32) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn type_text(&self, _text: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn press_hotkey(&self, _keys: &[String]) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn scroll(&self, _delta_x: i32, _delta_y: i32) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn drag(
+        &self,
+        button: PlaybackMouseButton,
+        start_x: i32,
+        start_y: i32,
+        end_x: i32,
+        end_y: i32,
+        duration_ms: u64,
+    ) -> Result<(), String> {
+        self.drags
+            .lock()
+            .expect("drags should lock")
+            .push(RecordedDrag {
+                button,
+                start_x,
+                start_y,
+                end_x,
+                end_y,
+                duration_ms,
+            });
+        Ok(())
+    }
+
+    fn press_key(&self, key: &str) -> Result<(), String> {
+        self.key_presses
+            .lock()
+            .expect("key presses should lock")
+            .push(key.to_string());
+        Ok(())
+    }
 }
 
 struct FakePlaybackInput {

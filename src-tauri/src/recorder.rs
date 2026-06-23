@@ -37,6 +37,8 @@ struct RecordingSession {
     started_at_ms: u64,
     target_window: TargetWindow,
     mouse_clicks: Arc<Mutex<Vec<RecordedMouseClick>>>,
+    mouse_drags: Arc<Mutex<Vec<RecordedMouseDrag>>>,
+    mouse_scrolls: Arc<Mutex<Vec<RecordedMouseScroll>>>,
     keyboard_inputs: Arc<Mutex<Vec<RecordedKeyboardInput>>>,
     mouse_capture: Option<mouse::MouseCaptureGuard>,
     keyboard_capture: Option<keyboard::KeyboardCaptureGuard>,
@@ -77,6 +79,28 @@ pub(crate) struct RecordedMouseClick {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecordedMouseScroll {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) delta_x: i32,
+    pub(crate) delta_y: i32,
+    pub(crate) captured_at_ms: u64,
+    pub(crate) target_window: Option<TargetWindow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecordedMouseDrag {
+    pub(crate) start_x: i32,
+    pub(crate) start_y: i32,
+    pub(crate) end_x: i32,
+    pub(crate) end_y: i32,
+    pub(crate) button: RecordedMouseButton,
+    pub(crate) started_at_ms: u64,
+    pub(crate) captured_at_ms: u64,
+    pub(crate) target_window: Option<TargetWindow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RecordedKeyboardInput {
     Text {
         text: String,
@@ -88,11 +112,18 @@ pub(crate) enum RecordedKeyboardInput {
         captured_at_ms: u64,
         target_window: Option<TargetWindow>,
     },
+    Key {
+        key: String,
+        captured_at_ms: u64,
+        target_window: Option<TargetWindow>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RecordedAction {
     MouseClick(RecordedMouseClick),
+    MouseDrag(RecordedMouseDrag),
+    MouseScroll(RecordedMouseScroll),
     Text {
         text: String,
         captured_at_ms: u64,
@@ -103,14 +134,22 @@ enum RecordedAction {
         captured_at_ms: u64,
         target_window: Option<TargetWindow>,
     },
+    Key {
+        key: String,
+        captured_at_ms: u64,
+        target_window: Option<TargetWindow>,
+    },
 }
 
 impl RecordedAction {
     fn captured_at_ms(&self) -> u64 {
         match self {
             Self::MouseClick(click) => click.captured_at_ms,
+            Self::MouseDrag(drag) => drag.started_at_ms,
+            Self::MouseScroll(scroll) => scroll.captured_at_ms,
             Self::Text { captured_at_ms, .. } => *captured_at_ms,
             Self::Hotkey { captured_at_ms, .. } => *captured_at_ms,
+            Self::Key { captured_at_ms, .. } => *captured_at_ms,
         }
     }
 }
@@ -160,6 +199,8 @@ impl RecorderState {
             started_at_ms,
             target_window,
             mouse_clicks: Arc::new(Mutex::new(Vec::new())),
+            mouse_drags: Arc::new(Mutex::new(Vec::new())),
+            mouse_scrolls: Arc::new(Mutex::new(Vec::new())),
             keyboard_inputs: Arc::new(Mutex::new(Vec::new())),
             mouse_capture: None,
             keyboard_capture: None,
@@ -226,6 +267,101 @@ impl RecorderState {
         Ok(())
     }
 
+    pub fn record_mouse_scroll_at(
+        &mut self,
+        x: i32,
+        y: i32,
+        delta_x: i32,
+        delta_y: i32,
+        captured_at_ms: u64,
+    ) -> Result<(), RecorderError> {
+        self.record_mouse_scroll_at_maybe_target(x, y, delta_x, delta_y, captured_at_ms, None)
+    }
+
+    fn record_mouse_scroll_at_maybe_target(
+        &mut self,
+        x: i32,
+        y: i32,
+        delta_x: i32,
+        delta_y: i32,
+        captured_at_ms: u64,
+        target_window: Option<TargetWindow>,
+    ) -> Result<(), RecorderError> {
+        let Some(session) = self.active_session.as_mut() else {
+            return Err(RecorderError::NotRecording);
+        };
+        if delta_x == 0 && delta_y == 0 {
+            return Ok(());
+        }
+        let mut mouse_scrolls = session
+            .mouse_scrolls
+            .lock()
+            .map_err(|_| RecorderError::CaptureUnavailable)?;
+        mouse_scrolls.push(RecordedMouseScroll {
+            x,
+            y,
+            delta_x,
+            delta_y,
+            captured_at_ms,
+            target_window,
+        });
+        Ok(())
+    }
+
+    pub fn record_mouse_drag_at(
+        &mut self,
+        start_x: i32,
+        start_y: i32,
+        end_x: i32,
+        end_y: i32,
+        button: RecordedMouseButton,
+        started_at_ms: u64,
+        captured_at_ms: u64,
+    ) -> Result<(), RecorderError> {
+        self.record_mouse_drag_at_maybe_target(
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            button,
+            started_at_ms,
+            captured_at_ms,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_mouse_drag_at_maybe_target(
+        &mut self,
+        start_x: i32,
+        start_y: i32,
+        end_x: i32,
+        end_y: i32,
+        button: RecordedMouseButton,
+        started_at_ms: u64,
+        captured_at_ms: u64,
+        target_window: Option<TargetWindow>,
+    ) -> Result<(), RecorderError> {
+        let Some(session) = self.active_session.as_mut() else {
+            return Err(RecorderError::NotRecording);
+        };
+        let mut mouse_drags = session
+            .mouse_drags
+            .lock()
+            .map_err(|_| RecorderError::CaptureUnavailable)?;
+        mouse_drags.push(RecordedMouseDrag {
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            button,
+            started_at_ms,
+            captured_at_ms,
+            target_window,
+        });
+        Ok(())
+    }
+
     pub fn record_text_input_at(
         &mut self,
         text: &str,
@@ -243,6 +379,30 @@ impl RecorderState {
             .map_err(|_| RecorderError::CaptureUnavailable)?;
         keyboard_inputs.push(RecordedKeyboardInput::Text {
             text: text.to_string(),
+            captured_at_ms,
+            target_window: None,
+        });
+        Ok(())
+    }
+
+    pub fn record_key_press_at(
+        &mut self,
+        key: &str,
+        captured_at_ms: u64,
+    ) -> Result<(), RecorderError> {
+        let Some(session) = self.active_session.as_mut() else {
+            return Err(RecorderError::NotRecording);
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            return Ok(());
+        }
+        let mut keyboard_inputs = session
+            .keyboard_inputs
+            .lock()
+            .map_err(|_| RecorderError::CaptureUnavailable)?;
+        keyboard_inputs.push(RecordedKeyboardInput::Key {
+            key: key.to_string(),
             captured_at_ms,
             target_window: None,
         });
@@ -279,8 +439,12 @@ impl RecorderState {
         if session.mouse_capture.is_some() {
             return Ok(());
         }
-        let mouse_capture = mouse::start_click_capture(Arc::clone(&session.mouse_clicks))
-            .map_err(|_| RecorderError::CaptureUnavailable)?;
+        let mouse_capture = mouse::start_mouse_capture(
+            Arc::clone(&session.mouse_clicks),
+            Arc::clone(&session.mouse_drags),
+            Arc::clone(&session.mouse_scrolls),
+        )
+        .map_err(|_| RecorderError::CaptureUnavailable)?;
         session.mouse_capture = Some(mouse_capture);
         Ok(())
     }
@@ -330,6 +494,31 @@ impl RecorderState {
             })
             .cloned()
             .collect::<Vec<_>>();
+        let mouse_drags = session
+            .mouse_drags
+            .lock()
+            .map_err(|_| RecorderError::CaptureUnavailable)?
+            .iter()
+            .filter(|drag| {
+                !excluded_regions.iter().any(|region| {
+                    region.contains(drag.start_x, drag.start_y)
+                        || region.contains(drag.end_x, drag.end_y)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mouse_scrolls = session
+            .mouse_scrolls
+            .lock()
+            .map_err(|_| RecorderError::CaptureUnavailable)?
+            .iter()
+            .filter(|scroll| {
+                !excluded_regions
+                    .iter()
+                    .any(|region| region.contains(scroll.x, scroll.y))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         let keyboard_inputs = session
             .keyboard_inputs
             .lock()
@@ -340,16 +529,20 @@ impl RecorderState {
             session.started_at_ms,
             session.target_window,
             &mouse_clicks,
+            &mouse_drags,
+            &mouse_scrolls,
             &keyboard_inputs,
         );
-        let message = if mouse_clicks.is_empty() && keyboard_inputs.is_empty() {
+        let has_mouse_input =
+            !mouse_clicks.is_empty() || !mouse_drags.is_empty() || !mouse_scrolls.is_empty();
+        let message = if !has_mouse_input && keyboard_inputs.is_empty() {
             "已停止录制会话；生成的是安全占位流程，尚未捕获真实输入。"
         } else if keyboard_inputs.is_empty() {
-            "已停止录制会话；已捕获鼠标点击步骤，本次未捕获键盘输入。"
-        } else if mouse_clicks.is_empty() {
+            "已停止录制会话；已捕获鼠标步骤，本次未捕获键盘输入。"
+        } else if !has_mouse_input {
             "已停止录制会话；已捕获键盘输入和热键步骤。"
         } else {
-            "已停止录制会话；已捕获鼠标点击、键盘输入和热键步骤。"
+            "已停止录制会话；已捕获鼠标、键盘输入和热键步骤。"
         };
 
         Ok(RecordingStopPayload {
@@ -368,11 +561,20 @@ fn recorded_flow(
     started_at_ms: u64,
     target_window: TargetWindow,
     mouse_clicks: &[RecordedMouseClick],
+    mouse_drags: &[RecordedMouseDrag],
+    mouse_scrolls: &[RecordedMouseScroll],
     keyboard_inputs: &[RecordedKeyboardInput],
 ) -> Flow {
     let target_window =
-        first_recorded_target_window(mouse_clicks, keyboard_inputs).unwrap_or(target_window);
-    let steps = recorded_steps(started_at_ms, mouse_clicks, keyboard_inputs);
+        first_recorded_target_window(mouse_clicks, mouse_drags, mouse_scrolls, keyboard_inputs)
+            .unwrap_or(target_window);
+    let steps = recorded_steps(
+        started_at_ms,
+        mouse_clicks,
+        mouse_drags,
+        mouse_scrolls,
+        keyboard_inputs,
+    );
     Flow {
         version: 1,
         name: format!("recording-{started_at}"),
@@ -392,6 +594,8 @@ fn recorded_flow(
 
 fn first_recorded_target_window(
     mouse_clicks: &[RecordedMouseClick],
+    mouse_drags: &[RecordedMouseDrag],
+    mouse_scrolls: &[RecordedMouseScroll],
     keyboard_inputs: &[RecordedKeyboardInput],
 ) -> Option<TargetWindow> {
     let mut targets = mouse_clicks
@@ -404,6 +608,19 @@ fn first_recorded_target_window(
         })
         .collect::<Vec<_>>();
 
+    targets.extend(mouse_drags.iter().filter_map(|drag| {
+        drag.target_window
+            .as_ref()
+            .map(|target_window| (drag.started_at_ms, target_window))
+    }));
+
+    targets.extend(mouse_scrolls.iter().filter_map(|scroll| {
+        scroll
+            .target_window
+            .as_ref()
+            .map(|target_window| (scroll.captured_at_ms, target_window))
+    }));
+
     targets.extend(keyboard_inputs.iter().filter_map(|input| {
         match input {
             RecordedKeyboardInput::Text {
@@ -412,6 +629,11 @@ fn first_recorded_target_window(
                 ..
             }
             | RecordedKeyboardInput::Hotkey {
+                captured_at_ms,
+                target_window,
+                ..
+            }
+            | RecordedKeyboardInput::Key {
                 captured_at_ms,
                 target_window,
                 ..
@@ -442,6 +664,8 @@ fn safe_placeholder_steps() -> Vec<FlowStep> {
 fn recorded_steps(
     started_at_ms: u64,
     mouse_clicks: &[RecordedMouseClick],
+    mouse_drags: &[RecordedMouseDrag],
+    mouse_scrolls: &[RecordedMouseScroll],
     keyboard_inputs: &[RecordedKeyboardInput],
 ) -> Vec<FlowStep> {
     let mut actions = mouse_clicks
@@ -449,6 +673,15 @@ fn recorded_steps(
         .cloned()
         .map(RecordedAction::MouseClick)
         .collect::<Vec<_>>();
+
+    actions.extend(mouse_drags.iter().cloned().map(RecordedAction::MouseDrag));
+
+    actions.extend(
+        mouse_scrolls
+            .iter()
+            .cloned()
+            .map(RecordedAction::MouseScroll),
+    );
 
     actions.extend(keyboard_inputs.iter().cloned().map(|input| match input {
         RecordedKeyboardInput::Text {
@@ -469,6 +702,15 @@ fn recorded_steps(
             captured_at_ms,
             target_window,
         },
+        RecordedKeyboardInput::Key {
+            key,
+            captured_at_ms,
+            target_window,
+        } => RecordedAction::Key {
+            key,
+            captured_at_ms,
+            target_window,
+        },
     }));
     actions.sort_by_key(RecordedAction::captured_at_ms);
 
@@ -480,6 +722,32 @@ fn recorded_steps(
         match &actions[action_index] {
             RecordedAction::MouseClick(click) => {
                 let delay_ms = click.captured_at_ms.saturating_sub(previous_at_ms);
+                if let Some(next_click) =
+                    actions
+                        .get(action_index + 1)
+                        .and_then(|action| match action {
+                            RecordedAction::MouseClick(next_click)
+                                if is_double_click_pair(click, next_click) =>
+                            {
+                                Some(next_click)
+                            }
+                            _ => None,
+                        })
+                {
+                    previous_at_ms = next_click.captured_at_ms;
+                    steps.push(FlowStep::Click {
+                        id: (steps.len() + 1) as u32,
+                        action: "双击".to_string(),
+                        target: format!("({}, {}) [屏幕绝对]", click.x, click.y),
+                        x: click.x,
+                        y: click.y,
+                        delay_ms,
+                        note: "录制捕获：鼠标双击".to_string(),
+                    });
+                    action_index += 2;
+                    continue;
+                }
+
                 previous_at_ms = click.captured_at_ms;
                 steps.push(FlowStep::Click {
                     id: (steps.len() + 1) as u32,
@@ -489,6 +757,39 @@ fn recorded_steps(
                     y: click.y,
                     delay_ms,
                     note: "录制捕获：鼠标点击".to_string(),
+                });
+                action_index += 1;
+            }
+            RecordedAction::MouseScroll(scroll) => {
+                let delay_ms = scroll.captured_at_ms.saturating_sub(previous_at_ms);
+                previous_at_ms = scroll.captured_at_ms;
+                steps.push(FlowStep::Scroll {
+                    id: (steps.len() + 1) as u32,
+                    action: "滚动".to_string(),
+                    delta_x: scroll.delta_x,
+                    delta_y: scroll.delta_y,
+                    delay_ms,
+                    note: "录制捕获：鼠标滚轮".to_string(),
+                });
+                action_index += 1;
+            }
+            RecordedAction::MouseDrag(drag) => {
+                let delay_ms = drag.started_at_ms.saturating_sub(previous_at_ms);
+                previous_at_ms = drag.captured_at_ms;
+                steps.push(FlowStep::Drag {
+                    id: (steps.len() + 1) as u32,
+                    action: mouse_drag_action(drag.button).to_string(),
+                    target: format!(
+                        "({}, {}) -> ({}, {}) [屏幕绝对]",
+                        drag.start_x, drag.start_y, drag.end_x, drag.end_y
+                    ),
+                    start_x: drag.start_x,
+                    start_y: drag.start_y,
+                    end_x: drag.end_x,
+                    end_y: drag.end_y,
+                    duration_ms: drag.captured_at_ms.saturating_sub(drag.started_at_ms),
+                    delay_ms,
+                    note: "录制捕获：鼠标拖拽".to_string(),
                 });
                 action_index += 1;
             }
@@ -534,16 +835,51 @@ fn recorded_steps(
                 });
                 action_index += 1;
             }
+            RecordedAction::Key {
+                key,
+                captured_at_ms,
+                ..
+            } => {
+                let delay_ms = captured_at_ms.saturating_sub(previous_at_ms);
+                previous_at_ms = *captured_at_ms;
+                steps.push(FlowStep::Key {
+                    id: (steps.len() + 1) as u32,
+                    action: "按键".to_string(),
+                    key: key.clone(),
+                    delay_ms,
+                    note: "录制捕获：键盘按键".to_string(),
+                });
+                action_index += 1;
+            }
         }
     }
 
     steps
 }
 
+fn is_double_click_pair(first: &RecordedMouseClick, second: &RecordedMouseClick) -> bool {
+    const DOUBLE_CLICK_MAX_INTERVAL_MS: u64 = 500;
+    const DOUBLE_CLICK_MAX_DISTANCE: i32 = 4;
+
+    first.button == RecordedMouseButton::Left
+        && second.button == RecordedMouseButton::Left
+        && second.captured_at_ms.saturating_sub(first.captured_at_ms)
+            <= DOUBLE_CLICK_MAX_INTERVAL_MS
+        && (second.x - first.x).abs() <= DOUBLE_CLICK_MAX_DISTANCE
+        && (second.y - first.y).abs() <= DOUBLE_CLICK_MAX_DISTANCE
+}
+
 fn mouse_button_action(button: RecordedMouseButton) -> &'static str {
     match button {
         RecordedMouseButton::Left => "左键单击",
         RecordedMouseButton::Right => "右键单击",
+    }
+}
+
+fn mouse_drag_action(button: RecordedMouseButton) -> &'static str {
+    match button {
+        RecordedMouseButton::Left => "左键拖拽",
+        RecordedMouseButton::Right => "右键拖拽",
     }
 }
 

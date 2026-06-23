@@ -50,6 +50,24 @@ test("records playback lifecycle entries newest first with safety severity", () 
   assert.equal(stopped[1].time, 1_000);
 });
 
+test("labels infinite loop playback explicitly in the run log", () => {
+  const entries = appendPlaybackStartLog(
+    [],
+    {
+      runId: 99,
+      status: "playing",
+      label: "回放中",
+      flowName: "Loop Forever",
+      loopCount: 0,
+      speedMultiplier: 1,
+      message: "开始回放 Loop Forever。",
+    },
+    1_000,
+  );
+
+  assert.match(entries[0].detail, /^无限循环 · 1x · /);
+});
+
 test("keeps only the newest run log entries", () => {
   let entries: RunLogEntry[] = [];
   for (let index = 1; index <= 10; index += 1) {

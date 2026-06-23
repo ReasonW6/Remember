@@ -24,6 +24,11 @@ interface ControlWindowProps {
   recordingSafetyWarning: string;
   onConfirmRecordingStart: () => void;
   onCancelRecordingStart: () => void;
+  infiniteLoopWarningVisible: boolean;
+  infiniteLoopConfirmed: boolean;
+  infiniteLoopWarning: string;
+  onConfirmInfiniteLoop: () => void;
+  onCancelInfiniteLoop: () => void;
 }
 
 export function ControlWindow({
@@ -43,6 +48,11 @@ export function ControlWindow({
   recordingSafetyWarning,
   onConfirmRecordingStart,
   onCancelRecordingStart,
+  infiniteLoopWarningVisible,
+  infiniteLoopConfirmed,
+  infiniteLoopWarning,
+  onConfirmInfiniteLoop,
+  onCancelInfiniteLoop,
 }: ControlWindowProps) {
   const currentFlowSummary = {
     fileName: selectedFileName,
@@ -65,6 +75,7 @@ export function ControlWindow({
             <span>当前流程</span>
             <select
               aria-label="当前流程"
+              disabled={recordingWarningVisible || infiniteLoopWarningVisible}
               value={selectedFileName}
               onChange={(event) => onFlowSelect(event.target.value)}
             >
@@ -78,7 +89,11 @@ export function ControlWindow({
 
           <button
             className="action-button record"
-            disabled={status === "recording"}
+            disabled={
+              status === "recording" ||
+              recordingWarningVisible ||
+              infiniteLoopWarningVisible
+            }
             onClick={() => onStatusChange("recording")}
           >
             <Circle size={17} fill="currentColor" />
@@ -86,7 +101,12 @@ export function ControlWindow({
           </button>
           <button
             className="action-button replay"
-            disabled={status === "recording" || status === "playing"}
+            disabled={
+              recordingWarningVisible ||
+              infiniteLoopWarningVisible ||
+              status === "recording" ||
+              status === "playing"
+            }
             onClick={() => onStatusChange("playing")}
           >
             <Play size={18} fill="currentColor" />
@@ -94,7 +114,12 @@ export function ControlWindow({
           </button>
           <button
             className="action-button stop"
-            disabled={status === "ready" || status === "stopped"}
+            disabled={
+              recordingWarningVisible ||
+              infiniteLoopWarningVisible ||
+              status === "ready" ||
+              status === "stopped"
+            }
             onClick={() => onStatusChange("stopped")}
           >
             <Square size={15} fill="currentColor" />
@@ -125,12 +150,14 @@ export function ControlWindow({
               <option value={1}>1</option>
               <option value={3}>3</option>
               <option value={10}>10</option>
+              <option value={0}>∞</option>
             </select>
           </label>
 
           <button
             className="icon-button settings-button"
             aria-label="设置"
+            disabled={recordingWarningVisible || infiniteLoopWarningVisible}
             onClick={onOpenWorkbench}
           >
             <Settings size={18} />
@@ -143,7 +170,9 @@ export function ControlWindow({
             {statusLabel}
           </span>
           <span className="hotkey-hint">
-            紧急停止: Ctrl + Alt + S
+            {loopCount === 0 && infiniteLoopConfirmed
+              ? "无限循环已确认"
+              : "紧急停止: Ctrl + Alt + S"}
             <Keyboard size={14} />
           </span>
         </footer>
@@ -160,6 +189,21 @@ export function ControlWindow({
                 onClick={onConfirmRecordingStart}
               >
                 继续录制
+              </button>
+            </div>
+          </div>
+        ) : infiniteLoopWarningVisible ? (
+          <div className="recording-warning-popover infinite-loop-popover" role="alert">
+            <span>{infiniteLoopWarning}</span>
+            <div>
+              <button className="toolbar-button slim" onClick={onCancelInfiniteLoop}>
+                取消
+              </button>
+              <button
+                className="toolbar-button primary slim"
+                onClick={onConfirmInfiniteLoop}
+              >
+                确认无限循环
               </button>
             </div>
           </div>

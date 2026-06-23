@@ -15,6 +15,23 @@ pub trait PlaybackInput: Send + Sync + 'static {
 
     fn press_hotkey(&self, keys: &[String]) -> Result<(), String>;
 
+    fn press_key(&self, key: &str) -> Result<(), String> {
+        self.press_hotkey(&[key.to_string()])
+    }
+
+    fn drag(
+        &self,
+        button: PlaybackMouseButton,
+        start_x: i32,
+        start_y: i32,
+        end_x: i32,
+        end_y: i32,
+        duration_ms: u64,
+    ) -> Result<(), String> {
+        let _ = (button, start_x, start_y, end_x, end_y, duration_ms);
+        Err("drag playback is unavailable for this input backend".to_string())
+    }
+
     fn scroll(&self, delta_x: i32, delta_y: i32) -> Result<(), String>;
 }
 
@@ -38,6 +55,22 @@ impl PlaybackInput for SystemPlaybackInput {
         platform::press_hotkey(keys)
     }
 
+    fn press_key(&self, key: &str) -> Result<(), String> {
+        platform::press_key(key)
+    }
+
+    fn drag(
+        &self,
+        button: PlaybackMouseButton,
+        start_x: i32,
+        start_y: i32,
+        end_x: i32,
+        end_y: i32,
+        duration_ms: u64,
+    ) -> Result<(), String> {
+        platform::drag(button, start_x, start_y, end_x, end_y, duration_ms)
+    }
+
     fn scroll(&self, delta_x: i32, delta_y: i32) -> Result<(), String> {
         platform::scroll(delta_x, delta_y)
     }
@@ -47,6 +80,7 @@ impl PlaybackInput for SystemPlaybackInput {
 mod platform {
     use super::PlaybackMouseButton;
     use std::mem::size_of;
+    use std::{thread, time::Duration};
 
     const INPUT_KEYBOARD: u32 = 1;
     const KEYEVENTF_KEYUP: u32 = 0x0002;
@@ -117,6 +151,49 @@ mod platform {
         Ok(())
     }
 
+    pub fn drag(
+        button: PlaybackMouseButton,
+        start_x: i32,
+        start_y: i32,
+        end_x: i32,
+        end_y: i32,
+        duration_ms: u64,
+    ) -> Result<(), String> {
+        let positioned = unsafe { SetCursorPos(start_x, start_y) };
+        if positioned == 0 {
+            return Err(format!("failed to move cursor to ({start_x}, {start_y})"));
+        }
+
+        let (down, up) = match button {
+            PlaybackMouseButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+            PlaybackMouseButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+        };
+
+        unsafe {
+            mouse_event(down, 0, 0, 0, 0);
+        }
+
+        let step_count = 12u64;
+        let sleep_ms = duration_ms / step_count;
+        for index in 1..=step_count {
+            let progress = index as f64 / step_count as f64;
+            let x = start_x + ((end_x - start_x) as f64 * progress).round() as i32;
+            let y = start_y + ((end_y - start_y) as f64 * progress).round() as i32;
+            unsafe {
+                SetCursorPos(x, y);
+            }
+            if sleep_ms > 0 {
+                thread::sleep(Duration::from_millis(sleep_ms));
+            }
+        }
+
+        unsafe {
+            mouse_event(up, 0, 0, 0, 0);
+        }
+
+        Ok(())
+    }
+
     pub fn type_text(text: &str) -> Result<(), String> {
         let mut inputs = Vec::new();
         for code_unit in text.encode_utf16() {
@@ -152,6 +229,15 @@ mod platform {
         }
 
         send_keyboard_inputs(&inputs, "hotkey")
+    }
+
+    pub fn press_key(key: &str) -> Result<(), String> {
+        let virtual_key = hotkey_virtual_key(key)?;
+        let inputs = [
+            virtual_key_input(virtual_key, 0),
+            virtual_key_input(virtual_key, KEYEVENTF_KEYUP),
+        ];
+        send_keyboard_inputs(&inputs, "key")
     }
 
     pub fn scroll(delta_x: i32, delta_y: i32) -> Result<(), String> {
@@ -288,6 +374,21 @@ mod platform {
 
     pub fn press_hotkey(_keys: &[String]) -> Result<(), String> {
         Err("hotkey playback is only available on Windows".to_string())
+    }
+
+    pub fn press_key(_key: &str) -> Result<(), String> {
+        Err("key playback is only available on Windows".to_string())
+    }
+
+    pub fn drag(
+        _button: PlaybackMouseButton,
+        _start_x: i32,
+        _start_y: i32,
+        _end_x: i32,
+        _end_y: i32,
+        _duration_ms: u64,
+    ) -> Result<(), String> {
+        Err("drag playback is only available on Windows".to_string())
     }
 
     pub fn scroll(_delta_x: i32, _delta_y: i32) -> Result<(), String> {

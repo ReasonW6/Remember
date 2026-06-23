@@ -31,11 +31,15 @@ import { ControlWindow } from "./components/ControlWindow";
 import { WorkbenchWindow } from "./components/WorkbenchWindow";
 import {
   deleteStep,
+  insertHotkeyStepAfter,
+  insertKeyStepAfter,
+  insertTypeStepAfter,
   insertWaitStepAfter,
   selectExistingStepId,
   updateStepClickCoordinates,
   updateStepDelayMs,
   updateStepHotkeyText,
+  updateStepKeyText,
   updateStepText,
   updateTargetWindowMatched,
 } from "./flowEditing";
@@ -74,6 +78,9 @@ function parseSpeedMultiplier(speed: string) {
   return Number.isFinite(multiplier) && multiplier > 0 ? multiplier : 1;
 }
 
+const INFINITE_LOOP_WARNING =
+  "无限循环会一直重复执行，必须确认你知道停止按钮和 Ctrl + Alt + S 急停热键。";
+
 export function App() {
   const [route, setRoute] = useState(getRoute);
   const [savedFlow, setSavedFlow] = useState<SavedFlow>(sampleSavedFlow);
@@ -86,6 +93,9 @@ export function App() {
   const [selectedStepId, setSelectedStepId] = useState<number | null>(null);
   const [runLogs, setRunLogs] = useState<RunLogEntry[]>([]);
   const [recordingWarningVisible, setRecordingWarningVisible] = useState(false);
+  const [infiniteLoopWarningVisible, setInfiniteLoopWarningVisible] =
+    useState(false);
+  const [infiniteLoopConfirmed, setInfiniteLoopConfirmed] = useState(false);
   const finishedPlaybackRunIds = useRef<Set<number>>(new Set());
   const activePlaybackRunId = useRef<number | null>(null);
   const activePlaybackFlowName = useRef<string>("");
@@ -102,12 +112,15 @@ export function App() {
     setSaveStatus("idle");
     setSaveMessage(payload.message);
     setRecordingWarningVisible(false);
+    setInfiniteLoopWarningVisible(false);
+    setInfiniteLoopConfirmed(false);
   }
 
   function applyPlaybackStart(payload: PlaybackStartPayload) {
     if (finishedPlaybackRunIds.current.has(payload.runId)) return;
     activePlaybackRunId.current = payload.runId;
     activePlaybackFlowName.current = payload.flowName;
+    setInfiniteLoopWarningVisible(false);
     setRunLogs((current) => appendPlaybackStartLog(current, payload));
     setStatus(payload.status);
     setSaveStatus("idle");
@@ -123,6 +136,7 @@ export function App() {
         activePlaybackRunId.current,
       ),
     );
+    setInfiniteLoopConfirmed(false);
     setStatus(payload.status);
     setSaveStatus("idle");
     setSaveMessage(payload.message);
@@ -132,6 +146,7 @@ export function App() {
     finishedPlaybackRunIds.current.add(payload.runId);
     activePlaybackRunId.current = null;
     activePlaybackFlowName.current = "";
+    setInfiniteLoopConfirmed(false);
     setRunLogs((current) => appendPlaybackFinishedLog(current, payload));
     setStatus(payload.status);
     setSaveStatus("idle");
@@ -275,11 +290,19 @@ export function App() {
     }
 
     if (nextStatus === "playing") {
+      if (loopCount === 0 && !infiniteLoopConfirmed) {
+        setInfiniteLoopWarningVisible(true);
+        setSaveStatus("idle");
+        setSaveMessage(INFINITE_LOOP_WARNING);
+        return;
+      }
+
       try {
         const payload = await startPlayback(
           flow,
           parseSpeedMultiplier(speed),
           loopCount,
+          loopCount === 0 && infiniteLoopConfirmed,
         );
         applyPlaybackStart(payload);
       } catch (error) {
@@ -319,6 +342,41 @@ export function App() {
     setRecordingWarningVisible(false);
     setSaveStatus("idle");
     setSaveMessage("已取消录制");
+  }
+
+  function handleLoopCountChange(value: number) {
+    const nextLoopCount = Number.isFinite(value)
+      ? Math.max(0, Math.floor(value))
+      : 1;
+
+    if (nextLoopCount === 0) {
+      setLoopCount(0);
+      setInfiniteLoopConfirmed(false);
+      setInfiniteLoopWarningVisible(true);
+      setSaveStatus("idle");
+      setSaveMessage(INFINITE_LOOP_WARNING);
+      return;
+    }
+
+    setLoopCount(nextLoopCount);
+    setInfiniteLoopConfirmed(false);
+    setInfiniteLoopWarningVisible(false);
+  }
+
+  function confirmInfiniteLoop() {
+    setLoopCount(0);
+    setInfiniteLoopConfirmed(true);
+    setInfiniteLoopWarningVisible(false);
+    setSaveStatus("idle");
+    setSaveMessage("已确认无限循环；运行后请使用停止或 Ctrl + Alt + S 结束。");
+  }
+
+  function cancelInfiniteLoop() {
+    setLoopCount(1);
+    setInfiniteLoopConfirmed(false);
+    setInfiniteLoopWarningVisible(false);
+    setSaveStatus("idle");
+    setSaveMessage("已取消无限循环");
   }
 
   async function refreshFlowSummaries() {
@@ -408,6 +466,16 @@ export function App() {
     setSaveMessage("有未保存更改");
   }
 
+  function handleStepKeyChange(stepId: number, keyText: string) {
+    setSavedFlow((current) => ({
+      ...current,
+      flow: updateStepKeyText(current.flow, stepId, keyText),
+    }));
+    setSelectedStepId(stepId);
+    setSaveStatus("idle");
+    setSaveMessage("有未保存更改");
+  }
+
   function handleTargetWindowMatchedChange(matched: boolean) {
     setSavedFlow((current) => ({
       ...current,
@@ -443,12 +511,53 @@ export function App() {
     setSaveMessage("有未保存更改");
   }
 
+  function handleInsertTypeStep() {
+    setSavedFlow((current) => {
+      const result = insertTypeStepAfter(current.flow, selectedStepId);
+      setSelectedStepId(result.selectedStepId);
+      return {
+        ...current,
+        flow: result.flow,
+      };
+    });
+    setSaveStatus("idle");
+    setSaveMessage("有未保存更改");
+  }
+
+  function handleInsertHotkeyStep() {
+    setSavedFlow((current) => {
+      const result = insertHotkeyStepAfter(current.flow, selectedStepId);
+      setSelectedStepId(result.selectedStepId);
+      return {
+        ...current,
+        flow: result.flow,
+      };
+    });
+    setSaveStatus("idle");
+    setSaveMessage("有未保存更改");
+  }
+
+  function handleInsertKeyStep() {
+    setSavedFlow((current) => {
+      const result = insertKeyStepAfter(current.flow, selectedStepId);
+      setSelectedStepId(result.selectedStepId);
+      return {
+        ...current,
+        flow: result.flow,
+      };
+    });
+    setSaveStatus("idle");
+    setSaveMessage("有未保存更改");
+  }
+
   async function handleLoadFlow(fileName: string) {
     setSaveStatus("idle");
     setSaveMessage("正在加载本地流程");
     try {
       const nextSavedFlow = await loadFlow(fileName);
       setSavedFlow(nextSavedFlow);
+      setInfiniteLoopWarningVisible(false);
+      setInfiniteLoopConfirmed(false);
       setSaveStatus(nextSavedFlow.savedAt ? "saved" : "idle");
       setSaveMessage(`已加载: ${formatSavedAt(nextSavedFlow.savedAt)}`);
     } catch (error) {
@@ -485,7 +594,7 @@ export function App() {
     statusLabel,
     loopCount,
     speed,
-    onLoopCountChange: setLoopCount,
+    onLoopCountChange: handleLoopCountChange,
     onSpeedChange: setSpeed,
     onStatusChange: updateStatus,
     onFlowSelect: handleLoadFlow,
@@ -495,9 +604,13 @@ export function App() {
     onStepClickCoordinatesChange: handleStepClickCoordinatesChange,
     onStepTextChange: handleStepTextChange,
     onStepHotkeyChange: handleStepHotkeyChange,
+    onStepKeyChange: handleStepKeyChange,
     onTargetWindowMatchedChange: handleTargetWindowMatchedChange,
     onStepDelete: handleStepDelete,
     onInsertWaitStep: handleInsertWaitStep,
+    onInsertTypeStep: handleInsertTypeStep,
+    onInsertHotkeyStep: handleInsertHotkeyStep,
+    onInsertKeyStep: handleInsertKeyStep,
     onSaveFlow: handleSaveFlow,
     onSaveFlowAs: handleSaveFlowAs,
     onOpenWorkbench: openWorkbench,
@@ -506,6 +619,11 @@ export function App() {
     recordingSafetyWarning: RECORDING_SAFETY_WARNING,
     onConfirmRecordingStart: confirmRecordingStart,
     onCancelRecordingStart: cancelRecordingStart,
+    infiniteLoopWarningVisible,
+    infiniteLoopConfirmed,
+    infiniteLoopWarning: INFINITE_LOOP_WARNING,
+    onConfirmInfiniteLoop: confirmInfiniteLoop,
+    onCancelInfiniteLoop: cancelInfiniteLoop,
   };
 
   return route === "workbench" ? (

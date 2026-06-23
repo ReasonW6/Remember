@@ -36,12 +36,14 @@ export function appendPlaybackStartLog(
   payload: PlaybackStartPayload,
   time = Date.now(),
 ) {
+  const loopLabel =
+    payload.loopCount === 0 ? "无限循环" : `${payload.loopCount} 次`;
   return appendRunLog(entries, {
     id: `playback-start-${payload.runId}`,
     time,
     level: "info",
     title: "开始回放",
-    detail: `${payload.loopCount} 次 · ${payload.speedMultiplier}x · ${payload.message}`,
+    detail: `${loopLabel} · ${payload.speedMultiplier}x · ${payload.message}`,
     flowName: payload.flowName,
     runId: payload.runId,
   });

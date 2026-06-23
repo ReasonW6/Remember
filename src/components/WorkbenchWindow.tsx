@@ -1,7 +1,6 @@
 import {
   AlertCircle,
   Archive,
-  ChevronDown,
   Clock3,
   Crosshair,
   FileClock,
@@ -44,13 +43,22 @@ interface WorkbenchWindowProps {
   onStepClickCoordinatesChange: (stepId: number, x: number, y: number) => void;
   onStepTextChange: (stepId: number, text: string) => void;
   onStepHotkeyChange: (stepId: number, hotkeyText: string) => void;
+  onStepKeyChange: (stepId: number, keyText: string) => void;
   onTargetWindowMatchedChange: (matched: boolean) => void;
   onStepDelete: (stepId: number) => void;
   onInsertWaitStep: () => void;
+  onInsertTypeStep: () => void;
+  onInsertHotkeyStep: () => void;
+  onInsertKeyStep: () => void;
   onSaveFlow: () => void;
   onSaveFlowAs: () => void;
   onOpenWorkbench: () => void;
   onEmergencyStop: () => void;
+  infiniteLoopWarningVisible: boolean;
+  infiniteLoopConfirmed: boolean;
+  infiniteLoopWarning: string;
+  onConfirmInfiniteLoop: () => void;
+  onCancelInfiniteLoop: () => void;
 }
 
 const sidebarItems = [
@@ -67,7 +75,9 @@ const sidebarItems = [
 
 function stepLabel(step: FlowStep) {
   if (step.type === "click") return "Click";
+  if (step.type === "drag") return "Drag";
   if (step.type === "type") return "Type";
+  if (step.type === "key") return "Key";
   if (step.type === "wait") return "Wait";
   if (step.type === "scroll") return "Scroll";
   return "Hotkey";
@@ -75,7 +85,9 @@ function stepLabel(step: FlowStep) {
 
 function stepValue(step: FlowStep) {
   if (step.type === "click") return step.target;
+  if (step.type === "drag") return step.target;
   if (step.type === "type") return step.text;
+  if (step.type === "key") return step.key;
   if (step.type === "wait") return `${(step.durationMs / 1000).toFixed(1)}s`;
   if (step.type === "scroll") return `X ${step.deltaX}, Y ${step.deltaY}`;
   return step.keys.join(" + ");
@@ -83,7 +95,9 @@ function stepValue(step: FlowStep) {
 
 function stepMode(step: FlowStep) {
   if (step.type === "click") return "屏幕坐标";
+  if (step.type === "drag") return "拖拽轨迹";
   if (step.type === "type") return "文本输入";
+  if (step.type === "key") return "普通按键";
   if (step.type === "wait") return "等待时长";
   if (step.type === "scroll") return "滚轮增量";
   return "快捷键组合";
@@ -91,6 +105,7 @@ function stepMode(step: FlowStep) {
 
 function StepIcon({ step }: { step: FlowStep }) {
   if (step.type === "type") return <span className="step-letter">T</span>;
+  if (step.type === "key") return <Keyboard size={16} />;
   if (step.type === "wait") return <Clock3 size={16} />;
   if (step.type === "hotkey") return <Keyboard size={16} />;
   if (step.type === "scroll") return <SlidersHorizontal size={16} />;
@@ -107,6 +122,27 @@ function formatRunLogTime(time: number) {
 
 function formatDelaySeconds(delayMs: number) {
   return (delayMs / 1000).toFixed(2).replace(/\.?0+$/, "");
+}
+
+function stepDurationMs(step: FlowStep) {
+  if (step.type === "drag") return step.delayMs + step.durationMs;
+  return step.type === "wait" ? step.durationMs : step.delayMs;
+}
+
+function formatEstimatedDuration(flow: Flow, speed: string, loopCount: number) {
+  if (loopCount === 0) return "直到停止";
+
+  const multiplier = Number(speed.replace(/x$/i, ""));
+  const safeMultiplier = Number.isFinite(multiplier) && multiplier > 0 ? multiplier : 1;
+  const safeLoopCount = Number.isFinite(loopCount) && loopCount > 0 ? loopCount : 1;
+  const totalMs =
+    flow.steps.reduce((total, step) => total + stepDurationMs(step), 0) *
+    safeLoopCount /
+    safeMultiplier;
+  const totalSeconds = Math.ceil(totalMs / 1000);
+  const minutes = Math.floor(totalSeconds / 60).toString().padStart(2, "0");
+  const seconds = (totalSeconds % 60).toString().padStart(2, "0");
+  return `${minutes}:${seconds}`;
 }
 
 export function WorkbenchWindow({
@@ -130,12 +166,21 @@ export function WorkbenchWindow({
   onStepClickCoordinatesChange,
   onStepTextChange,
   onStepHotkeyChange,
+  onStepKeyChange,
   onTargetWindowMatchedChange,
   onStepDelete,
   onInsertWaitStep,
+  onInsertTypeStep,
+  onInsertHotkeyStep,
+  onInsertKeyStep,
   onSaveFlow,
   onSaveFlowAs,
   onEmergencyStop,
+  infiniteLoopWarningVisible,
+  infiniteLoopConfirmed,
+  infiniteLoopWarning,
+  onConfirmInfiniteLoop,
+  onCancelInfiniteLoop,
 }: WorkbenchWindowProps) {
   const selectedStep =
     flow.steps.find((step) => step.id === selectedStepId) ?? flow.steps[0];
@@ -156,6 +201,7 @@ export function WorkbenchWindow({
     (flow.targetWindow.matched
       ? "回放前会检查目标进程，避免输入到明显错误的窗口。"
       : "目标窗口尚未确认，点击、文本、热键和滚轮回放会被拒绝。");
+  const estimatedDuration = formatEstimatedDuration(flow, speed, loopCount);
 
   function handleSelectedDelayChange(value: string) {
     if (!selectedStep) return;
@@ -183,7 +229,9 @@ export function WorkbenchWindow({
             {sidebarItems.map((item) => (
               <button
                 className={item.active ? "sidebar-item active" : "sidebar-item"}
+                disabled={!item.active}
                 key={item.label}
+                title={item.active ? undefined : "后续版本"}
               >
                 <item.icon size={18} />
                 <span>{item.label}</span>
@@ -200,7 +248,7 @@ export function WorkbenchWindow({
                 <span className={`save-indicator ${saveStatus}`}>
                   {saveMessage}
                 </span>
-                <button className="ghost-icon" aria-label="重命名">
+                <button className="ghost-icon" aria-label="重命名" disabled title="后续版本">
                   <SquareCode size={15} />
                 </button>
               </div>
@@ -228,8 +276,7 @@ export function WorkbenchWindow({
                   onClick={() => onStatusChange("playing")}
                 >
                   <Play size={16} fill="currentColor" />
-                  运行 F10
-                  <ChevronDown size={15} />
+                  运行
                 </button>
                 <button
                   className="toolbar-button danger"
@@ -239,27 +286,42 @@ export function WorkbenchWindow({
                   <AlertCircle size={16} />
                   紧急停止
                 </button>
-                <button className="ghost-icon" aria-label="更多">
+                <button className="ghost-icon" aria-label="更多" disabled title="后续版本">
                   <MoreHorizontal size={18} />
                 </button>
               </div>
             </div>
 
+            {infiniteLoopWarningVisible ? (
+              <div className="workbench-warning-bar" role="alert">
+                <span>{infiniteLoopWarning}</span>
+                <button className="toolbar-button slim" onClick={onCancelInfiniteLoop}>
+                  取消
+                </button>
+                <button
+                  className="toolbar-button primary slim"
+                  onClick={onConfirmInfiniteLoop}
+                >
+                  确认无限循环
+                </button>
+              </div>
+            ) : null}
+
             <div className="timeline-toolbar">
               <span />
               <div className="zoom-control">
-                <button>−</button>
+                <button disabled title="后续版本">−</button>
                 <span>100%</span>
-                <button>＋</button>
+                <button disabled title="后续版本">＋</button>
               </div>
-              <button className="toolbar-button slim">
+              <button className="toolbar-button slim" disabled title="后续版本">
                 <SlidersHorizontal size={15} />
                 折叠
               </button>
             </div>
 
             <div className="flow-timeline">
-              {flow.steps.slice(0, 7).map((step) => (
+              {flow.steps.map((step) => (
                 <button
                   className={`timeline-node ${step.type} ${
                     step.id === activeSelectedStepId ? "active" : ""
@@ -286,13 +348,27 @@ export function WorkbenchWindow({
               <section className="steps-panel">
                 <div className="tabs-row">
                   <button className="tab active">步骤 ({flow.steps.length})</button>
-                  <button className="tab">参数</button>
-                  <button className="tab">错误处理</button>
-                  <button className="tab">备注</button>
-                  <button className="toolbar-button slim" onClick={onInsertWaitStep}>
-                    <Plus size={15} />
-                    添加等待
-                  </button>
+                  <button className="tab" disabled title="后续版本">参数</button>
+                  <button className="tab" disabled title="后续版本">错误处理</button>
+                  <button className="tab" disabled title="后续版本">备注</button>
+                  <div className="insert-actions">
+                    <button className="toolbar-button slim" onClick={onInsertWaitStep}>
+                      <Plus size={15} />
+                      等待
+                    </button>
+                    <button className="toolbar-button slim" onClick={onInsertTypeStep}>
+                      <Plus size={15} />
+                      文本
+                    </button>
+                    <button className="toolbar-button slim" onClick={onInsertHotkeyStep}>
+                      <Plus size={15} />
+                      快捷键
+                    </button>
+                    <button className="toolbar-button slim" onClick={onInsertKeyStep}>
+                      <Plus size={15} />
+                      按键
+                    </button>
+                  </div>
                   <button
                     className="toolbar-button danger slim"
                     disabled={!selectedStep}
@@ -341,7 +417,7 @@ export function WorkbenchWindow({
               <aside className="inspector">
                 <div className="tabs-row inspector-tabs">
                   <button className="tab active">步骤设置</button>
-                  <button className="tab">流程设置</button>
+                  <button className="tab" disabled title="后续版本">流程设置</button>
                 </div>
 
                 <label className="form-control">
@@ -356,7 +432,7 @@ export function WorkbenchWindow({
 
                 <label className="form-control">
                   <span>步骤类型</span>
-                  <select value={selectedStep?.type ?? ""} onChange={() => undefined}>
+                  <select disabled value={selectedStep?.type ?? ""} onChange={() => undefined}>
                     <option value="">未选择</option>
                     {selectedStep ? (
                       <option value={selectedStep.type}>
@@ -368,7 +444,7 @@ export function WorkbenchWindow({
 
                 <label className="form-control">
                   <span>方式</span>
-                  <select value={selectedStep?.type ?? ""} onChange={() => undefined}>
+                  <select disabled value={selectedStep?.type ?? ""} onChange={() => undefined}>
                     <option value="">未选择</option>
                     {selectedStep ? (
                       <option value={selectedStep.type}>{stepMode(selectedStep)}</option>
@@ -400,7 +476,30 @@ export function WorkbenchWindow({
                         value={selectedStep.y}
                       />
                     </label>
-                    <button className="toolbar-button slim">拾取位置</button>
+                    <button className="toolbar-button slim" disabled title="后续版本">
+                      拾取位置
+                    </button>
+                  </div>
+                ) : null}
+
+                {selectedStep?.type === "drag" ? (
+                  <div className="drag-coordinate-grid">
+                    <label>
+                      起点 X
+                      <input readOnly value={selectedStep.startX} />
+                    </label>
+                    <label>
+                      起点 Y
+                      <input readOnly value={selectedStep.startY} />
+                    </label>
+                    <label>
+                      终点 X
+                      <input readOnly value={selectedStep.endX} />
+                    </label>
+                    <label>
+                      终点 Y
+                      <input readOnly value={selectedStep.endY} />
+                    </label>
                   </div>
                 ) : null}
 
@@ -443,6 +542,19 @@ export function WorkbenchWindow({
                   </label>
                 ) : null}
 
+                {selectedStep?.type === "key" ? (
+                  <label className="form-control">
+                    <span>按键</span>
+                    <input
+                      aria-label="步骤按键"
+                      onChange={(event) =>
+                        onStepKeyChange(selectedStep.id, event.target.value)
+                      }
+                      value={selectedStep.key}
+                    />
+                  </label>
+                ) : null}
+
                 <label className="form-control">
                   <span>备注</span>
                   <input value={selectedStep?.note ?? ""} readOnly />
@@ -451,7 +563,7 @@ export function WorkbenchWindow({
                 <div className="checkbox-group">
                   <strong>安全与控制</strong>
                   <label>
-                    <input type="checkbox" />
+                    <input type="checkbox" disabled />
                     出错时停止
                   </label>
                   <label>
@@ -465,9 +577,9 @@ export function WorkbenchWindow({
                     目标窗口已确认
                   </label>
                   <label>
-                    <input type="checkbox" checked readOnly />
+                    <input type="checkbox" checked disabled readOnly />
                     执行后延迟
-                    <input className="inline-input" value="0.5 秒" readOnly />
+                    <input className="inline-input" value="0.5 秒" disabled readOnly />
                   </label>
                 </div>
 
@@ -495,16 +607,33 @@ export function WorkbenchWindow({
                   </div>
                   <label className="loop-control">
                     循环次数
-                    <input
+                    <select
+                      aria-label="循环次数"
                       value={loopCount}
                       onChange={(event) =>
-                        onLoopCountChange(Number(event.target.value) || 1)
+                        onLoopCountChange(Number(event.target.value))
                       }
-                    />
-                    <span>无限循环</span>
+                    >
+                      <option value={1}>1 次</option>
+                      <option value={3}>3 次</option>
+                      <option value={10}>10 次</option>
+                      <option value={0}>无限循环</option>
+                    </select>
+                    <span
+                      className={
+                        loopCount === 0 && infiniteLoopConfirmed
+                          ? "loop-confirmed"
+                          : "loop-disabled"
+                      }
+                    >
+                      {loopCount === 0 && infiniteLoopConfirmed
+                        ? "已二次确认"
+                        : "无限循环需二次确认"}
+                    </span>
                   </label>
                   <button
                     className="emergency-button"
+                    disabled={status !== "playing"}
                     onClick={onEmergencyStop}
                   >
                     <AlertCircle size={17} />
@@ -542,7 +671,9 @@ export function WorkbenchWindow({
                       确认此窗口为回放目标
                     </label>
                   </div>
-                  <button className="toolbar-button slim">重新捕获</button>
+                  <button className="toolbar-button slim" disabled title="后续版本">
+                    重新捕获
+                  </button>
                 </div>
               </section>
 
@@ -553,7 +684,7 @@ export function WorkbenchWindow({
                 </div>
                 <div className="run-log-list" role="log" aria-live="polite">
                   {runLogs.length ? (
-                    runLogs.slice(0, 3).map((entry) => (
+                    runLogs.map((entry) => (
                       <div className={`run-log-entry ${entry.level}`} key={entry.id}>
                         <span>{formatRunLogTime(entry.time)}</span>
                         <strong>{entry.title}</strong>
@@ -578,7 +709,7 @@ export function WorkbenchWindow({
                 <p>步骤: {flow.steps.length}</p>
                 <p>文件: {selectedFileName}</p>
                 <p>保存: {savedAt ? saveMessage.replace(/^已保存: /, "") : "尚未保存"}</p>
-                <p>预计用时: 00:00:17</p>
+                <p>预计用时: {estimatedDuration}</p>
                 <p>紧急停止: Ctrl + Alt + S</p>
               </section>
             </footer>

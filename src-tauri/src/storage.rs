@@ -80,11 +80,39 @@ pub enum FlowStep {
         delay_ms: u64,
         note: String,
     },
+    #[serde(rename = "drag")]
+    Drag {
+        id: u32,
+        action: String,
+        target: String,
+        #[serde(rename = "startX")]
+        start_x: i32,
+        #[serde(rename = "startY")]
+        start_y: i32,
+        #[serde(rename = "endX")]
+        end_x: i32,
+        #[serde(rename = "endY")]
+        end_y: i32,
+        #[serde(rename = "durationMs")]
+        duration_ms: u64,
+        #[serde(rename = "delayMs")]
+        delay_ms: u64,
+        note: String,
+    },
     #[serde(rename = "type")]
     Type {
         id: u32,
         action: String,
         text: String,
+        #[serde(rename = "delayMs")]
+        delay_ms: u64,
+        note: String,
+    },
+    #[serde(rename = "key")]
+    Key {
+        id: u32,
+        action: String,
+        key: String,
         #[serde(rename = "delayMs")]
         delay_ms: u64,
         note: String,
@@ -398,7 +426,9 @@ fn validate_steps(steps: &[FlowStep]) -> StorageResult<()> {
 fn flow_step_id(step: &FlowStep) -> u32 {
     match step {
         FlowStep::Click { id, .. }
+        | FlowStep::Drag { id, .. }
         | FlowStep::Type { id, .. }
+        | FlowStep::Key { id, .. }
         | FlowStep::Wait { id, .. }
         | FlowStep::Hotkey { id, .. }
         | FlowStep::Scroll { id, .. } => *id,

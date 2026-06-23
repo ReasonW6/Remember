@@ -92,11 +92,33 @@ Remember currently has a working UI shell:
 - The default dev server port has moved to `1450` to avoid the local Windows
   reserved `1350-1449` range; `npm run tauri dev` has been verified with the
   updated default port.
+- Recording now converts fast nearby left-click pairs into a single double-click
+  step and captures vertical or horizontal mouse-wheel events as scroll steps.
+- Recording now captures left or right mouse drags as explicit drag steps with
+  start/end coordinates and drag duration, instead of degrading them into
+  ordinary clicks.
+- Keyboard recording now preserves ordinary control keys such as Enter, Tab,
+  Backspace, Delete, arrow keys, and Esc as explicit key steps.
+- Playback now executes drag and ordinary key steps through the same
+  target-window safety gate used by clicks, text, hotkeys, and scroll.
+- Infinite-loop playback is now a real supported mode: `0` loop count means
+  run until stopped, but both the UI and backend require explicit confirmation
+  before it can start, and stop / emergency-stop interrupt it.
+- Playback target-window safety now checks the window title when both recorded
+  and active titles are known, so same-process but different-document windows
+  are refused.
+- The workbench can insert wait, text, hotkey, and ordinary key steps from the step list,
+  shows all timeline and run-log entries through scrolling instead of hiding
+  them, and disables visible post-MVP controls that are not implemented yet.
+- The compact control window grid has been tightened so the daily controls fit
+  the current 520 px window without horizontal clipping.
 - Placeholder status commands still exist for states not yet backed by full
   automation behavior.
 - Visual target: unified dark Windows 11 Mica/acrylic style.
 
-The app does not yet provide advanced target-window matching controls.
+The app does not yet provide optional full mouse-trajectory recording,
+IME-aware text capture, password-field detection, or advanced target-window
+matching controls.
 
 ## Phase 0: UI Shell
 
@@ -177,7 +199,7 @@ Goal: replay saved click, type, hotkey, wait, and basic scroll steps safely.
 - [x] Replay wait steps.
 - [x] Apply speed control.
 - [x] Apply loop count.
-- [x] Prevent infinite loop playback without confirmation.
+- [x] Support infinite loop playback only after explicit confirmation.
 - [x] Verify emergency stop before broad playback testing.
 
 Acceptance criteria:
@@ -234,6 +256,6 @@ Acceptance criteria:
 
 MVP product-complete. No Phase 1-5 blocker remains for the first deliverable.
 
-Next work should be treated as post-MVP hardening, for example improving
-cross-window selected-flow synchronization in the workbench, expanding manual QA
-coverage, or adding future advanced matching controls.
+Next work should be treated as post-MVP hardening, for example adding
+password-field recording safeguards, optional mouse-trajectory recording,
+expanding manual QA coverage, or adding future advanced matching controls.

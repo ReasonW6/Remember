@@ -165,12 +165,14 @@ export async function startPlayback(
   flow: Flow,
   speedMultiplier: number,
   loopCount: number,
+  infiniteLoopConfirmed = false,
 ): Promise<PlaybackStartPayload> {
   try {
     return await invoke<PlaybackStartPayload>("start_playback", {
       flow,
       speedMultiplier,
       loopCount,
+      infiniteLoopConfirmed,
     });
   } catch (error) {
     if (isTauriRuntime()) throw error;
