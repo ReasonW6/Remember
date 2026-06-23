@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Default capability for Remember desktop windows","local":true,"windows":["control","workbench"],"permissions":["core:default"]}}

@@ -1,0 +1,54 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Remember",
+  "version": "0.1.0",
+  "identifier": "com.remember.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1450",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "control",
+        "title": "Remember",
+        "url": "index.html#/control",
+        "width": 520,
+        "height": 170,
+        "minWidth": 520,
+        "minHeight": 170,
+        "maxWidth": 520,
+        "maxHeight": 170,
+        "resizable": false,
+        "fullscreen": false,
+        "decorations": true,
+        "alwaysOnTop": true,
+        "center": true
+      },
+      {
+        "label": "workbench",
+        "title": "Remember - 工作台",
+        "url": "index.html#/workbench",
+        "width": 1220,
+        "height": 760,
+        "minWidth": 1080,
+        "minHeight": 680,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "visible": false,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"]
+  }
+}

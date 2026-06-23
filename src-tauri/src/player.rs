@@ -1,0 +1,512 @@
+use crate::{
+    playback_input::{PlaybackInput, PlaybackMouseButton, SystemPlaybackInput},
+    storage::{Flow, FlowStep, TargetWindow},
+};
+use serde::Serialize;
+use std::{
+    fmt,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+    thread::{self, JoinHandle},
+    time::Duration,
+};
+
+static NEXT_PLAYBACK_RUN_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Debug)]
+pub enum PlayerError {
+    AlreadyPlaying,
+    InvalidLoopCount,
+    InvalidSpeed,
+    NotPlaying,
+}
+
+impl fmt::Display for PlayerError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AlreadyPlaying => write!(formatter, "playback is already active"),
+            Self::InvalidLoopCount => write!(
+                formatter,
+                "infinite playback requires explicit confirmation and is not enabled yet"
+            ),
+            Self::InvalidSpeed => write!(formatter, "playback speed must be greater than zero"),
+            Self::NotPlaying => write!(formatter, "playback is not active"),
+        }
+    }
+}
+
+impl std::error::Error for PlayerError {}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlaybackOptions {
+    pub speed_multiplier: f64,
+    pub loop_count: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PlaybackFinishReason {
+    Completed,
+    Stopped,
+    EmergencyStopped,
+    SafetyStopped,
+}
+
+impl PlaybackFinishReason {
+    fn message_prefix(self) -> &'static str {
+        match self {
+            Self::Completed => "回放完成",
+            Self::Stopped => "回放已停止",
+            Self::EmergencyStopped => "回放已紧急停止",
+            Self::SafetyStopped => "回放已安全停止",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackStartPayload {
+    pub run_id: u64,
+    pub status: &'static str,
+    pub label: &'static str,
+    pub flow_name: String,
+    pub loop_count: u32,
+    pub speed_multiplier: f64,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackControlPayload {
+    pub status: &'static str,
+    pub label: &'static str,
+    pub reason: PlaybackFinishReason,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackFinishedPayload {
+    pub run_id: u64,
+    pub status: &'static str,
+    pub label: &'static str,
+    pub reason: PlaybackFinishReason,
+    pub flow_name: String,
+    pub completed_steps: u32,
+    pub skipped_steps: u32,
+    pub loop_count: u32,
+    pub message: String,
+}
+
+#[derive(Debug)]
+struct PlaybackSession {
+    cancel_requested: Arc<AtomicBool>,
+    cancel_reason: Arc<Mutex<PlaybackFinishReason>>,
+    finished: Arc<AtomicBool>,
+    _join_handle: JoinHandle<()>,
+}
+
+pub struct PlayerState {
+    active_session: Option<PlaybackSession>,
+    input: Arc<dyn PlaybackInput>,
+}
+
+impl Default for PlayerState {
+    fn default() -> Self {
+        Self::with_input(Arc::new(SystemPlaybackInput))
+    }
+}
+
+impl PlayerState {
+    pub fn with_input(input: Arc<dyn PlaybackInput>) -> Self {
+        Self {
+            active_session: None,
+            input,
+        }
+    }
+
+    pub fn is_playing(&mut self) -> bool {
+        self.clear_finished_session();
+        self.active_session.is_some()
+    }
+
+    pub fn start<F>(
+        &mut self,
+        flow: Flow,
+        options: PlaybackOptions,
+        on_finished: F,
+    ) -> Result<PlaybackStartPayload, PlayerError>
+    where
+        F: FnOnce(PlaybackFinishedPayload) + Send + 'static,
+    {
+        self.clear_finished_session();
+        if self.active_session.is_some() {
+            return Err(PlayerError::AlreadyPlaying);
+        }
+        validate_options(options)?;
+
+        let cancel_requested = Arc::new(AtomicBool::new(false));
+        let cancel_reason = Arc::new(Mutex::new(PlaybackFinishReason::Stopped));
+        let finished = Arc::new(AtomicBool::new(false));
+
+        let thread_cancel_requested = Arc::clone(&cancel_requested);
+        let thread_cancel_reason = Arc::clone(&cancel_reason);
+        let thread_finished = Arc::clone(&finished);
+        let thread_input = Arc::clone(&self.input);
+        let flow_name = flow.display_name.clone();
+        let run_id = NEXT_PLAYBACK_RUN_ID.fetch_add(1, Ordering::Relaxed);
+        let start_payload = PlaybackStartPayload {
+            run_id,
+            status: "playing",
+            label: "回放中",
+            flow_name: flow_name.clone(),
+            loop_count: options.loop_count,
+            speed_multiplier: options.speed_multiplier,
+            message: format!(
+                "开始回放 {flow_name}；当前安全切片会执行等待、通过目标窗口检查的点击、文本输入、热键和滚轮。"
+            ),
+        };
+
+        let join_handle = thread::spawn(move || {
+            let payload = run_playback(
+                flow,
+                options,
+                thread_cancel_requested,
+                thread_cancel_reason,
+                thread_input,
+                run_id,
+            );
+            thread_finished.store(true, Ordering::SeqCst);
+            on_finished(payload);
+        });
+
+        self.active_session = Some(PlaybackSession {
+            cancel_requested,
+            cancel_reason,
+            finished,
+            _join_handle: join_handle,
+        });
+
+        Ok(start_payload)
+    }
+
+    pub fn stop(&mut self) -> Result<PlaybackControlPayload, PlayerError> {
+        self.request_stop(PlaybackFinishReason::Stopped)
+    }
+
+    pub fn emergency_stop(&mut self) -> Result<PlaybackControlPayload, PlayerError> {
+        self.request_stop(PlaybackFinishReason::EmergencyStopped)
+    }
+
+    fn request_stop(
+        &mut self,
+        reason: PlaybackFinishReason,
+    ) -> Result<PlaybackControlPayload, PlayerError> {
+        self.clear_finished_session();
+        let Some(session) = self.active_session.as_ref() else {
+            return Err(PlayerError::NotPlaying);
+        };
+
+        if let Ok(mut cancel_reason) = session.cancel_reason.lock() {
+            *cancel_reason = reason;
+        }
+        session.cancel_requested.store(true, Ordering::SeqCst);
+
+        Ok(PlaybackControlPayload {
+            status: "stopped",
+            label: "已停止",
+            reason,
+            message: match reason {
+                PlaybackFinishReason::Stopped => "已请求停止当前回放。".to_string(),
+                PlaybackFinishReason::EmergencyStopped => "已触发紧急停止。".to_string(),
+                PlaybackFinishReason::Completed => "回放已经完成。".to_string(),
+                PlaybackFinishReason::SafetyStopped => "已触发安全停止。".to_string(),
+            },
+        })
+    }
+
+    fn clear_finished_session(&mut self) {
+        let should_clear = self
+            .active_session
+            .as_ref()
+            .is_some_and(|session| session.finished.load(Ordering::SeqCst));
+        if should_clear {
+            self.active_session = None;
+        }
+    }
+}
+
+fn validate_options(options: PlaybackOptions) -> Result<(), PlayerError> {
+    if !options.speed_multiplier.is_finite() || options.speed_multiplier <= 0.0 {
+        return Err(PlayerError::InvalidSpeed);
+    }
+    if options.loop_count == 0 {
+        return Err(PlayerError::InvalidLoopCount);
+    }
+    Ok(())
+}
+
+fn run_playback(
+    flow: Flow,
+    options: PlaybackOptions,
+    cancel_requested: Arc<AtomicBool>,
+    cancel_reason: Arc<Mutex<PlaybackFinishReason>>,
+    input: Arc<dyn PlaybackInput>,
+    run_id: u64,
+) -> PlaybackFinishedPayload {
+    let mut completed_steps = 0;
+    let mut skipped_steps = 0;
+    let mut reason = PlaybackFinishReason::Completed;
+    let mut safety_message: Option<String> = None;
+
+    'playback: for _ in 0..options.loop_count {
+        for step in &flow.steps {
+            if cancel_requested.load(Ordering::SeqCst) {
+                reason = current_cancel_reason(&cancel_reason);
+                break 'playback;
+            }
+
+            match step {
+                FlowStep::Click {
+                    action,
+                    x,
+                    y,
+                    delay_ms,
+                    ..
+                } => {
+                    if sleep_cancelable(
+                        adjusted_duration(*delay_ms, options.speed_multiplier),
+                        &cancel_requested,
+                    ) {
+                        reason = current_cancel_reason(&cancel_reason);
+                        break 'playback;
+                    }
+
+                    let active_window = input.active_window_target();
+                    if let Err(message) = validate_input_target(&flow.target_window, &active_window)
+                    {
+                        reason = PlaybackFinishReason::SafetyStopped;
+                        safety_message = Some(message);
+                        skipped_steps += 1;
+                        break 'playback;
+                    }
+
+                    let (button, repeat_count) = click_plan(action);
+                    for _ in 0..repeat_count {
+                        if cancel_requested.load(Ordering::SeqCst) {
+                            reason = current_cancel_reason(&cancel_reason);
+                            break 'playback;
+                        }
+                        if let Err(error) = input.click(button, *x, *y) {
+                            reason = PlaybackFinishReason::SafetyStopped;
+                            safety_message =
+                                Some(format!("点击执行失败：{error}，已拒绝继续回放。"));
+                            skipped_steps += 1;
+                            break 'playback;
+                        }
+                    }
+                    completed_steps += 1;
+                }
+                FlowStep::Type { text, delay_ms, .. } => {
+                    if sleep_cancelable(
+                        adjusted_duration(*delay_ms, options.speed_multiplier),
+                        &cancel_requested,
+                    ) {
+                        reason = current_cancel_reason(&cancel_reason);
+                        break 'playback;
+                    }
+
+                    let active_window = input.active_window_target();
+                    if let Err(message) = validate_input_target(&flow.target_window, &active_window)
+                    {
+                        reason = PlaybackFinishReason::SafetyStopped;
+                        safety_message = Some(message);
+                        skipped_steps += 1;
+                        break 'playback;
+                    }
+
+                    if let Err(error) = input.type_text(text) {
+                        reason = PlaybackFinishReason::SafetyStopped;
+                        safety_message = Some(format!("文本输入失败：{error}，已拒绝继续回放。"));
+                        skipped_steps += 1;
+                        break 'playback;
+                    }
+                    completed_steps += 1;
+                }
+                FlowStep::Wait { duration_ms, .. } => {
+                    if sleep_cancelable(
+                        adjusted_duration(*duration_ms, options.speed_multiplier),
+                        &cancel_requested,
+                    ) {
+                        reason = current_cancel_reason(&cancel_reason);
+                        break 'playback;
+                    }
+                    completed_steps += 1;
+                }
+                FlowStep::Hotkey { keys, delay_ms, .. } => {
+                    if sleep_cancelable(
+                        adjusted_duration(*delay_ms, options.speed_multiplier),
+                        &cancel_requested,
+                    ) {
+                        reason = current_cancel_reason(&cancel_reason);
+                        break 'playback;
+                    }
+
+                    let active_window = input.active_window_target();
+                    if let Err(message) = validate_input_target(&flow.target_window, &active_window)
+                    {
+                        reason = PlaybackFinishReason::SafetyStopped;
+                        safety_message = Some(message);
+                        skipped_steps += 1;
+                        break 'playback;
+                    }
+
+                    if let Err(error) = input.press_hotkey(keys) {
+                        reason = PlaybackFinishReason::SafetyStopped;
+                        safety_message = Some(format!("热键输入失败：{error}，已拒绝继续回放。"));
+                        skipped_steps += 1;
+                        break 'playback;
+                    }
+                    completed_steps += 1;
+                }
+                FlowStep::Scroll {
+                    delta_x,
+                    delta_y,
+                    delay_ms,
+                    ..
+                } => {
+                    if sleep_cancelable(
+                        adjusted_duration(*delay_ms, options.speed_multiplier),
+                        &cancel_requested,
+                    ) {
+                        reason = current_cancel_reason(&cancel_reason);
+                        break 'playback;
+                    }
+
+                    let active_window = input.active_window_target();
+                    if let Err(message) = validate_input_target(&flow.target_window, &active_window)
+                    {
+                        reason = PlaybackFinishReason::SafetyStopped;
+                        safety_message = Some(message);
+                        skipped_steps += 1;
+                        break 'playback;
+                    }
+
+                    if let Err(error) = input.scroll(*delta_x, *delta_y) {
+                        reason = PlaybackFinishReason::SafetyStopped;
+                        safety_message = Some(format!("滚轮输入失败：{error}，已拒绝继续回放。"));
+                        skipped_steps += 1;
+                        break 'playback;
+                    }
+                    completed_steps += 1;
+                }
+            }
+        }
+    }
+
+    let message = finish_message(reason, completed_steps, skipped_steps, safety_message);
+    PlaybackFinishedPayload {
+        run_id,
+        status: "stopped",
+        label: "已停止",
+        reason,
+        flow_name: flow.display_name,
+        completed_steps,
+        skipped_steps,
+        loop_count: options.loop_count,
+        message,
+    }
+}
+
+fn validate_input_target(expected: &TargetWindow, active: &TargetWindow) -> Result<(), String> {
+    if !is_known_target(expected) {
+        return Err("目标窗口缺少可验证信息，已拒绝输入操作。".to_string());
+    }
+
+    if !is_known_target(active) {
+        return Err("当前活动窗口不可验证，已拒绝输入操作。".to_string());
+    }
+
+    if !same_process(&expected.process, &active.process) {
+        return Err(format!(
+            "目标窗口不同：录制时为 {}，当前为 {}，未执行输入操作。",
+            expected.process, active.process
+        ));
+    }
+
+    Ok(())
+}
+
+fn is_known_target(target: &TargetWindow) -> bool {
+    target.matched && has_known_process(&target.process)
+}
+
+fn has_known_process(process: &str) -> bool {
+    let process = process.trim();
+    !process.is_empty() && process != "N/A" && !process.starts_with("PID ")
+}
+
+fn same_process(expected: &str, active: &str) -> bool {
+    expected.trim().eq_ignore_ascii_case(active.trim())
+}
+
+fn click_plan(action: &str) -> (PlaybackMouseButton, u8) {
+    let button = if action.contains("右键") {
+        PlaybackMouseButton::Right
+    } else {
+        PlaybackMouseButton::Left
+    };
+    let repeat_count = if action.contains("双击") { 2 } else { 1 };
+    (button, repeat_count)
+}
+
+fn current_cancel_reason(cancel_reason: &Mutex<PlaybackFinishReason>) -> PlaybackFinishReason {
+    cancel_reason
+        .lock()
+        .map(|reason| *reason)
+        .unwrap_or(PlaybackFinishReason::Stopped)
+}
+
+fn adjusted_duration(duration_ms: u64, speed_multiplier: f64) -> Duration {
+    let adjusted_ms = (duration_ms as f64 / speed_multiplier).ceil().max(0.0) as u64;
+    Duration::from_millis(adjusted_ms)
+}
+
+fn sleep_cancelable(duration: Duration, cancel_requested: &AtomicBool) -> bool {
+    let interval = Duration::from_millis(10);
+    let mut elapsed = Duration::ZERO;
+
+    while elapsed < duration {
+        if cancel_requested.load(Ordering::SeqCst) {
+            return true;
+        }
+        let remaining = duration.saturating_sub(elapsed);
+        let sleep_for = remaining.min(interval);
+        thread::sleep(sleep_for);
+        elapsed += sleep_for;
+    }
+
+    cancel_requested.load(Ordering::SeqCst)
+}
+
+fn finish_message(
+    reason: PlaybackFinishReason,
+    completed_steps: u32,
+    skipped_steps: u32,
+    safety_message: Option<String>,
+) -> String {
+    let prefix = reason.message_prefix();
+    if let Some(safety_message) = safety_message {
+        return format!(
+            "{prefix}；{safety_message} 已执行 {completed_steps} 个步骤，跳过 {skipped_steps} 个步骤。"
+        );
+    }
+
+    if skipped_steps == 0 {
+        format!("{prefix}；已执行 {completed_steps} 个步骤。")
+    } else {
+        format!("{prefix}；已执行 {completed_steps} 个步骤，跳过 {skipped_steps} 个暂未支持或被拒绝步骤。")
+    }
+}
