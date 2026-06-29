@@ -1,6 +1,7 @@
 use remember_lib::storage::{
-    ensure_default_flow_in_dir, list_flow_summaries_in_dir, load_flow_from_path, sample_flow,
-    save_flow_as_to_dir, save_flow_file_to_dir, save_flow_to_dir, FlowStep, StorageError,
+    ensure_default_flow_in_dir, initial_flow_in_dir, list_flow_summaries_in_dir,
+    load_flow_from_path, sample_flow, save_flow_as_to_dir, save_flow_file_to_dir, save_flow_to_dir,
+    FlowStep, StorageError,
 };
 use std::{
     fs,
@@ -100,6 +101,20 @@ fn first_run_default_flow_is_created_once() {
 }
 
 #[test]
+fn initial_flow_starts_empty_without_creating_default_file() {
+    let root = temp_root("initial-empty");
+
+    let initial = initial_flow_in_dir(&root).expect("initial flow should load");
+
+    assert_eq!(initial.file_name, "untitled-flow.remember.json");
+    assert_eq!(initial.saved_at, 0);
+    assert_eq!(initial.flow.name, "untitled-flow");
+    assert_eq!(initial.flow.steps.len(), 0);
+    assert_eq!(initial.flow.target_window.process, "N/A");
+    assert!(!root.join("flows").exists());
+}
+
+#[test]
 fn initial_flow_skips_invalid_files_and_loads_first_valid_flow() {
     let root = temp_root("first-valid");
     let flows_dir = root.join("flows");
@@ -135,6 +150,50 @@ fn initial_flow_creates_default_when_only_invalid_files_exist() {
     assert!(summaries
         .iter()
         .any(|summary| summary.file_name == "daily-report.remember.json" && summary.is_valid));
+}
+
+#[test]
+fn initial_flow_does_not_create_default_when_only_invalid_files_exist() {
+    let root = temp_root("initial-invalid-only");
+    let flows_dir = root.join("flows");
+    fs::create_dir_all(&flows_dir).expect("flows dir should be created");
+    fs::write(flows_dir.join("broken.remember.json"), "{ not-json")
+        .expect("broken file should be written");
+
+    let initial = initial_flow_in_dir(&root).expect("initial flow should load");
+    let summaries = list_flow_summaries_in_dir(&root).expect("summaries should load");
+
+    assert_eq!(initial.file_name, "untitled-flow.remember.json");
+    assert_eq!(initial.flow.steps.len(), 0);
+    assert!(summaries
+        .iter()
+        .any(|summary| summary.file_name == "broken.remember.json" && !summary.is_valid));
+    assert!(!summaries
+        .iter()
+        .any(|summary| summary.file_name == "daily-report.remember.json"));
+}
+
+#[test]
+fn initial_flow_removes_legacy_default_seed_file() {
+    let root = temp_root("legacy-default");
+    let mut legacy = sample_flow();
+    legacy.display_name = "Phase1 PersistedF'luo'w".to_string();
+    legacy.steps = Vec::new();
+    save_flow_file_to_dir(&root, "daily-report.remember.json", &legacy)
+        .expect("legacy default should save");
+
+    let legacy_path = root.join("flows").join("daily-report.remember.json");
+    assert!(legacy_path.exists());
+
+    let initial = initial_flow_in_dir(&root).expect("initial flow should load");
+    let summaries = list_flow_summaries_in_dir(&root).expect("summaries should load");
+
+    assert_eq!(initial.file_name, "untitled-flow.remember.json");
+    assert_eq!(initial.flow.steps.len(), 0);
+    assert!(!legacy_path.exists());
+    assert!(!summaries
+        .iter()
+        .any(|summary| summary.file_name == "daily-report.remember.json"));
 }
 
 #[test]
@@ -275,6 +334,7 @@ fn validation_rejects_unsupported_mouse_actions() {
         end_y: 10,
         duration_ms: 100,
         delay_ms: 100,
+        path: Vec::new(),
         note: "unknown drag".to_string(),
     });
     let drag_error =
@@ -409,6 +469,7 @@ fn validation_rejects_excessive_step_timing() {
         end_y: 10,
         duration_ms: 300_001,
         delay_ms: 100,
+        path: Vec::new(),
         note: "long drag".to_string(),
     });
     let drag_error = save_flow_to_dir(&root, &long_drag).expect_err("long drag rejects");

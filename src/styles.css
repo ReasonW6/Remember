@@ -971,11 +971,11 @@ input[type="checkbox"] {
 }
 
 .target-safety-detail {
-  display: -webkit-box;
   max-width: 100%;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  max-height: 74px;
+  overflow-y: auto;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .target-safety-detail.safety-stopped {
@@ -1013,7 +1013,7 @@ input[type="checkbox"] {
 .run-log-entry {
   display: grid;
   grid-template-columns: 64px 86px minmax(0, 1fr);
-  align-items: center;
+  align-items: start;
   gap: 8px;
   min-width: 0;
   padding-left: 9px;
@@ -1053,19 +1053,17 @@ input[type="checkbox"] {
 
 .run-log-entry > p {
   margin: 0;
-  overflow: hidden;
   color: #d7e3f0;
   font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .run-log-entry > em {
   grid-column: 2 / 4;
-  overflow: hidden;
   font-style: normal;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .empty-run-log {

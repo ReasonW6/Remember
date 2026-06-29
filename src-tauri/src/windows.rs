@@ -11,8 +11,11 @@ mod platform {
     };
 
     type Handle = *mut c_void;
+    type EnumWindowsProc = Option<unsafe extern "system" fn(hwnd: Handle, lparam: isize) -> i32>;
 
     const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const GA_ROOT: u32 = 2;
+    const SW_RESTORE: i32 = 9;
 
     #[repr(C)]
     struct Rect {
@@ -30,10 +33,15 @@ mod platform {
 
     #[link(name = "user32")]
     extern "system" {
+        fn EnumWindows(callback: EnumWindowsProc, lparam: isize) -> i32;
         fn GetForegroundWindow() -> Handle;
+        fn GetAncestor(hwnd: Handle, flags: u32) -> Handle;
         fn GetWindowRect(hwnd: Handle, rect: *mut Rect) -> i32;
         fn GetWindowTextW(hwnd: Handle, text: *mut u16, max_count: i32) -> i32;
         fn GetWindowThreadProcessId(hwnd: Handle, process_id: *mut u32) -> u32;
+        fn IsWindowVisible(hwnd: Handle) -> i32;
+        fn SetForegroundWindow(hwnd: Handle) -> i32;
+        fn ShowWindow(hwnd: Handle, command_show: i32) -> i32;
         fn WindowFromPoint(point: Point) -> Handle;
     }
 
@@ -56,7 +64,88 @@ mod platform {
 
     pub fn target_window_at_point(x: i32, y: i32) -> TargetWindow {
         let hwnd = unsafe { WindowFromPoint(Point { x, y }) };
-        target_from_hwnd(hwnd)
+        target_from_hwnd(top_level_window(hwnd))
+    }
+
+    pub fn focus_target_window(target: &TargetWindow) -> Result<(), String> {
+        if !has_known_process(&target.process) {
+            return Err("录制流程缺少可验证的目标进程".to_string());
+        }
+
+        let mut request = TargetWindowRequest {
+            target,
+            hwnd: std::ptr::null_mut(),
+        };
+        unsafe {
+            EnumWindows(
+                Some(enum_target_window),
+                &mut request as *mut TargetWindowRequest as isize,
+            );
+        }
+
+        if request.hwnd.is_null() {
+            return Err(format!(
+                "未找到录制目标窗口：{} / {}",
+                target.process, target.title
+            ));
+        }
+
+        unsafe {
+            ShowWindow(request.hwnd, SW_RESTORE);
+            if SetForegroundWindow(request.hwnd) == 0 {
+                return Err(format!(
+                    "系统拒绝切换到录制目标窗口：{} / {}",
+                    target.process, target.title
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    struct TargetWindowRequest<'a> {
+        target: &'a TargetWindow,
+        hwnd: Handle,
+    }
+
+    unsafe extern "system" fn enum_target_window(hwnd: Handle, lparam: isize) -> i32 {
+        if IsWindowVisible(hwnd) == 0 {
+            return 1;
+        }
+
+        let request = &mut *(lparam as *mut TargetWindowRequest);
+        let candidate = target_from_hwnd(hwnd);
+        if target_window_matches(request.target, &candidate) {
+            request.hwnd = hwnd;
+            return 0;
+        }
+
+        1
+    }
+
+    fn target_window_matches(expected: &TargetWindow, candidate: &TargetWindow) -> bool {
+        if !same_process(&expected.process, &candidate.process) {
+            return false;
+        }
+
+        if has_known_title(&expected.title) && has_known_title(&candidate.title) {
+            return same_title(&expected.title, &candidate.title);
+        }
+
+        true
+    }
+
+    fn top_level_window(hwnd: Handle) -> Handle {
+        if hwnd.is_null() {
+            return hwnd;
+        }
+
+        let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
+        if root.is_null() {
+            hwnd
+        } else {
+            root
+        }
     }
 
     fn target_from_hwnd(hwnd: Handle) -> TargetWindow {
@@ -122,6 +211,32 @@ mod platform {
             .to_string()
     }
 
+    fn has_known_process(process: &str) -> bool {
+        let process = process.trim();
+        !process.is_empty() && process != "N/A" && !process.starts_with("PID ")
+    }
+
+    fn same_process(left: &str, right: &str) -> bool {
+        left.trim().eq_ignore_ascii_case(right.trim())
+    }
+
+    fn has_known_title(title: &str) -> bool {
+        let title = title.trim();
+        !title.is_empty()
+            && title != "N/A"
+            && title != "未知活动窗口"
+            && title != "尚未捕获活动窗口"
+            && !is_unstable_child_window_title(title)
+    }
+
+    fn is_unstable_child_window_title(title: &str) -> bool {
+        title.eq_ignore_ascii_case("Chrome Legacy Window")
+    }
+
+    fn same_title(left: &str, right: &str) -> bool {
+        left.trim().eq_ignore_ascii_case(right.trim())
+    }
+
     fn window_size(hwnd: Handle) -> String {
         let mut rect = Rect {
             left: 0,
@@ -162,6 +277,19 @@ pub fn target_window_at_point(x: i32, y: i32) -> TargetWindow {
     {
         let _ = (x, y);
         unknown_target_window()
+    }
+}
+
+pub fn focus_target_window(target: &TargetWindow) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        platform::focus_target_window(target)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = target;
+        Err("目标窗口切换只支持 Windows".to_string())
     }
 }
 

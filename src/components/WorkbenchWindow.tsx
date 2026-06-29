@@ -67,7 +67,9 @@ function stepLabel(step: FlowStep) {
 
 function stepValue(step: FlowStep) {
   if (step.type === "click") return step.target;
-  if (step.type === "drag") return step.target;
+  if (step.type === "drag") {
+    return step.path?.length ? `${step.target} · ${step.path.length} 点轨迹` : step.target;
+  }
   if (step.type === "type") return step.text;
   if (step.type === "key") return step.key;
   if (step.type === "wait") return `${(step.durationMs / 1000).toFixed(1)}s`;

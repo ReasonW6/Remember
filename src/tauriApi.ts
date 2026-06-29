@@ -10,9 +10,6 @@ import type {
   SavedFlow,
 } from "./types";
 
-export const RECORDING_SAFETY_WARNING =
-  "录制会记录鼠标和键盘操作，请勿在录制期间输入密码、验证码或其他敏感信息。";
-
 export const EMERGENCY_HOTKEY_SHORTCUT = "Ctrl + Alt + S";
 
 function isTauriRuntime() {

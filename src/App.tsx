@@ -26,7 +26,6 @@ import {
   startRecording,
   stopPlayback,
   stopRecording,
-  RECORDING_SAFETY_WARNING,
 } from "./tauriApi";
 import { ControlWindow } from "./components/ControlWindow";
 import { WorkbenchWindow } from "./components/WorkbenchWindow";
@@ -116,7 +115,7 @@ export function App() {
   const [selectedStepId, setSelectedStepId] = useState<number | null>(null);
   const [runLogs, setRunLogs] = useState<RunLogEntry[]>([]);
   const [targetSafetyRunId, setTargetSafetyRunId] = useState<number | null>(null);
-  const [recordingWarningVisible, setRecordingWarningVisible] = useState(false);
+  const [retainedDraft, setRetainedDraft] = useState<SavedFlow | null>(null);
   const [infiniteLoopWarningVisible, setInfiniteLoopWarningVisible] =
     useState(false);
   const [infiniteLoopConfirmed, setInfiniteLoopConfirmed] = useState(false);
@@ -130,10 +129,16 @@ export function App() {
   const activePlaybackRunId = useRef<number | null>(null);
   const activePlaybackFlowName = useRef<string>("");
   const savedFlowRef = useRef<SavedFlow>(initialSavedFlow);
+  const retainedDraftRef = useRef<SavedFlow | null>(null);
 
   function setCurrentSavedFlow(nextSavedFlow: SavedFlow) {
     savedFlowRef.current = nextSavedFlow;
     setSavedFlow(nextSavedFlow);
+  }
+
+  function setRetainedDraftFlow(nextSavedFlow: SavedFlow | null) {
+    retainedDraftRef.current = nextSavedFlow;
+    setRetainedDraft(nextSavedFlow);
   }
 
   function setSaveFeedback(nextStatus: SaveStatus, message: string) {
@@ -165,6 +170,9 @@ export function App() {
   }
 
   function commitDraft(nextSavedFlow: SavedFlow) {
+    if (retainedDraftRef.current?.fileName === nextSavedFlow.fileName) {
+      setRetainedDraftFlow(nextSavedFlow);
+    }
     setCurrentSavedFlow(nextSavedFlow);
     markUnsaved();
     broadcastFlowDraft(nextSavedFlow);
@@ -174,6 +182,12 @@ export function App() {
     nextSavedFlow: SavedFlow,
     messagePrefix: "已保存" | "已加载" = "已保存",
   ) {
+    if (
+      nextSavedFlow.savedAt &&
+      retainedDraftRef.current?.fileName === nextSavedFlow.fileName
+    ) {
+      setRetainedDraftFlow(null);
+    }
     setCurrentSavedFlow(nextSavedFlow);
     setSaveFeedback(
       nextSavedFlow.savedAt ? "saved" : "idle",
@@ -187,10 +201,11 @@ export function App() {
   }
 
   function applyRecordingStop(payload: RecordingStopPayload) {
+    const nextDraft = asUnsavedRecording(payload.flow);
     setStatus(payload.status);
-    setCurrentSavedFlow(asUnsavedRecording(payload.flow));
+    setRetainedDraftFlow(nextDraft);
+    setCurrentSavedFlow(nextDraft);
     setSaveFeedback("idle", payload.message);
-    setRecordingWarningVisible(false);
     setInfiniteLoopWarningVisible(false);
     setInfiniteLoopConfirmed(false);
   }
@@ -241,11 +256,15 @@ export function App() {
       try {
         const initialFlow = await getInitialFlow();
         if (cancelled) return;
-        setCurrentSavedFlow(initialFlow);
-        setSaveFeedback(
-          initialFlow.savedAt ? "saved" : "idle",
-          `本地流程: ${formatSavedAt(initialFlow.savedAt)}`,
-        );
+        if (savedFlowRef.current.fileName === initialSavedFlow.fileName) {
+          setCurrentSavedFlow(initialFlow);
+          setSaveFeedback(
+            initialFlow.savedAt ? "saved" : "idle",
+            initialFlow.savedAt
+              ? `本地流程: ${formatSavedAt(initialFlow.savedAt)}`
+              : "尚无本地流程，点击录制开始",
+          );
+        }
 
         const hotkeyStatus = await getEmergencyHotkeyStatus();
         if (!cancelled) setEmergencyHotkeyStatus(hotkeyStatus);
@@ -353,6 +372,9 @@ export function App() {
           FLOW_DRAFT_UPDATED_EVENT,
           (event) => {
             if (cancelled) return;
+            if (!event.payload.savedAt) {
+              setRetainedDraftFlow(event.payload);
+            }
             setCurrentSavedFlow(event.payload);
             setSaveFeedback("idle", "有未保存更改");
           },
@@ -427,8 +449,12 @@ export function App() {
     }
 
     if (nextStatus === "recording") {
-      setRecordingWarningVisible(true);
-      setSaveFeedback("idle", RECORDING_SAFETY_WARNING);
+      try {
+        const payload = await startRecording();
+        applyRecordingStart(payload);
+      } catch (error) {
+        setSaveError(error);
+      }
       return;
     }
 
@@ -475,21 +501,6 @@ export function App() {
     }
 
     setStatus(nextStatus);
-  }
-
-  async function confirmRecordingStart() {
-    setRecordingWarningVisible(false);
-    try {
-      const payload = await startRecording();
-      applyRecordingStart(payload);
-    } catch (error) {
-      setSaveError(error);
-    }
-  }
-
-  function cancelRecordingStart() {
-    setRecordingWarningVisible(false);
-    setSaveFeedback("idle", "已取消录制");
   }
 
   function handleLoopCountChange(value: number) {
@@ -710,6 +721,16 @@ export function App() {
 
   async function handleLoadFlow(fileName: string) {
     if (isFlowLoading) return;
+    const retained = retainedDraftRef.current;
+    if (retained?.fileName === fileName) {
+      setInfiniteLoopWarningVisible(false);
+      setInfiniteLoopConfirmed(false);
+      setTargetSafetyRunId(null);
+      setCurrentSavedFlow(retained);
+      setSaveFeedback("idle", "已切回未保存的录制草稿");
+      return;
+    }
+
     setIsFlowLoading(true);
     setSaveFeedback("idle", "正在加载本地流程");
     try {
@@ -742,6 +763,7 @@ export function App() {
   const controlProps = {
     flow,
     flowSummaries,
+    retainedDraft,
     selectedFileName: savedFlow.fileName,
     status,
     statusLabel,
@@ -754,10 +776,6 @@ export function App() {
     onFlowSelect: handleLoadFlow,
     onOpenWorkbench: openWorkbench,
     emergencyStopHint,
-    recordingWarningVisible,
-    recordingSafetyWarning: RECORDING_SAFETY_WARNING,
-    onConfirmRecordingStart: confirmRecordingStart,
-    onCancelRecordingStart: cancelRecordingStart,
     infiniteLoopWarningVisible,
     infiniteLoopConfirmed,
     infiniteLoopWarning,

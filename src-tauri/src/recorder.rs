@@ -7,7 +7,7 @@ use std::{
 
 use crate::keyboard;
 use crate::mouse;
-use crate::storage::{hotkey_is_allowed, Flow, FlowStep, TargetWindow};
+use crate::storage::{hotkey_is_allowed, DragPathPoint, Flow, FlowStep, TargetWindow};
 
 pub const RECORDING_SAFETY_WARNING: &str =
     "录制会记录鼠标和键盘操作，请勿在录制期间输入密码、验证码或其他敏感信息。";
@@ -97,7 +97,15 @@ pub(crate) struct RecordedMouseDrag {
     pub(crate) button: RecordedMouseButton,
     pub(crate) started_at_ms: u64,
     pub(crate) captured_at_ms: u64,
+    pub(crate) path: Vec<RecordedMousePathPoint>,
     pub(crate) target_window: Option<TargetWindow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecordedMousePathPoint {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) captured_at_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -318,6 +326,34 @@ impl RecorderState {
         started_at_ms: u64,
         captured_at_ms: u64,
     ) -> Result<(), RecorderError> {
+        let path = vec![
+            (start_x, start_y, started_at_ms),
+            (end_x, end_y, captured_at_ms),
+        ];
+        self.record_mouse_drag_path_at(
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            button,
+            started_at_ms,
+            captured_at_ms,
+            path,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_mouse_drag_path_at(
+        &mut self,
+        start_x: i32,
+        start_y: i32,
+        end_x: i32,
+        end_y: i32,
+        button: RecordedMouseButton,
+        started_at_ms: u64,
+        captured_at_ms: u64,
+        path: Vec<(i32, i32, u64)>,
+    ) -> Result<(), RecorderError> {
         self.record_mouse_drag_at_maybe_target(
             start_x,
             start_y,
@@ -326,6 +362,7 @@ impl RecorderState {
             button,
             started_at_ms,
             captured_at_ms,
+            recorded_mouse_path(path),
             None,
         )
     }
@@ -340,6 +377,7 @@ impl RecorderState {
         button: RecordedMouseButton,
         started_at_ms: u64,
         captured_at_ms: u64,
+        path: Vec<RecordedMousePathPoint>,
         target_window: Option<TargetWindow>,
     ) -> Result<(), RecorderError> {
         let Some(session) = self.active_session.as_mut() else {
@@ -357,6 +395,7 @@ impl RecorderState {
             button,
             started_at_ms,
             captured_at_ms,
+            path,
             target_window,
         });
         Ok(())
@@ -863,6 +902,7 @@ fn recorded_steps(
                     end_y: drag.end_y,
                     duration_ms: drag.captured_at_ms.saturating_sub(drag.started_at_ms),
                     delay_ms,
+                    path: drag_path_points(drag),
                     note: "录制捕获：鼠标拖拽".to_string(),
                 });
                 action_index += 1;
@@ -937,6 +977,53 @@ fn recorded_steps(
     }
 
     steps
+}
+
+fn recorded_mouse_path(path: Vec<(i32, i32, u64)>) -> Vec<RecordedMousePathPoint> {
+    path.into_iter()
+        .map(|(x, y, captured_at_ms)| RecordedMousePathPoint {
+            x,
+            y,
+            captured_at_ms,
+        })
+        .collect()
+}
+
+fn drag_path_points(drag: &RecordedMouseDrag) -> Vec<DragPathPoint> {
+    let duration_ms = drag.captured_at_ms.saturating_sub(drag.started_at_ms);
+    let mut points = drag
+        .path
+        .iter()
+        .filter(|point| {
+            point.captured_at_ms >= drag.started_at_ms
+                && point.captured_at_ms <= drag.captured_at_ms
+        })
+        .map(|point| DragPathPoint {
+            x: point.x,
+            y: point.y,
+            elapsed_ms: point.captured_at_ms.saturating_sub(drag.started_at_ms),
+        })
+        .collect::<Vec<_>>();
+
+    if points.len() < 2 {
+        return Vec::new();
+    }
+
+    points.sort_by_key(|point| point.elapsed_ms);
+    points.dedup_by(|right, left| {
+        right.x == left.x && right.y == left.y && right.elapsed_ms == left.elapsed_ms
+    });
+
+    if let Some(first) = points.first_mut() {
+        first.elapsed_ms = 0;
+    }
+    if let Some(last) = points.last_mut() {
+        last.x = drag.end_x;
+        last.y = drag.end_y;
+        last.elapsed_ms = duration_ms;
+    }
+
+    points
 }
 
 fn is_double_click_pair(first: &RecordedMouseClick, second: &RecordedMouseClick) -> bool {

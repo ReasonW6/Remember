@@ -7,8 +7,20 @@ pub enum PlaybackMouseButton {
     Right,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaybackMousePoint {
+    pub x: i32,
+    pub y: i32,
+    pub elapsed_ms: u64,
+}
+
 pub trait PlaybackInput: Send + Sync + 'static {
     fn active_window_target(&self) -> TargetWindow;
+
+    fn focus_target_window(&self, target: &TargetWindow) -> Result<(), String> {
+        let _ = target;
+        Ok(())
+    }
 
     fn click(&self, button: PlaybackMouseButton, x: i32, y: i32) -> Result<(), String>;
 
@@ -50,6 +62,26 @@ pub trait PlaybackInput: Send + Sync + 'static {
         Ok(cancel_requested.load(Ordering::SeqCst))
     }
 
+    fn drag_path_cancelable(
+        &self,
+        button: PlaybackMouseButton,
+        points: &[PlaybackMousePoint],
+        cancel_requested: &AtomicBool,
+    ) -> Result<bool, String> {
+        let (Some(first), Some(last)) = (points.first(), points.last()) else {
+            return Ok(cancel_requested.load(Ordering::SeqCst));
+        };
+        self.drag_cancelable(
+            button,
+            first.x,
+            first.y,
+            last.x,
+            last.y,
+            last.elapsed_ms,
+            cancel_requested,
+        )
+    }
+
     fn scroll(&self, delta_x: i32, delta_y: i32) -> Result<(), String> {
         let _ = (delta_x, delta_y);
         Err("scroll playback is unavailable for this input backend".to_string())
@@ -67,6 +99,10 @@ pub struct SystemPlaybackInput;
 impl PlaybackInput for SystemPlaybackInput {
     fn active_window_target(&self) -> TargetWindow {
         windows::active_window_target()
+    }
+
+    fn focus_target_window(&self, target: &TargetWindow) -> Result<(), String> {
+        windows::focus_target_window(target)
     }
 
     fn click(&self, button: PlaybackMouseButton, x: i32, y: i32) -> Result<(), String> {
@@ -118,6 +154,15 @@ impl PlaybackInput for SystemPlaybackInput {
         )
     }
 
+    fn drag_path_cancelable(
+        &self,
+        button: PlaybackMouseButton,
+        points: &[PlaybackMousePoint],
+        cancel_requested: &AtomicBool,
+    ) -> Result<bool, String> {
+        platform::drag_path_cancelable(button, points, cancel_requested)
+    }
+
     fn scroll(&self, delta_x: i32, delta_y: i32) -> Result<(), String> {
         platform::scroll(delta_x, delta_y)
     }
@@ -129,7 +174,7 @@ impl PlaybackInput for SystemPlaybackInput {
 
 #[cfg(target_os = "windows")]
 mod platform {
-    use super::PlaybackMouseButton;
+    use super::{PlaybackMouseButton, PlaybackMousePoint};
     use std::mem::size_of;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::{thread, time::Duration};
@@ -319,6 +364,64 @@ mod platform {
         Ok(canceled || cancel_requested.load(Ordering::SeqCst))
     }
 
+    pub fn drag_path_cancelable(
+        button: PlaybackMouseButton,
+        points: &[PlaybackMousePoint],
+        cancel_requested: &AtomicBool,
+    ) -> Result<bool, String> {
+        let (Some(first), Some(_last)) = (points.first(), points.last()) else {
+            return Ok(cancel_requested.load(Ordering::SeqCst));
+        };
+
+        let positioned = unsafe { SetCursorPos(first.x, first.y) };
+        if positioned == 0 {
+            return Err(format!(
+                "failed to move cursor to ({}, {})",
+                first.x, first.y
+            ));
+        }
+
+        let (down, up) = match button {
+            PlaybackMouseButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+            PlaybackMouseButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+        };
+
+        unsafe {
+            mouse_event(down, 0, 0, 0, 0);
+        }
+
+        let mut canceled = cancel_requested.load(Ordering::SeqCst);
+        let mut previous_elapsed_ms = first.elapsed_ms;
+        if !canceled {
+            for point in points.iter().skip(1) {
+                if sleep_until_point(
+                    point.elapsed_ms.saturating_sub(previous_elapsed_ms),
+                    cancel_requested,
+                ) {
+                    canceled = true;
+                    break;
+                }
+                let positioned = unsafe { SetCursorPos(point.x, point.y) };
+                if positioned == 0 {
+                    unsafe {
+                        mouse_event(up, 0, 0, 0, 0);
+                    }
+                    return Err(format!(
+                        "failed to move cursor to ({}, {})",
+                        point.x, point.y
+                    ));
+                }
+                previous_elapsed_ms = point.elapsed_ms;
+            }
+        }
+
+        unsafe {
+            mouse_event(up, 0, 0, 0, 0);
+        }
+
+        Ok(canceled || cancel_requested.load(Ordering::SeqCst))
+    }
+
     pub fn type_text(text: &str) -> Result<(), String> {
         let mut inputs = Vec::new();
         for code_unit in text.encode_utf16() {
@@ -388,6 +491,26 @@ mod platform {
             return Err(format!("failed to move cursor to ({x}, {y})"));
         }
         scroll(delta_x, delta_y)
+    }
+
+    fn sleep_until_point(duration_ms: u64, cancel_requested: &AtomicBool) -> bool {
+        if duration_ms == 0 {
+            return cancel_requested.load(Ordering::SeqCst);
+        }
+
+        let sleep_for = Duration::from_millis(duration_ms);
+        let slice = Duration::from_millis(10);
+        let mut elapsed = Duration::ZERO;
+        while elapsed < sleep_for {
+            if cancel_requested.load(Ordering::SeqCst) {
+                return true;
+            }
+            let next = sleep_for.saturating_sub(elapsed).min(slice);
+            thread::sleep(next);
+            elapsed += next;
+        }
+
+        cancel_requested.load(Ordering::SeqCst)
     }
 
     fn send_keyboard_inputs(inputs: &[Input], label: &str) -> Result<(), String> {
@@ -495,7 +618,7 @@ mod platform {
 
 #[cfg(not(target_os = "windows"))]
 mod platform {
-    use super::PlaybackMouseButton;
+    use super::{PlaybackMouseButton, PlaybackMousePoint};
     use std::sync::atomic::AtomicBool;
 
     pub fn click(_button: PlaybackMouseButton, _x: i32, _y: i32) -> Result<(), String> {
@@ -532,6 +655,14 @@ mod platform {
         _end_x: i32,
         _end_y: i32,
         _duration_ms: u64,
+        _cancel_requested: &AtomicBool,
+    ) -> Result<bool, String> {
+        Err("drag playback is only available on Windows".to_string())
+    }
+
+    pub fn drag_path_cancelable(
+        _button: PlaybackMouseButton,
+        _points: &[PlaybackMousePoint],
         _cancel_requested: &AtomicBool,
     ) -> Result<bool, String> {
         Err("drag playback is only available on Windows".to_string())

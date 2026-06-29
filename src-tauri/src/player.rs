@@ -1,6 +1,6 @@
 use crate::{
-    playback_input::{PlaybackInput, PlaybackMouseButton, SystemPlaybackInput},
-    storage::{validate_flow, Flow, FlowStep, TargetWindow},
+    playback_input::{PlaybackInput, PlaybackMouseButton, PlaybackMousePoint, SystemPlaybackInput},
+    storage::{validate_flow, DragPathPoint, Flow, FlowStep, TargetWindow},
 };
 use serde::Serialize;
 use std::{
@@ -299,7 +299,7 @@ fn run_playback(
                     }
 
                     if let Err(message) =
-                        validate_active_input_target(input.as_ref(), &flow.target_window)
+                        prepare_active_input_target(input.as_ref(), &flow.target_window)
                     {
                         reason = PlaybackFinishReason::SafetyStopped;
                         safety_message = Some(message);
@@ -331,6 +331,7 @@ fn run_playback(
                     end_y,
                     duration_ms,
                     delay_ms,
+                    path,
                     ..
                 } => {
                     if let Err(cancelled_reason) =
@@ -341,7 +342,7 @@ fn run_playback(
                     }
 
                     if let Err(message) =
-                        validate_active_input_target(input.as_ref(), &flow.target_window)
+                        prepare_active_input_target(input.as_ref(), &flow.target_window)
                     {
                         reason = PlaybackFinishReason::SafetyStopped;
                         safety_message = Some(message);
@@ -352,15 +353,21 @@ fn run_playback(
                     let (button, _) = click_plan(action);
                     let adjusted_drag_duration =
                         adjusted_duration(*duration_ms, options.speed_multiplier);
-                    match input.drag_cancelable(
-                        button,
-                        *start_x,
-                        *start_y,
-                        *end_x,
-                        *end_y,
-                        adjusted_drag_duration.as_millis() as u64,
-                        &cancel_requested,
-                    ) {
+                    let drag_result = if path.len() >= 2 {
+                        let adjusted_path = adjusted_drag_path(path, options.speed_multiplier);
+                        input.drag_path_cancelable(button, &adjusted_path, &cancel_requested)
+                    } else {
+                        input.drag_cancelable(
+                            button,
+                            *start_x,
+                            *start_y,
+                            *end_x,
+                            *end_y,
+                            adjusted_drag_duration.as_millis() as u64,
+                            &cancel_requested,
+                        )
+                    };
+                    match drag_result {
                         Ok(true) => {
                             reason = current_cancel_reason(&cancel_reason);
                             break 'playback;
@@ -385,7 +392,7 @@ fn run_playback(
                     }
 
                     if let Err(message) =
-                        validate_active_input_target(input.as_ref(), &flow.target_window)
+                        prepare_active_input_target(input.as_ref(), &flow.target_window)
                     {
                         reason = PlaybackFinishReason::SafetyStopped;
                         safety_message = Some(message);
@@ -410,7 +417,7 @@ fn run_playback(
                     }
 
                     if let Err(message) =
-                        validate_active_input_target(input.as_ref(), &flow.target_window)
+                        prepare_active_input_target(input.as_ref(), &flow.target_window)
                     {
                         reason = PlaybackFinishReason::SafetyStopped;
                         safety_message = Some(message);
@@ -444,7 +451,7 @@ fn run_playback(
                     }
 
                     if let Err(message) =
-                        validate_active_input_target(input.as_ref(), &flow.target_window)
+                        prepare_active_input_target(input.as_ref(), &flow.target_window)
                     {
                         reason = PlaybackFinishReason::SafetyStopped;
                         safety_message = Some(message);
@@ -476,7 +483,7 @@ fn run_playback(
                     }
 
                     if let Err(message) =
-                        validate_active_input_target(input.as_ref(), &flow.target_window)
+                        prepare_active_input_target(input.as_ref(), &flow.target_window)
                     {
                         reason = PlaybackFinishReason::SafetyStopped;
                         safety_message = Some(message);
@@ -553,6 +560,20 @@ fn validate_active_input_target(
     validate_input_target(expected, &active_window)
 }
 
+fn prepare_active_input_target(
+    input: &dyn PlaybackInput,
+    expected: &TargetWindow,
+) -> Result<(), String> {
+    if validate_active_input_target(input, expected).is_ok() {
+        return Ok(());
+    }
+
+    input
+        .focus_target_window(expected)
+        .map_err(|error| format!("无法切换到录制目标窗口：{error}，已拒绝继续回放。"))?;
+    validate_active_input_target(input, expected)
+}
+
 fn wait_before_step(
     delay_ms: u64,
     options: PlaybackOptions,
@@ -580,7 +601,15 @@ fn has_known_process(process: &str) -> bool {
 
 fn has_known_title(title: &str) -> bool {
     let title = title.trim();
-    !title.is_empty() && title != "N/A" && title != "未知活动窗口" && title != "尚未捕获活动窗口"
+    !title.is_empty()
+        && title != "N/A"
+        && title != "未知活动窗口"
+        && title != "尚未捕获活动窗口"
+        && !is_unstable_child_window_title(title)
+}
+
+fn is_unstable_child_window_title(title: &str) -> bool {
+    title.eq_ignore_ascii_case("Chrome Legacy Window")
 }
 
 fn same_process(expected: &str, active: &str) -> bool {
@@ -611,6 +640,16 @@ fn current_cancel_reason(cancel_reason: &Mutex<PlaybackFinishReason>) -> Playbac
 fn adjusted_duration(duration_ms: u64, speed_multiplier: f64) -> Duration {
     let adjusted_ms = (duration_ms as f64 / speed_multiplier).ceil().max(0.0) as u64;
     Duration::from_millis(adjusted_ms)
+}
+
+fn adjusted_drag_path(path: &[DragPathPoint], speed_multiplier: f64) -> Vec<PlaybackMousePoint> {
+    path.iter()
+        .map(|point| PlaybackMousePoint {
+            x: point.x,
+            y: point.y,
+            elapsed_ms: (point.elapsed_ms as f64 / speed_multiplier).ceil().max(0.0) as u64,
+        })
+        .collect()
 }
 
 fn loop_description(loop_count: u32) -> String {

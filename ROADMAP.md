@@ -10,8 +10,8 @@ Remember currently has a post-MVP desktop automation surface:
 - Flow files: app-local `flows/*.remember.json` persistence.
 - Recording session lifecycle: start / stop commands create a recorded flow and
   sync it across both windows.
-- Recording safety warning: the control window requires confirmation before
-  starting a recording session.
+- Recording starts directly from the control window; recording status still
+  shows the sensitive-input warning.
 - Active-window metadata: recording sessions capture foreground window title,
   process, and size as target-window metadata.
 - Mouse-click capture: a Windows low-level mouse hook records discrete left and
@@ -71,9 +71,9 @@ Remember currently has a post-MVP desktop automation surface:
   startup and triggers the same emergency-stop playback path as the workbench
   command; a desktop smoke check verified that it interrupts a safe long-wait
   flow.
-- Playback now waits an input step's `delayMs` before target-window validation,
-  allowing the user to press Replay from Remember and switch focus back to the
-  recorded target before any input is sent.
+- Playback now waits an input step's `delayMs`, then tries to bring the
+  recorded target window to the foreground before target-window validation and
+  input injection.
 - Windows packaging is enabled for NSIS; `npm run tauri build` produced
   `src-tauri/target/release/bundle/nsis/Remember_0.1.0_x64-setup.exe`, and the
   release executable launched successfully.
@@ -95,8 +95,8 @@ Remember currently has a post-MVP desktop automation surface:
 - Recording now converts fast nearby left-click pairs into a single double-click
   step and captures vertical or horizontal mouse-wheel events as scroll steps.
 - Recording now captures left or right mouse drags as explicit drag steps with
-  start/end coordinates and drag duration, instead of degrading them into
-  ordinary clicks.
+  start/end coordinates, drag duration, and sampled path points, instead of
+  degrading them into ordinary clicks.
 - Keyboard recording now preserves ordinary control keys such as Enter, Tab,
   Backspace, Delete, arrow keys, and Esc as explicit key steps.
 - Playback now executes drag and ordinary key steps through the same
@@ -122,6 +122,8 @@ Remember currently has a post-MVP desktop automation surface:
   when the shortcut is unavailable.
 - Browser preview fallbacks no longer fabricate a duplicate sample flow; the
   app expects Tauri desktop commands for real flow data.
+- Desktop initial flow loading no longer creates a first-run sample flow file
+  when no saved flows exist.
 - Release signing is now checked by `npm run verify:release-signature`, which
   fails if the release executable or NSIS installer is missing, unsigned, or not
   trusted.
@@ -158,7 +160,7 @@ keeping the UI shell stable.
 - [x] Mirror the v1 flow schema in Rust or a Rust-owned storage model.
 - [x] Add Tauri commands for listing, loading, saving, and creating flows.
 - [x] Store flows in an app-local data directory.
-- [x] Keep one default sample flow only for first-run onboarding.
+- [x] Start with an empty unsaved flow when no saved flows exist.
 - [x] Connect the control window flow selector to saved flows.
 - [x] Connect workbench save and save-as buttons to real persistence.
 - [x] Show save status and last-saved time in the workbench.
@@ -187,7 +189,7 @@ Goal: record basic foreground user actions into the v1 flow model.
 - [x] Capture basic active-window metadata.
 - [x] Do not record full mouse movement by default.
 - [x] Send recorded steps to the frontend when recording stops.
-- [x] Warn before recording sensitive input.
+- [x] Show a sensitive-input warning during recording.
 - [x] Verify recording with a safe local test flow.
 
 Acceptance criteria:

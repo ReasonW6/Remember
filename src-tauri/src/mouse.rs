@@ -1,9 +1,13 @@
-use crate::recorder::{RecordedMouseClick, RecordedMouseDrag, RecordedMouseScroll};
+use crate::recorder::{
+    RecordedMouseClick, RecordedMouseDrag, RecordedMousePathPoint, RecordedMouseScroll,
+};
 use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "windows")]
 mod platform {
-    use super::{RecordedMouseClick, RecordedMouseDrag, RecordedMouseScroll};
+    use super::{
+        RecordedMouseClick, RecordedMouseDrag, RecordedMousePathPoint, RecordedMouseScroll,
+    };
     use crate::{recorder::RecordedMouseButton, storage::TargetWindow, windows};
     use std::{
         ffi::c_void,
@@ -22,10 +26,14 @@ mod platform {
     const WM_LBUTTONUP: usize = 0x0202;
     const WM_RBUTTONDOWN: usize = 0x0204;
     const WM_RBUTTONUP: usize = 0x0205;
+    const WM_MOUSEMOVE: usize = 0x0200;
     const WM_MOUSEWHEEL: usize = 0x020A;
     const WM_MOUSEHWHEEL: usize = 0x020E;
     const WM_QUIT: u32 = 0x0012;
     const DRAG_THRESHOLD_PX: i32 = 5;
+    const DRAG_PATH_SAMPLE_DISTANCE_PX: i32 = 2;
+    const DRAG_PATH_SAMPLE_INTERVAL_MS: u64 = 8;
+    const MAX_DRAG_PATH_POINTS: usize = 512;
 
     static CLICK_SINK: Mutex<Option<Arc<Mutex<Vec<RecordedMouseClick>>>>> = Mutex::new(None);
     static DRAG_SINK: Mutex<Option<Arc<Mutex<Vec<RecordedMouseDrag>>>>> = Mutex::new(None);
@@ -38,6 +46,7 @@ mod platform {
         y: i32,
         button: RecordedMouseButton,
         captured_at_ms: u64,
+        path: Vec<RecordedMousePathPoint>,
         target_window: TargetWindow,
     }
 
@@ -184,13 +193,22 @@ mod platform {
         if code >= 0 {
             if let Some(button) = mouse_down_button(w_param) {
                 let hook = &*(l_param as *const MouseHookStruct);
+                let captured_at_ms = unix_millis();
                 remember_down_event(MouseDownEvent {
                     x: hook.pt.x,
                     y: hook.pt.y,
                     button,
-                    captured_at_ms: unix_millis(),
+                    captured_at_ms,
+                    path: vec![RecordedMousePathPoint {
+                        x: hook.pt.x,
+                        y: hook.pt.y,
+                        captured_at_ms,
+                    }],
                     target_window: windows::target_window_at_point(hook.pt.x, hook.pt.y),
                 });
+            } else if w_param == WM_MOUSEMOVE {
+                let hook = &*(l_param as *const MouseHookStruct);
+                remember_drag_move(hook.pt.x, hook.pt.y, unix_millis());
             } else if let Some(button) = mouse_up_button(w_param) {
                 let hook = &*(l_param as *const MouseHookStruct);
                 finish_down_event(button, hook.pt.x, hook.pt.y, unix_millis());
@@ -241,6 +259,15 @@ mod platform {
         }
     }
 
+    fn remember_drag_move(x: i32, y: i32, captured_at_ms: u64) {
+        if let Ok(mut down_event) = DOWN_EVENT.lock() {
+            let Some(down_event) = down_event.as_mut() else {
+                return;
+            };
+            append_path_point(&mut down_event.path, x, y, captured_at_ms);
+        }
+    }
+
     fn finish_down_event(button: RecordedMouseButton, x: i32, y: i32, captured_at_ms: u64) {
         let down_event = DOWN_EVENT.lock().ok().and_then(|mut event| event.take());
         let Some(down_event) = down_event else {
@@ -251,6 +278,8 @@ mod platform {
         }
 
         if is_drag(&down_event, x, y) {
+            let mut path = down_event.path;
+            append_path_point(&mut path, x, y, captured_at_ms);
             push_drag(RecordedMouseDrag {
                 start_x: down_event.x,
                 start_y: down_event.y,
@@ -259,6 +288,7 @@ mod platform {
                 button,
                 started_at_ms: down_event.captured_at_ms,
                 captured_at_ms,
+                path,
                 target_window: Some(down_event.target_window),
             });
         } else {
@@ -274,6 +304,33 @@ mod platform {
 
     fn is_drag(down_event: &MouseDownEvent, x: i32, y: i32) -> bool {
         (x - down_event.x).abs() > DRAG_THRESHOLD_PX || (y - down_event.y).abs() > DRAG_THRESHOLD_PX
+    }
+
+    fn append_path_point(
+        path: &mut Vec<RecordedMousePathPoint>,
+        x: i32,
+        y: i32,
+        captured_at_ms: u64,
+    ) {
+        if path.len() >= MAX_DRAG_PATH_POINTS {
+            return;
+        }
+
+        if let Some(last) = path.last() {
+            let moved_enough = (x - last.x).abs() >= DRAG_PATH_SAMPLE_DISTANCE_PX
+                || (y - last.y).abs() >= DRAG_PATH_SAMPLE_DISTANCE_PX;
+            let waited_enough =
+                captured_at_ms.saturating_sub(last.captured_at_ms) >= DRAG_PATH_SAMPLE_INTERVAL_MS;
+            if !moved_enough && !waited_enough {
+                return;
+            }
+        }
+
+        path.push(RecordedMousePathPoint {
+            x,
+            y,
+            captured_at_ms,
+        });
     }
 
     fn wheel_delta(mouse_data: u32) -> i32 {

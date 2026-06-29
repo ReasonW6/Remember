@@ -12,6 +12,7 @@ const FLOW_DIR_NAME: &str = "flows";
 const FLOW_FILE_SUFFIX: &str = ".remember.json";
 const CLICK_ACTIONS: &[&str] = &["左键单击", "右键单击", "双击"];
 const DRAG_ACTIONS: &[&str] = &["左键拖拽", "右键拖拽"];
+const MAX_DRAG_PATH_POINTS: usize = 512;
 const MAX_STEP_TIMING_MS: u64 = 300_000;
 const RESERVED_WINDOWS_FILE_NAMES: &[&str] = &[
     "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
@@ -74,6 +75,15 @@ pub struct TargetWindow {
     pub matched: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DragPathPoint {
+    pub x: i32,
+    pub y: i32,
+    #[serde(rename = "elapsedMs")]
+    pub elapsed_ms: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum FlowStep {
@@ -105,6 +115,8 @@ pub enum FlowStep {
         duration_ms: u64,
         #[serde(rename = "delayMs")]
         delay_ms: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        path: Vec<DragPathPoint>,
         note: String,
     },
     #[serde(rename = "type")]
@@ -258,6 +270,38 @@ pub fn sample_flow() -> Flow {
     }
 }
 
+pub fn empty_flow() -> Flow {
+    Flow {
+        version: 1,
+        name: "untitled-flow".to_string(),
+        display_name: "未命名流程".to_string(),
+        target_window: TargetWindow {
+            title: "尚未捕获活动窗口".to_string(),
+            process: "N/A".to_string(),
+            size: "N/A".to_string(),
+            matched: false,
+        },
+        steps: Vec::new(),
+    }
+}
+
+pub fn initial_flow_in_dir(root: &Path) -> StorageResult<SavedFlow> {
+    remove_legacy_default_seed_files(root)?;
+
+    if let Some(summary) = list_flow_summaries_in_dir(root)?
+        .into_iter()
+        .find(|summary| summary.is_valid)
+    {
+        return load_flow_file(root, &summary.file_name);
+    }
+
+    Ok(SavedFlow {
+        file_name: "untitled-flow.remember.json".to_string(),
+        saved_at: 0,
+        flow: empty_flow(),
+    })
+}
+
 pub fn ensure_default_flow_in_dir(root: &Path) -> StorageResult<SavedFlow> {
     fs::create_dir_all(flows_dir(root))?;
 
@@ -269,6 +313,34 @@ pub fn ensure_default_flow_in_dir(root: &Path) -> StorageResult<SavedFlow> {
     }
 
     save_flow_to_dir(root, &sample_flow())
+}
+
+fn remove_legacy_default_seed_files(root: &Path) -> StorageResult<()> {
+    let flows_dir = flows_dir(root);
+    if !flows_dir.exists() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(flows_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() || !is_remember_flow_path(&path) {
+            continue;
+        }
+
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Ok(flow) = load_flow_from_path(&path) else {
+            continue;
+        };
+
+        if is_legacy_default_seed_flow(file_name, &flow) {
+            fs::remove_file(path)?;
+        }
+    }
+
+    Ok(())
 }
 
 pub fn save_flow_as_to_dir(
@@ -527,12 +599,48 @@ fn validate_step_timing(step_id: u32, step: &FlowStep) -> StorageResult<()> {
         FlowStep::Drag {
             duration_ms,
             delay_ms,
+            path,
             ..
         } => {
             validate_max_timing(step_id, "drag", "durationMs", *duration_ms)?;
             validate_max_timing(step_id, "drag", "delayMs", *delay_ms)?;
+            validate_drag_path(step_id, *duration_ms, path)?;
         }
     }
+    Ok(())
+}
+
+fn validate_drag_path(step_id: u32, duration_ms: u64, path: &[DragPathPoint]) -> StorageResult<()> {
+    if path.is_empty() {
+        return Ok(());
+    }
+    if path.len() < 2 {
+        return Err(StorageError::InvalidFlow(format!(
+            "drag step {step_id} path needs at least two points"
+        )));
+    }
+    if path.len() > MAX_DRAG_PATH_POINTS {
+        return Err(StorageError::InvalidFlow(format!(
+            "drag step {step_id} path exceeds {MAX_DRAG_PATH_POINTS} points"
+        )));
+    }
+
+    let mut previous_elapsed_ms = 0;
+    for (index, point) in path.iter().enumerate() {
+        if point.elapsed_ms > duration_ms {
+            return Err(StorageError::InvalidFlow(format!(
+                "drag step {step_id} path point {} exceeds durationMs",
+                index + 1
+            )));
+        }
+        if index > 0 && point.elapsed_ms < previous_elapsed_ms {
+            return Err(StorageError::InvalidFlow(format!(
+                "drag step {step_id} path timing must be ordered"
+            )));
+        }
+        previous_elapsed_ms = point.elapsed_ms;
+    }
+
     Ok(())
 }
 
@@ -785,6 +893,19 @@ fn normalize_display_name(value: &str) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+fn is_legacy_default_seed_flow(file_name: &str, flow: &Flow) -> bool {
+    if file_name != "daily-report.remember.json" || flow.name != "daily-report" {
+        return false;
+    }
+
+    let has_seed_display_name =
+        flow.display_name == "Daily Report 自动化" || flow.display_name.starts_with("Phase1 ");
+    let has_seed_target = flow.target_window.title == "Sales Report - Excel"
+        && flow.target_window.process.eq_ignore_ascii_case("EXCEL.EXE");
+
+    has_seed_display_name && has_seed_target && (flow.steps.is_empty() || *flow == sample_flow())
 }
 
 fn flows_dir(root: &Path) -> PathBuf {

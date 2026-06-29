@@ -104,7 +104,7 @@ fn app_data_root(app: &AppHandle) -> Result<PathBuf, String> {
 #[tauri::command]
 fn get_initial_flow(app: AppHandle) -> Result<SavedFlow, String> {
     let root = app_data_root(&app)?;
-    storage::ensure_default_flow_in_dir(&root).map_err(|error| error.to_string())
+    storage::initial_flow_in_dir(&root).map_err(|error| error.to_string())
 }
 
 #[tauri::command]

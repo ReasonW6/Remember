@@ -86,6 +86,13 @@ export interface DragStep extends BaseStep {
   endX: number;
   endY: number;
   durationMs: number;
+  path?: DragPathPoint[];
+}
+
+export interface DragPathPoint {
+  x: number;
+  y: number;
+  elapsedMs: number;
 }
 
 export interface TypeStep extends BaseStep {

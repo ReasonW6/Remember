@@ -35,7 +35,7 @@ Current implemented capabilities include:
 
 - Tauri v2 desktop app with `control` and `workbench` windows.
 - Local `.remember.json` flow persistence under the app data `flows` directory.
-- Save, save-as, list, load, and first-run sample flow behavior.
+- Save, save-as, list, load, and empty first-run flow behavior.
 - Recording lifecycle owned by Rust commands.
 - Mouse click, double-click, drag, and scroll recording through Windows hooks.
 - Keyboard text, modifier hotkeys, and plain control-key recording.
@@ -44,7 +44,8 @@ Current implemented capabilities include:
 - Filtering of mouse events inside Remember windows when recording stops.
 - Playback of wait, click, drag, text, key, hotkey, and scroll steps.
 - Playback speed and loop count, including confirmed infinite loop mode.
-- Target-window safety gate using recorded and active process/title metadata.
+- Target-window focus attempt and safety gate using recorded and active
+  process/title metadata.
 - Stop and emergency-stop commands.
 - Global emergency hotkey target: `Ctrl + Alt + S`.
 - UI-visible emergency hotkey registration status.
@@ -58,8 +59,8 @@ Current implemented capabilities include:
   to a flow file.
 - Recording-stop filtering for Remember-window keyboard input, obvious
   sensitive-window keyboard input, and high-risk global hotkeys.
-- Tauri-only runtime behavior; browser preview no longer fabricates a duplicate
-  sample flow.
+- Tauri-only runtime behavior; initial loading no longer fabricates or writes a
+  duplicate sample flow.
 - Release signature verification script for checking Authenticode status before
   publishing.
 - NSIS packaging and app icon assets.

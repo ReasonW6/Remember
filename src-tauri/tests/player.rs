@@ -1,6 +1,6 @@
-use remember_lib::playback_input::{PlaybackInput, PlaybackMouseButton};
+use remember_lib::playback_input::{PlaybackInput, PlaybackMouseButton, PlaybackMousePoint};
 use remember_lib::player::{PlaybackFinishReason, PlaybackOptions, PlayerState};
-use remember_lib::storage::{Flow, FlowStep, TargetWindow};
+use remember_lib::storage::{DragPathPoint, Flow, FlowStep, TargetWindow};
 use std::{
     sync::{mpsc, Arc, Mutex},
     thread,
@@ -145,6 +145,106 @@ fn mixed_playback_replays_drag_and_plain_key_steps() {
     assert_eq!(
         *key_presses.lock().expect("key presses should lock"),
         vec!["Enter".to_string()]
+    );
+}
+
+#[test]
+fn drag_path_playback_replays_recorded_points() {
+    let path_drags = Arc::new(Mutex::new(Vec::new()));
+    let mut player = PlayerState::with_input(Arc::new(PathDragPlaybackInput {
+        active_window: target_window(),
+        path_drags: Arc::clone(&path_drags),
+    }));
+    let (sender, receiver) = mpsc::channel();
+
+    player
+        .start(
+            drag_path_flow(),
+            PlaybackOptions {
+                speed_multiplier: 1.0,
+                loop_count: 1,
+                infinite_loop_confirmed: false,
+            },
+            move |payload| sender.send(payload).expect("finished payload should send"),
+        )
+        .expect("drag path playback should start");
+
+    let finished = receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("drag path playback should finish");
+
+    assert_eq!(finished.reason, PlaybackFinishReason::Completed);
+    assert_eq!(finished.completed_steps, 1);
+    assert_eq!(
+        *path_drags.lock().expect("path drags should lock"),
+        vec![RecordedPathDrag {
+            button: PlaybackMouseButton::Left,
+            points: vec![
+                PlaybackMousePoint {
+                    x: 120,
+                    y: 240,
+                    elapsed_ms: 0,
+                },
+                PlaybackMousePoint {
+                    x: 260,
+                    y: 360,
+                    elapsed_ms: 220,
+                },
+                PlaybackMousePoint {
+                    x: 420,
+                    y: 520,
+                    elapsed_ms: 520,
+                },
+            ],
+        }]
+    );
+}
+
+#[test]
+fn drag_path_playback_scales_point_timing_with_speed() {
+    let path_drags = Arc::new(Mutex::new(Vec::new()));
+    let mut player = PlayerState::with_input(Arc::new(PathDragPlaybackInput {
+        active_window: target_window(),
+        path_drags: Arc::clone(&path_drags),
+    }));
+    let (sender, receiver) = mpsc::channel();
+
+    player
+        .start(
+            drag_path_flow(),
+            PlaybackOptions {
+                speed_multiplier: 2.0,
+                loop_count: 1,
+                infinite_loop_confirmed: false,
+            },
+            move |payload| sender.send(payload).expect("finished payload should send"),
+        )
+        .expect("drag path playback should start");
+
+    let finished = receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("drag path playback should finish");
+
+    assert_eq!(finished.reason, PlaybackFinishReason::Completed);
+    assert_eq!(
+        path_drags.lock().expect("path drags should lock")[0].points,
+        vec![
+            PlaybackMousePoint {
+                x: 120,
+                y: 240,
+                elapsed_ms: 0,
+            },
+            PlaybackMousePoint {
+                x: 260,
+                y: 360,
+                elapsed_ms: 110,
+            },
+            PlaybackMousePoint {
+                x: 420,
+                y: 520,
+                elapsed_ms: 260,
+            },
+        ]
     );
 }
 
@@ -329,6 +429,103 @@ fn click_playback_safety_stops_when_active_window_differs() {
     assert!(finished.message.contains("安全停止"));
     assert!(finished.message.contains("不同"));
     assert!(clicks.lock().expect("clicks should lock").is_empty());
+}
+
+#[test]
+fn click_playback_focuses_recorded_target_before_clicking() {
+    let active_window = Arc::new(Mutex::new(TargetWindow {
+        title: "Remember".to_string(),
+        process: "remember.exe".to_string(),
+        size: "536 x 209".to_string(),
+        matched: true,
+    }));
+    let focus_requests = Arc::new(Mutex::new(Vec::new()));
+    let clicks = Arc::new(Mutex::new(Vec::new()));
+    let mut player = PlayerState::with_input(Arc::new(FocusingPlaybackInput {
+        active_window: Arc::clone(&active_window),
+        focus_requests: Arc::clone(&focus_requests),
+        clicks: Arc::clone(&clicks),
+    }));
+    let (sender, receiver) = mpsc::channel();
+
+    player
+        .start(
+            click_only_flow(target_window()),
+            PlaybackOptions {
+                speed_multiplier: 5.0,
+                loop_count: 1,
+                infinite_loop_confirmed: false,
+            },
+            move |payload| sender.send(payload).expect("finished payload should send"),
+        )
+        .expect("click playback should start");
+
+    let finished = receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("focused click playback should finish");
+
+    assert_eq!(finished.reason, PlaybackFinishReason::Completed);
+    assert_eq!(finished.completed_steps, 1);
+    assert_eq!(finished.skipped_steps, 0);
+    assert_eq!(
+        *focus_requests.lock().expect("focus requests should lock"),
+        vec![target_window()]
+    );
+    assert_eq!(clicks.lock().expect("clicks should lock").len(), 1);
+}
+
+#[test]
+fn click_playback_allows_chrome_legacy_child_title_after_focus() {
+    let active_window = Arc::new(Mutex::new(TargetWindow {
+        title: "Remember".to_string(),
+        process: "remember.exe".to_string(),
+        size: "536 x 209".to_string(),
+        matched: true,
+    }));
+    let focus_requests = Arc::new(Mutex::new(Vec::new()));
+    let clicks = Arc::new(Mutex::new(Vec::new()));
+    let recorded_target = TargetWindow {
+        title: "Chrome Legacy Window".to_string(),
+        process: "Codex.exe".to_string(),
+        size: "1523 x 1026".to_string(),
+        matched: true,
+    };
+    let top_level_target = TargetWindow {
+        title: "Codex".to_string(),
+        process: "Codex.exe".to_string(),
+        size: "1523 x 1026".to_string(),
+        matched: true,
+    };
+    let mut player = PlayerState::with_input(Arc::new(TopLevelFocusingPlaybackInput {
+        active_window: Arc::clone(&active_window),
+        focused_window: top_level_target,
+        focus_requests: Arc::clone(&focus_requests),
+        clicks: Arc::clone(&clicks),
+    }));
+    let (sender, receiver) = mpsc::channel();
+
+    player
+        .start(
+            click_only_flow(recorded_target.clone()),
+            PlaybackOptions {
+                speed_multiplier: 5.0,
+                loop_count: 1,
+                infinite_loop_confirmed: false,
+            },
+            move |payload| sender.send(payload).expect("finished payload should send"),
+        )
+        .expect("click playback should start");
+
+    let finished = receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("focused click playback should finish");
+
+    assert_eq!(finished.reason, PlaybackFinishReason::Completed);
+    assert_eq!(
+        *focus_requests.lock().expect("focus requests should lock"),
+        vec![recorded_target]
+    );
+    assert_eq!(clicks.lock().expect("clicks should lock").len(), 1);
 }
 
 #[test]
@@ -962,6 +1159,7 @@ fn drag_and_key_flow() -> Flow {
                 end_y: 520,
                 duration_ms: 300,
                 delay_ms: 10,
+                path: Vec::new(),
                 note: "safe drag".to_string(),
             },
             FlowStep::Key {
@@ -972,6 +1170,44 @@ fn drag_and_key_flow() -> Flow {
                 note: "safe key".to_string(),
             },
         ],
+    }
+}
+
+fn drag_path_flow() -> Flow {
+    Flow {
+        version: 1,
+        name: "drag-path".to_string(),
+        display_name: "Drag Path".to_string(),
+        target_window: target_window(),
+        steps: vec![FlowStep::Drag {
+            id: 1,
+            action: "左键拖拽".to_string(),
+            target: "(120, 240) -> (420, 520) [屏幕绝对]".to_string(),
+            start_x: 120,
+            start_y: 240,
+            end_x: 420,
+            end_y: 520,
+            duration_ms: 520,
+            delay_ms: 10,
+            path: vec![
+                DragPathPoint {
+                    x: 120,
+                    y: 240,
+                    elapsed_ms: 0,
+                },
+                DragPathPoint {
+                    x: 260,
+                    y: 360,
+                    elapsed_ms: 220,
+                },
+                DragPathPoint {
+                    x: 420,
+                    y: 520,
+                    elapsed_ms: 520,
+                },
+            ],
+            note: "safe drag path".to_string(),
+        }],
     }
 }
 
@@ -991,6 +1227,7 @@ fn long_drag_flow() -> Flow {
             end_y: 520,
             duration_ms: 800,
             delay_ms: 10,
+            path: Vec::new(),
             note: "long drag".to_string(),
         }],
     }
@@ -1055,6 +1292,12 @@ struct RecordedDrag {
     duration_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecordedPathDrag {
+    button: PlaybackMouseButton,
+    points: Vec<PlaybackMousePoint>,
+}
+
 struct ExtendedFakePlaybackInput {
     active_window: TargetWindow,
     drags: Arc<Mutex<Vec<RecordedDrag>>>,
@@ -1064,6 +1307,11 @@ struct ExtendedFakePlaybackInput {
 struct CancelableDragPlaybackInput {
     active_window: TargetWindow,
     drag_started: Arc<Mutex<bool>>,
+}
+
+struct PathDragPlaybackInput {
+    active_window: TargetWindow,
+    path_drags: Arc<Mutex<Vec<RecordedPathDrag>>>,
 }
 
 impl PlaybackInput for CancelableDragPlaybackInput {
@@ -1104,6 +1352,44 @@ impl PlaybackInput for CancelableDragPlaybackInput {
             }
             thread::sleep(Duration::from_millis(10));
         }
+        Ok(false)
+    }
+}
+
+impl PlaybackInput for PathDragPlaybackInput {
+    fn active_window_target(&self) -> TargetWindow {
+        self.active_window.clone()
+    }
+
+    fn click(&self, _button: PlaybackMouseButton, _x: i32, _y: i32) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn type_text(&self, _text: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn press_hotkey(&self, _keys: &[String]) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn scroll(&self, _delta_x: i32, _delta_y: i32) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn drag_path_cancelable(
+        &self,
+        button: PlaybackMouseButton,
+        points: &[PlaybackMousePoint],
+        _cancel_requested: &std::sync::atomic::AtomicBool,
+    ) -> Result<bool, String> {
+        self.path_drags
+            .lock()
+            .expect("path drags should lock")
+            .push(RecordedPathDrag {
+                button,
+                points: points.to_vec(),
+            });
         Ok(false)
     }
 }
@@ -1221,6 +1507,93 @@ impl PlaybackInput for FakePlaybackInput {
                 delta_x,
                 delta_y,
             });
+        Ok(())
+    }
+}
+
+struct FocusingPlaybackInput {
+    active_window: Arc<Mutex<TargetWindow>>,
+    focus_requests: Arc<Mutex<Vec<TargetWindow>>>,
+    clicks: Arc<Mutex<Vec<RecordedClick>>>,
+}
+
+impl PlaybackInput for FocusingPlaybackInput {
+    fn active_window_target(&self) -> TargetWindow {
+        self.active_window
+            .lock()
+            .expect("active window should lock")
+            .clone()
+    }
+
+    fn focus_target_window(&self, target: &TargetWindow) -> Result<(), String> {
+        self.focus_requests
+            .lock()
+            .expect("focus requests should lock")
+            .push(target.clone());
+        *self
+            .active_window
+            .lock()
+            .expect("active window should lock") = target.clone();
+        Ok(())
+    }
+
+    fn click(&self, button: PlaybackMouseButton, x: i32, y: i32) -> Result<(), String> {
+        self.clicks
+            .lock()
+            .expect("clicks should lock")
+            .push(RecordedClick { button, x, y });
+        Ok(())
+    }
+
+    fn type_text(&self, _text: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn press_hotkey(&self, _keys: &[String]) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+struct TopLevelFocusingPlaybackInput {
+    active_window: Arc<Mutex<TargetWindow>>,
+    focused_window: TargetWindow,
+    focus_requests: Arc<Mutex<Vec<TargetWindow>>>,
+    clicks: Arc<Mutex<Vec<RecordedClick>>>,
+}
+
+impl PlaybackInput for TopLevelFocusingPlaybackInput {
+    fn active_window_target(&self) -> TargetWindow {
+        self.active_window
+            .lock()
+            .expect("active window should lock")
+            .clone()
+    }
+
+    fn focus_target_window(&self, target: &TargetWindow) -> Result<(), String> {
+        self.focus_requests
+            .lock()
+            .expect("focus requests should lock")
+            .push(target.clone());
+        *self
+            .active_window
+            .lock()
+            .expect("active window should lock") = self.focused_window.clone();
+        Ok(())
+    }
+
+    fn click(&self, button: PlaybackMouseButton, x: i32, y: i32) -> Result<(), String> {
+        self.clicks
+            .lock()
+            .expect("clicks should lock")
+            .push(RecordedClick { button, x, y });
+        Ok(())
+    }
+
+    fn type_text(&self, _text: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn press_hotkey(&self, _keys: &[String]) -> Result<(), String> {
         Ok(())
     }
 }

@@ -1,5 +1,5 @@
 use remember_lib::recorder::{RecordedMouseButton, RecorderState, ScreenRect};
-use remember_lib::storage::{FlowStep, TargetWindow};
+use remember_lib::storage::{DragPathPoint, FlowStep, TargetWindow};
 
 #[test]
 fn start_recording_opens_one_active_session() {
@@ -280,6 +280,64 @@ fn stop_recording_converts_mouse_drag_to_drag_step_with_duration() {
             assert!(note.contains("鼠标拖拽"));
         }
         step => panic!("expected drag step, got {step:?}"),
+    }
+}
+
+#[test]
+fn stop_recording_preserves_mouse_drag_path_points() {
+    let mut recorder = RecorderState::default();
+    recorder.start().expect("recording should start");
+    let started_at_ms = recorder
+        .active_started_at_ms()
+        .expect("active session should expose start time");
+
+    recorder
+        .record_mouse_drag_path_at(
+            120,
+            240,
+            420,
+            520,
+            RecordedMouseButton::Left,
+            started_at_ms + 300,
+            started_at_ms + 820,
+            vec![
+                (120, 240, started_at_ms + 300),
+                (260, 360, started_at_ms + 520),
+                (420, 520, started_at_ms + 820),
+            ],
+        )
+        .expect("left drag path should be recorded");
+
+    let stopped = recorder.stop().expect("recording should stop");
+
+    assert_eq!(stopped.flow.steps.len(), 1);
+    match &stopped.flow.steps[0] {
+        FlowStep::Drag {
+            path, duration_ms, ..
+        } => {
+            assert_eq!(*duration_ms, 520);
+            assert_eq!(
+                path,
+                &vec![
+                    DragPathPoint {
+                        x: 120,
+                        y: 240,
+                        elapsed_ms: 0,
+                    },
+                    DragPathPoint {
+                        x: 260,
+                        y: 360,
+                        elapsed_ms: 220,
+                    },
+                    DragPathPoint {
+                        x: 420,
+                        y: 520,
+                        elapsed_ms: 520,
+                    },
+                ]
+            );
+        }
+        step => panic!("expected drag step with path, got {step:?}"),
     }
 }
 

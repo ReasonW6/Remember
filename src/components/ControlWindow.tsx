@@ -5,11 +5,13 @@ import {
   Square,
   Keyboard,
 } from "lucide-react";
-import type { AppStatus, Flow, FlowSummary } from "../types";
+import { buildFlowOptions } from "../flowOptions";
+import type { AppStatus, Flow, FlowSummary, SavedFlow } from "../types";
 
 interface ControlWindowProps {
   flow: Flow;
   flowSummaries: FlowSummary[];
+  retainedDraft: SavedFlow | null;
   selectedFileName: string;
   status: AppStatus;
   statusLabel: string;
@@ -22,10 +24,6 @@ interface ControlWindowProps {
   onFlowSelect: (fileName: string) => void;
   onOpenWorkbench: () => void;
   emergencyStopHint: string;
-  recordingWarningVisible: boolean;
-  recordingSafetyWarning: string;
-  onConfirmRecordingStart: () => void;
-  onCancelRecordingStart: () => void;
   infiniteLoopWarningVisible: boolean;
   infiniteLoopConfirmed: boolean;
   infiniteLoopWarning: string;
@@ -36,6 +34,7 @@ interface ControlWindowProps {
 export function ControlWindow({
   flow,
   flowSummaries,
+  retainedDraft,
   selectedFileName,
   status,
   statusLabel,
@@ -48,30 +47,18 @@ export function ControlWindow({
   onFlowSelect,
   onOpenWorkbench,
   emergencyStopHint,
-  recordingWarningVisible,
-  recordingSafetyWarning,
-  onConfirmRecordingStart,
-  onCancelRecordingStart,
   infiniteLoopWarningVisible,
   infiniteLoopConfirmed,
   infiniteLoopWarning,
   onConfirmInfiniteLoop,
   onCancelInfiniteLoop,
 }: ControlWindowProps) {
-  const currentFlowSummary = {
-    fileName: selectedFileName,
-    name: flow.name,
-    displayName: flow.displayName,
-    stepCount: flow.steps.length,
-    savedAt: 0,
-    isValid: true,
-    error: null,
-  };
-  const flowOptions = flowSummaries.some(
-    (summary) => summary.fileName === selectedFileName,
-  )
-    ? flowSummaries
-    : [currentFlowSummary, ...flowSummaries];
+  const flowOptions = buildFlowOptions({
+    flow,
+    flowSummaries,
+    selectedFileName,
+    retainedDraft,
+  });
   const invalidFlowSummaries = flowOptions.filter((summary) => !summary.isValid);
   const invalidFlowDetail = invalidFlowSummaries
     .map((summary) => `${summary.displayName}: ${summary.error ?? "未知错误"}`)
@@ -85,9 +72,7 @@ export function ControlWindow({
             <span>当前流程</span>
             <select
               aria-label="当前流程"
-              disabled={
-                isFlowLoading || recordingWarningVisible || infiniteLoopWarningVisible
-              }
+              disabled={isFlowLoading || infiniteLoopWarningVisible}
               value={selectedFileName}
               onChange={(event) => onFlowSelect(event.target.value)}
             >
@@ -109,7 +94,6 @@ export function ControlWindow({
             disabled={
               status === "recording" ||
               isFlowLoading ||
-              recordingWarningVisible ||
               infiniteLoopWarningVisible
             }
             onClick={() => onStatusChange("recording")}
@@ -120,7 +104,6 @@ export function ControlWindow({
           <button
             className="action-button replay"
             disabled={
-              recordingWarningVisible ||
               infiniteLoopWarningVisible ||
               isFlowLoading ||
               status === "recording" ||
@@ -134,7 +117,6 @@ export function ControlWindow({
           <button
             className="action-button stop"
             disabled={
-              recordingWarningVisible ||
               infiniteLoopWarningVisible ||
               isFlowLoading ||
               status === "ready" ||
@@ -179,9 +161,7 @@ export function ControlWindow({
           <button
             className="icon-button settings-button"
             aria-label="设置"
-            disabled={
-              isFlowLoading || recordingWarningVisible || infiniteLoopWarningVisible
-            }
+            disabled={isFlowLoading || infiniteLoopWarningVisible}
             onClick={onOpenWorkbench}
           >
             <Settings size={18} />
@@ -208,22 +188,7 @@ export function ControlWindow({
           ) : null}
         </footer>
 
-        {recordingWarningVisible ? (
-          <div className="recording-warning-popover" role="alert">
-            <span>{recordingSafetyWarning}</span>
-            <div>
-              <button className="toolbar-button slim" onClick={onCancelRecordingStart}>
-                取消
-              </button>
-              <button
-                className="toolbar-button primary slim"
-                onClick={onConfirmRecordingStart}
-              >
-                继续录制
-              </button>
-            </div>
-          </div>
-        ) : infiniteLoopWarningVisible ? (
+        {infiniteLoopWarningVisible ? (
           <div className="recording-warning-popover infinite-loop-popover" role="alert">
             <span>{infiniteLoopWarning}</span>
             <div>
