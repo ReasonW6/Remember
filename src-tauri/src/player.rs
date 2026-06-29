@@ -1,6 +1,6 @@
 use crate::{
     playback_input::{PlaybackInput, PlaybackMouseButton, SystemPlaybackInput},
-    storage::{Flow, FlowStep, TargetWindow},
+    storage::{validate_flow, Flow, FlowStep, TargetWindow},
 };
 use serde::Serialize;
 use std::{
@@ -18,6 +18,7 @@ static NEXT_PLAYBACK_RUN_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug)]
 pub enum PlayerError {
     AlreadyPlaying,
+    InvalidFlow(String),
     InvalidLoopCount,
     InvalidSpeed,
     NotPlaying,
@@ -27,6 +28,7 @@ impl fmt::Display for PlayerError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::AlreadyPlaying => write!(formatter, "playback is already active"),
+            Self::InvalidFlow(message) => write!(formatter, "invalid playback flow: {message}"),
             Self::InvalidLoopCount => write!(
                 formatter,
                 "infinite playback requires explicit confirmation"
@@ -147,6 +149,7 @@ impl PlayerState {
             return Err(PlayerError::AlreadyPlaying);
         }
         validate_options(options)?;
+        validate_flow(&flow).map_err(|error| PlayerError::InvalidFlow(error.to_string()))?;
 
         let cancel_requested = Arc::new(AtomicBool::new(false));
         let cancel_reason = Arc::new(Mutex::new(PlaybackFinishReason::Stopped));
@@ -288,16 +291,15 @@ fn run_playback(
                     delay_ms,
                     ..
                 } => {
-                    if sleep_cancelable(
-                        adjusted_duration(*delay_ms, options.speed_multiplier),
-                        &cancel_requested,
-                    ) {
-                        reason = current_cancel_reason(&cancel_reason);
+                    if let Err(cancelled_reason) =
+                        wait_before_step(*delay_ms, options, &cancel_requested, &cancel_reason)
+                    {
+                        reason = cancelled_reason;
                         break 'playback;
                     }
 
-                    let active_window = input.active_window_target();
-                    if let Err(message) = validate_input_target(&flow.target_window, &active_window)
+                    if let Err(message) =
+                        validate_active_input_target(input.as_ref(), &flow.target_window)
                     {
                         reason = PlaybackFinishReason::SafetyStopped;
                         safety_message = Some(message);
@@ -331,16 +333,15 @@ fn run_playback(
                     delay_ms,
                     ..
                 } => {
-                    if sleep_cancelable(
-                        adjusted_duration(*delay_ms, options.speed_multiplier),
-                        &cancel_requested,
-                    ) {
-                        reason = current_cancel_reason(&cancel_reason);
+                    if let Err(cancelled_reason) =
+                        wait_before_step(*delay_ms, options, &cancel_requested, &cancel_reason)
+                    {
+                        reason = cancelled_reason;
                         break 'playback;
                     }
 
-                    let active_window = input.active_window_target();
-                    if let Err(message) = validate_input_target(&flow.target_window, &active_window)
+                    if let Err(message) =
+                        validate_active_input_target(input.as_ref(), &flow.target_window)
                     {
                         reason = PlaybackFinishReason::SafetyStopped;
                         safety_message = Some(message);
@@ -351,32 +352,40 @@ fn run_playback(
                     let (button, _) = click_plan(action);
                     let adjusted_drag_duration =
                         adjusted_duration(*duration_ms, options.speed_multiplier);
-                    if let Err(error) = input.drag(
+                    match input.drag_cancelable(
                         button,
                         *start_x,
                         *start_y,
                         *end_x,
                         *end_y,
                         adjusted_drag_duration.as_millis() as u64,
+                        &cancel_requested,
                     ) {
-                        reason = PlaybackFinishReason::SafetyStopped;
-                        safety_message = Some(format!("拖拽执行失败：{error}，已拒绝继续回放。"));
-                        skipped_steps = skipped_steps.saturating_add(1);
-                        break 'playback;
+                        Ok(true) => {
+                            reason = current_cancel_reason(&cancel_reason);
+                            break 'playback;
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            reason = PlaybackFinishReason::SafetyStopped;
+                            safety_message =
+                                Some(format!("拖拽执行失败：{error}，已拒绝继续回放。"));
+                            skipped_steps = skipped_steps.saturating_add(1);
+                            break 'playback;
+                        }
                     }
                     completed_steps = completed_steps.saturating_add(1);
                 }
                 FlowStep::Type { text, delay_ms, .. } => {
-                    if sleep_cancelable(
-                        adjusted_duration(*delay_ms, options.speed_multiplier),
-                        &cancel_requested,
-                    ) {
-                        reason = current_cancel_reason(&cancel_reason);
+                    if let Err(cancelled_reason) =
+                        wait_before_step(*delay_ms, options, &cancel_requested, &cancel_reason)
+                    {
+                        reason = cancelled_reason;
                         break 'playback;
                     }
 
-                    let active_window = input.active_window_target();
-                    if let Err(message) = validate_input_target(&flow.target_window, &active_window)
+                    if let Err(message) =
+                        validate_active_input_target(input.as_ref(), &flow.target_window)
                     {
                         reason = PlaybackFinishReason::SafetyStopped;
                         safety_message = Some(message);
@@ -393,16 +402,15 @@ fn run_playback(
                     completed_steps = completed_steps.saturating_add(1);
                 }
                 FlowStep::Key { key, delay_ms, .. } => {
-                    if sleep_cancelable(
-                        adjusted_duration(*delay_ms, options.speed_multiplier),
-                        &cancel_requested,
-                    ) {
-                        reason = current_cancel_reason(&cancel_reason);
+                    if let Err(cancelled_reason) =
+                        wait_before_step(*delay_ms, options, &cancel_requested, &cancel_reason)
+                    {
+                        reason = cancelled_reason;
                         break 'playback;
                     }
 
-                    let active_window = input.active_window_target();
-                    if let Err(message) = validate_input_target(&flow.target_window, &active_window)
+                    if let Err(message) =
+                        validate_active_input_target(input.as_ref(), &flow.target_window)
                     {
                         reason = PlaybackFinishReason::SafetyStopped;
                         safety_message = Some(message);
@@ -419,26 +427,24 @@ fn run_playback(
                     completed_steps = completed_steps.saturating_add(1);
                 }
                 FlowStep::Wait { duration_ms, .. } => {
-                    if sleep_cancelable(
-                        adjusted_duration(*duration_ms, options.speed_multiplier),
-                        &cancel_requested,
-                    ) {
-                        reason = current_cancel_reason(&cancel_reason);
+                    if let Err(cancelled_reason) =
+                        wait_before_step(*duration_ms, options, &cancel_requested, &cancel_reason)
+                    {
+                        reason = cancelled_reason;
                         break 'playback;
                     }
                     completed_steps = completed_steps.saturating_add(1);
                 }
                 FlowStep::Hotkey { keys, delay_ms, .. } => {
-                    if sleep_cancelable(
-                        adjusted_duration(*delay_ms, options.speed_multiplier),
-                        &cancel_requested,
-                    ) {
-                        reason = current_cancel_reason(&cancel_reason);
+                    if let Err(cancelled_reason) =
+                        wait_before_step(*delay_ms, options, &cancel_requested, &cancel_reason)
+                    {
+                        reason = cancelled_reason;
                         break 'playback;
                     }
 
-                    let active_window = input.active_window_target();
-                    if let Err(message) = validate_input_target(&flow.target_window, &active_window)
+                    if let Err(message) =
+                        validate_active_input_target(input.as_ref(), &flow.target_window)
                     {
                         reason = PlaybackFinishReason::SafetyStopped;
                         safety_message = Some(message);
@@ -455,21 +461,22 @@ fn run_playback(
                     completed_steps = completed_steps.saturating_add(1);
                 }
                 FlowStep::Scroll {
+                    x,
+                    y,
                     delta_x,
                     delta_y,
                     delay_ms,
                     ..
                 } => {
-                    if sleep_cancelable(
-                        adjusted_duration(*delay_ms, options.speed_multiplier),
-                        &cancel_requested,
-                    ) {
-                        reason = current_cancel_reason(&cancel_reason);
+                    if let Err(cancelled_reason) =
+                        wait_before_step(*delay_ms, options, &cancel_requested, &cancel_reason)
+                    {
+                        reason = cancelled_reason;
                         break 'playback;
                     }
 
-                    let active_window = input.active_window_target();
-                    if let Err(message) = validate_input_target(&flow.target_window, &active_window)
+                    if let Err(message) =
+                        validate_active_input_target(input.as_ref(), &flow.target_window)
                     {
                         reason = PlaybackFinishReason::SafetyStopped;
                         safety_message = Some(message);
@@ -477,7 +484,11 @@ fn run_playback(
                         break 'playback;
                     }
 
-                    if let Err(error) = input.scroll(*delta_x, *delta_y) {
+                    let scroll_result = match (x, y) {
+                        (Some(x), Some(y)) => input.scroll_at(*x, *y, *delta_x, *delta_y),
+                        _ => input.scroll(*delta_x, *delta_y),
+                    };
+                    if let Err(error) = scroll_result {
                         reason = PlaybackFinishReason::SafetyStopped;
                         safety_message = Some(format!("滚轮输入失败：{error}，已拒绝继续回放。"));
                         skipped_steps = skipped_steps.saturating_add(1);
@@ -532,6 +543,30 @@ fn validate_input_target(expected: &TargetWindow, active: &TargetWindow) -> Resu
     }
 
     Ok(())
+}
+
+fn validate_active_input_target(
+    input: &dyn PlaybackInput,
+    expected: &TargetWindow,
+) -> Result<(), String> {
+    let active_window = input.active_window_target();
+    validate_input_target(expected, &active_window)
+}
+
+fn wait_before_step(
+    delay_ms: u64,
+    options: PlaybackOptions,
+    cancel_requested: &AtomicBool,
+    cancel_reason: &Mutex<PlaybackFinishReason>,
+) -> Result<(), PlaybackFinishReason> {
+    if sleep_cancelable(
+        adjusted_duration(delay_ms, options.speed_multiplier),
+        cancel_requested,
+    ) {
+        Err(current_cancel_reason(cancel_reason))
+    } else {
+        Ok(())
+    }
 }
 
 fn is_known_target(target: &TargetWindow) -> bool {

@@ -92,6 +92,8 @@ fn mixed_playback_replays_click_type_and_hotkey_steps() {
     assert_eq!(
         *scrolls.lock().expect("scrolls should lock"),
         vec![RecordedScroll {
+            x: Some(300),
+            y: Some(420),
             delta_x: 0,
             delta_y: -120,
         }]
@@ -144,6 +146,107 @@ fn mixed_playback_replays_drag_and_plain_key_steps() {
         *key_presses.lock().expect("key presses should lock"),
         vec!["Enter".to_string()]
     );
+}
+
+#[test]
+fn playback_rejects_high_risk_hotkeys_before_starting() {
+    let mut player = PlayerState::default();
+    let (sender, _receiver) = mpsc::channel();
+
+    let result = player.start(
+        unsafe_hotkey_flow(),
+        PlaybackOptions {
+            speed_multiplier: 1.0,
+            loop_count: 1,
+            infinite_loop_confirmed: false,
+        },
+        move |payload| sender.send(payload).expect("finished payload should send"),
+    );
+
+    assert!(result.is_err());
+    assert!(!player.is_playing());
+}
+
+#[test]
+fn emergency_stop_interrupts_long_drag_playback() {
+    let input = Arc::new(CancelableDragPlaybackInput {
+        active_window: target_window(),
+        drag_started: Arc::new(Mutex::new(false)),
+    });
+    let drag_started = Arc::clone(&input.drag_started);
+    let mut player = PlayerState::with_input(input);
+    let (sender, receiver) = mpsc::channel();
+
+    player
+        .start(
+            long_drag_flow(),
+            PlaybackOptions {
+                speed_multiplier: 1.0,
+                loop_count: 1,
+                infinite_loop_confirmed: false,
+            },
+            move |payload| sender.send(payload).expect("finished payload should send"),
+        )
+        .expect("drag playback should start");
+
+    for _ in 0..20 {
+        if *drag_started.lock().expect("drag state should lock") {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    let stopped = player
+        .emergency_stop()
+        .expect("drag playback should emergency stop");
+    assert_eq!(stopped.reason, PlaybackFinishReason::EmergencyStopped);
+
+    let finished = receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("emergency stop should interrupt drag playback");
+
+    assert_eq!(finished.reason, PlaybackFinishReason::EmergencyStopped);
+    assert_eq!(finished.completed_steps, 0);
+}
+
+#[test]
+fn stop_interrupts_long_drag_playback() {
+    let input = Arc::new(CancelableDragPlaybackInput {
+        active_window: target_window(),
+        drag_started: Arc::new(Mutex::new(false)),
+    });
+    let drag_started = Arc::clone(&input.drag_started);
+    let mut player = PlayerState::with_input(input);
+    let (sender, receiver) = mpsc::channel();
+
+    player
+        .start(
+            long_drag_flow(),
+            PlaybackOptions {
+                speed_multiplier: 1.0,
+                loop_count: 1,
+                infinite_loop_confirmed: false,
+            },
+            move |payload| sender.send(payload).expect("finished payload should send"),
+        )
+        .expect("drag playback should start");
+
+    for _ in 0..20 {
+        if *drag_started.lock().expect("drag state should lock") {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    let stopped = player.stop().expect("drag playback should stop");
+    assert_eq!(stopped.reason, PlaybackFinishReason::Stopped);
+
+    let finished = receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("stop should interrupt drag playback");
+
+    assert_eq!(finished.reason, PlaybackFinishReason::Stopped);
+    assert_eq!(finished.completed_steps, 0);
 }
 
 #[test]
@@ -499,6 +602,53 @@ fn scroll_playback_safety_stops_when_active_window_differs() {
 }
 
 #[test]
+fn legacy_scroll_playback_uses_current_cursor_position() {
+    let clicks = Arc::new(Mutex::new(Vec::new()));
+    let typed_texts = Arc::new(Mutex::new(Vec::new()));
+    let hotkeys = Arc::new(Mutex::new(Vec::new()));
+    let scrolls = Arc::new(Mutex::new(Vec::new()));
+    let mut player = PlayerState::with_input(Arc::new(FakePlaybackInput {
+        active_window: target_window(),
+        clicks,
+        typed_texts,
+        hotkeys,
+        scrolls: Arc::clone(&scrolls),
+    }));
+    let (sender, receiver) = mpsc::channel();
+    let legacy_flow: Flow = serde_json::from_str(
+        r#"{"version":1,"name":"legacy-scroll","displayName":"Legacy Scroll","targetWindow":{"title":"Test","process":"test.exe","size":"800 x 600","matched":true},"steps":[{"type":"scroll","id":1,"action":"滚动","deltaX":0,"deltaY":-120,"delayMs":10,"note":"legacy scroll"}]}"#,
+    )
+    .expect("legacy scroll flow should parse");
+
+    player
+        .start(
+            legacy_flow,
+            PlaybackOptions {
+                speed_multiplier: 5.0,
+                loop_count: 1,
+                infinite_loop_confirmed: false,
+            },
+            move |payload| sender.send(payload).expect("finished payload should send"),
+        )
+        .expect("legacy scroll playback should start");
+
+    let finished = receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("legacy scroll playback should finish");
+
+    assert_eq!(finished.reason, PlaybackFinishReason::Completed);
+    assert_eq!(
+        *scrolls.lock().expect("scrolls should lock"),
+        vec![RecordedScroll {
+            x: None,
+            y: None,
+            delta_x: 0,
+            delta_y: -120,
+        }]
+    );
+}
+
+#[test]
 fn stop_interrupts_scroll_playback_before_sending_wheel() {
     let clicks = Arc::new(Mutex::new(Vec::new()));
     let typed_texts = Arc::new(Mutex::new(Vec::new()));
@@ -708,6 +858,8 @@ fn mixed_flow() -> Flow {
             FlowStep::Scroll {
                 id: 4,
                 action: "滚动".to_string(),
+                x: Some(300),
+                y: Some(420),
                 delta_x: 0,
                 delta_y: -120,
                 delay_ms: 10,
@@ -783,6 +935,8 @@ fn scroll_only_flow(target_window: TargetWindow, delay_ms: u64) -> Flow {
         steps: vec![FlowStep::Scroll {
             id: 1,
             action: "滚动".to_string(),
+            x: Some(300),
+            y: Some(420),
             delta_x: 0,
             delta_y: -120,
             delay_ms,
@@ -821,6 +975,43 @@ fn drag_and_key_flow() -> Flow {
     }
 }
 
+fn long_drag_flow() -> Flow {
+    Flow {
+        version: 1,
+        name: "long-drag".to_string(),
+        display_name: "Long Drag".to_string(),
+        target_window: target_window(),
+        steps: vec![FlowStep::Drag {
+            id: 1,
+            action: "左键拖拽".to_string(),
+            target: "(120, 240) -> (420, 520) [屏幕绝对]".to_string(),
+            start_x: 120,
+            start_y: 240,
+            end_x: 420,
+            end_y: 520,
+            duration_ms: 800,
+            delay_ms: 10,
+            note: "long drag".to_string(),
+        }],
+    }
+}
+
+fn unsafe_hotkey_flow() -> Flow {
+    Flow {
+        version: 1,
+        name: "unsafe-hotkey".to_string(),
+        display_name: "Unsafe Hotkey".to_string(),
+        target_window: target_window(),
+        steps: vec![FlowStep::Hotkey {
+            id: 1,
+            action: "快捷键".to_string(),
+            keys: vec!["Win".to_string(), "R".to_string()],
+            delay_ms: 10,
+            note: "unsafe hotkey".to_string(),
+        }],
+    }
+}
+
 fn target_window() -> TargetWindow {
     TargetWindow {
         title: "Test".to_string(),
@@ -848,6 +1039,8 @@ struct RecordedClick {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RecordedScroll {
+    x: Option<i32>,
+    y: Option<i32>,
     delta_x: i32,
     delta_y: i32,
 }
@@ -866,6 +1059,53 @@ struct ExtendedFakePlaybackInput {
     active_window: TargetWindow,
     drags: Arc<Mutex<Vec<RecordedDrag>>>,
     key_presses: Arc<Mutex<Vec<String>>>,
+}
+
+struct CancelableDragPlaybackInput {
+    active_window: TargetWindow,
+    drag_started: Arc<Mutex<bool>>,
+}
+
+impl PlaybackInput for CancelableDragPlaybackInput {
+    fn active_window_target(&self) -> TargetWindow {
+        self.active_window.clone()
+    }
+
+    fn click(&self, _button: PlaybackMouseButton, _x: i32, _y: i32) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn type_text(&self, _text: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn press_hotkey(&self, _keys: &[String]) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn scroll(&self, _delta_x: i32, _delta_y: i32) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn drag_cancelable(
+        &self,
+        _button: PlaybackMouseButton,
+        _start_x: i32,
+        _start_y: i32,
+        _end_x: i32,
+        _end_y: i32,
+        _duration_ms: u64,
+        cancel_requested: &std::sync::atomic::AtomicBool,
+    ) -> Result<bool, String> {
+        *self.drag_started.lock().expect("drag state should lock") = true;
+        for _ in 0..80 {
+            if cancel_requested.load(std::sync::atomic::Ordering::SeqCst) {
+                return Ok(true);
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        Ok(false)
+    }
 }
 
 impl PlaybackInput for ExtendedFakePlaybackInput {
@@ -958,11 +1198,29 @@ impl PlaybackInput for FakePlaybackInput {
         Ok(())
     }
 
+    fn scroll_at(&self, x: i32, y: i32, delta_x: i32, delta_y: i32) -> Result<(), String> {
+        self.scrolls
+            .lock()
+            .expect("scrolls should lock")
+            .push(RecordedScroll {
+                x: Some(x),
+                y: Some(y),
+                delta_x,
+                delta_y,
+            });
+        Ok(())
+    }
+
     fn scroll(&self, delta_x: i32, delta_y: i32) -> Result<(), String> {
         self.scrolls
             .lock()
             .expect("scrolls should lock")
-            .push(RecordedScroll { delta_x, delta_y });
+            .push(RecordedScroll {
+                x: None,
+                y: None,
+                delta_x,
+                delta_y,
+            });
         Ok(())
     }
 }
@@ -1007,11 +1265,29 @@ impl PlaybackInput for SwitchingPlaybackInput {
         Ok(())
     }
 
+    fn scroll_at(&self, x: i32, y: i32, delta_x: i32, delta_y: i32) -> Result<(), String> {
+        self.scrolls
+            .lock()
+            .expect("scrolls should lock")
+            .push(RecordedScroll {
+                x: Some(x),
+                y: Some(y),
+                delta_x,
+                delta_y,
+            });
+        Ok(())
+    }
+
     fn scroll(&self, delta_x: i32, delta_y: i32) -> Result<(), String> {
         self.scrolls
             .lock()
             .expect("scrolls should lock")
-            .push(RecordedScroll { delta_x, delta_y });
+            .push(RecordedScroll {
+                x: None,
+                y: None,
+                delta_x,
+                delta_y,
+            });
         Ok(())
     }
 }

@@ -48,6 +48,12 @@ export interface PlaybackFinishedPayload extends AppStatusPayload {
   message: string;
 }
 
+export interface EmergencyHotkeyStatusPayload {
+  available: boolean;
+  shortcut: string;
+  message: string;
+}
+
 export type FlowStep =
   | ClickStep
   | DragStep
@@ -109,6 +115,8 @@ export interface HotkeyStep extends BaseStep {
 export interface ScrollStep extends BaseStep {
   type: "scroll";
   action: "滚动";
+  x?: number;
+  y?: number;
   deltaX: number;
   deltaY: number;
 }
@@ -140,4 +148,6 @@ export interface FlowSummary {
   displayName: string;
   stepCount: number;
   savedAt: number;
+  isValid: boolean;
+  error: string | null;
 }

@@ -2,7 +2,7 @@
 
 ## Current Snapshot
 
-Remember currently has a working UI shell:
+Remember currently has a post-MVP desktop automation surface:
 
 - Compact control window route: `#/control`.
 - Workbench route: `#/workbench`.
@@ -78,8 +78,8 @@ Remember currently has a working UI shell:
   `src-tauri/target/release/bundle/nsis/Remember_0.1.0_x64-setup.exe`, and the
   release executable launched successfully.
 - Final app icon assets replace the temporary icon: `src-tauri/icons/icon.ico`
-  now includes 16, 32, 48, 64, 128, and 256 px entries, with
-  `src-tauri/icons/remember-icon.svg` kept as the editable source.
+  includes taskbar-optimized small-size frames plus 128 and 256 px entries,
+  with `src-tauri/icons/remember-icon.svg` kept as the editable source.
 - Tray and startup behavior were reviewed for the MVP and intentionally left
   out because the compact always-on-top control window and global emergency
   hotkey keep safety controls visible without adding hidden background behavior.
@@ -107,18 +107,31 @@ Remember currently has a working UI shell:
 - Playback target-window safety now checks the window title when both recorded
   and active titles are known, so same-process but different-document windows
   are refused.
-- The workbench can insert wait, text, hotkey, and ordinary key steps from the step list,
-  shows all timeline and run-log entries through scrolling instead of hiding
-  them, and disables visible post-MVP controls that are not implemented yet.
+- The workbench can insert wait, text, hotkey, and ordinary key steps from the
+  step list, shows all timeline and run-log entries through scrolling instead
+  of hiding them, and keeps visible controls scoped to implemented behavior.
+- Flow saving writes back to the selected file name, uses an atomic replacement
+  path, keeps invalid flow files visible in the list, and rejects empty
+  key/hotkey steps or high-risk global hotkeys.
+- Recording stop filters keyboard input captured inside Remember windows,
+  obvious sensitive windows, and high-risk global hotkeys before producing a
+  flow.
+- Long drag playback now checks stop and emergency-stop requests between drag
+  movement slices and releases the mouse before exiting.
+- The UI reads the real global emergency-hotkey registration status and shows
+  when the shortcut is unavailable.
+- Browser preview fallbacks no longer fabricate a duplicate sample flow; the
+  app expects Tauri desktop commands for real flow data.
+- Release signing is now checked by `npm run verify:release-signature`, which
+  fails if the release executable or NSIS installer is missing, unsigned, or not
+  trusted.
 - The compact control window grid has been tightened so the daily controls fit
   the current 520 px window without horizontal clipping.
-- Placeholder status commands still exist for states not yet backed by full
-  automation behavior.
 - Visual target: unified dark Windows 11 Mica/acrylic style.
 
 The app does not yet provide optional full mouse-trajectory recording,
-IME-aware text capture, password-field detection, or advanced target-window
-matching controls.
+IME-aware text capture, native password-field detection, or advanced
+target-window matching controls.
 
 ## Phase 0: UI Shell
 
@@ -257,5 +270,5 @@ Acceptance criteria:
 MVP product-complete. No Phase 1-5 blocker remains for the first deliverable.
 
 Next work should be treated as post-MVP hardening, for example adding
-password-field recording safeguards, optional mouse-trajectory recording,
-expanding manual QA coverage, or adding future advanced matching controls.
+native password-field detection, optional mouse-trajectory recording, expanding
+manual QA coverage, or adding future advanced matching controls.

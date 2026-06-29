@@ -1,7 +1,8 @@
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   AppStatus,
+  EmergencyHotkeyStatusPayload,
   FlowSummary,
   PlaybackControlPayload,
   PlaybackFinishedPayload,
@@ -11,16 +12,16 @@ import type {
   SavedFlow,
   SaveStatus,
 } from "./types";
-import { sampleSavedFlow } from "./data/sampleFlow";
 import {
   emergencyStopPlayback,
+  EMERGENCY_HOTKEY_SHORTCUT,
+  getEmergencyHotkeyStatus,
   getInitialFlow,
   listFlows,
   loadFlow,
   openWorkbench,
   saveFlow,
   saveFlowAs,
-  setBackendStatus,
   startPlayback,
   startRecording,
   stopPlayback,
@@ -43,6 +44,7 @@ import {
   updateStepText,
   updateTargetWindowMatched,
 } from "./flowEditing";
+import { parseSpeedMultiplier } from "./flowTiming";
 import {
   appendPlaybackControlLog,
   appendPlaybackFinishedLog,
@@ -73,44 +75,121 @@ function asUnsavedRecording(flow: RecordingStopPayload["flow"]): SavedFlow {
   };
 }
 
-function parseSpeedMultiplier(speed: string) {
-  const multiplier = Number(speed.replace(/x$/i, ""));
-  return Number.isFinite(multiplier) && multiplier > 0 ? multiplier : 1;
-}
-
 const INFINITE_LOOP_WARNING =
   "无限循环会一直重复执行，必须确认你知道停止按钮和 Ctrl + Alt + S 急停热键。";
+const FLOW_DRAFT_UPDATED_EVENT = "flow-draft-updated";
+const PLAYBACK_OPTIONS_UPDATED_EVENT = "playback-options-updated";
+
+interface PlaybackOptionsDraft {
+  loopCount: number;
+  speed: string;
+  infiniteLoopConfirmed: boolean;
+}
+
+const initialSavedFlow: SavedFlow = {
+  fileName: "loading.remember.json",
+  savedAt: 0,
+  flow: {
+    version: 1,
+    name: "loading",
+    displayName: "正在加载本地流程",
+    targetWindow: {
+      title: "尚未加载",
+      process: "N/A",
+      size: "N/A",
+      matched: false,
+    },
+    steps: [],
+  },
+};
 
 export function App() {
   const [route, setRoute] = useState(getRoute);
-  const [savedFlow, setSavedFlow] = useState<SavedFlow>(sampleSavedFlow);
+  const [savedFlow, setSavedFlow] = useState<SavedFlow>(initialSavedFlow);
   const [flowSummaries, setFlowSummaries] = useState<FlowSummary[]>([]);
   const [status, setStatus] = useState<AppStatus>("ready");
   const [loopCount, setLoopCount] = useState(3);
   const [speed, setSpeed] = useState("1x");
+  const [isFlowLoading, setIsFlowLoading] = useState(false);
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("idle");
   const [saveMessage, setSaveMessage] = useState("正在读取本地流程");
   const [selectedStepId, setSelectedStepId] = useState<number | null>(null);
   const [runLogs, setRunLogs] = useState<RunLogEntry[]>([]);
+  const [targetSafetyRunId, setTargetSafetyRunId] = useState<number | null>(null);
   const [recordingWarningVisible, setRecordingWarningVisible] = useState(false);
   const [infiniteLoopWarningVisible, setInfiniteLoopWarningVisible] =
     useState(false);
   const [infiniteLoopConfirmed, setInfiniteLoopConfirmed] = useState(false);
+  const [emergencyHotkeyStatus, setEmergencyHotkeyStatus] =
+    useState<EmergencyHotkeyStatusPayload>({
+      available: true,
+      shortcut: EMERGENCY_HOTKEY_SHORTCUT,
+      message: `紧急停止热键可用: ${EMERGENCY_HOTKEY_SHORTCUT}`,
+    });
   const finishedPlaybackRunIds = useRef<Set<number>>(new Set());
   const activePlaybackRunId = useRef<number | null>(null);
   const activePlaybackFlowName = useRef<string>("");
+  const savedFlowRef = useRef<SavedFlow>(initialSavedFlow);
+
+  function setCurrentSavedFlow(nextSavedFlow: SavedFlow) {
+    savedFlowRef.current = nextSavedFlow;
+    setSavedFlow(nextSavedFlow);
+  }
+
+  function setSaveFeedback(nextStatus: SaveStatus, message: string) {
+    setSaveStatus(nextStatus);
+    setSaveMessage(message);
+  }
+
+  function setSaveError(error: unknown) {
+    setSaveFeedback("error", String(error));
+  }
+
+  function markUnsaved() {
+    setSaveFeedback("idle", "有未保存更改");
+  }
+
+  function broadcastFlowDraft(nextSavedFlow: SavedFlow) {
+    void emit<SavedFlow>(FLOW_DRAFT_UPDATED_EVENT, nextSavedFlow).catch(() => {
+      // Browser preview cannot emit Tauri events.
+    });
+  }
+
+  function broadcastPlaybackOptions(nextOptions: PlaybackOptionsDraft) {
+    void emit<PlaybackOptionsDraft>(
+      PLAYBACK_OPTIONS_UPDATED_EVENT,
+      nextOptions,
+    ).catch(() => {
+      // Browser preview cannot emit Tauri events.
+    });
+  }
+
+  function commitDraft(nextSavedFlow: SavedFlow) {
+    setCurrentSavedFlow(nextSavedFlow);
+    markUnsaved();
+    broadcastFlowDraft(nextSavedFlow);
+  }
+
+  function applySavedFlow(
+    nextSavedFlow: SavedFlow,
+    messagePrefix: "已保存" | "已加载" = "已保存",
+  ) {
+    setCurrentSavedFlow(nextSavedFlow);
+    setSaveFeedback(
+      nextSavedFlow.savedAt ? "saved" : "idle",
+      `${messagePrefix}: ${formatSavedAt(nextSavedFlow.savedAt)}`,
+    );
+  }
 
   function applyRecordingStart(payload: RecordingStartPayload) {
     setStatus(payload.status);
-    setSaveStatus("idle");
-    setSaveMessage(payload.warning);
+    setSaveFeedback("idle", payload.warning);
   }
 
   function applyRecordingStop(payload: RecordingStopPayload) {
     setStatus(payload.status);
-    setSavedFlow(asUnsavedRecording(payload.flow));
-    setSaveStatus("idle");
-    setSaveMessage(payload.message);
+    setCurrentSavedFlow(asUnsavedRecording(payload.flow));
+    setSaveFeedback("idle", payload.message);
     setRecordingWarningVisible(false);
     setInfiniteLoopWarningVisible(false);
     setInfiniteLoopConfirmed(false);
@@ -120,11 +199,11 @@ export function App() {
     if (finishedPlaybackRunIds.current.has(payload.runId)) return;
     activePlaybackRunId.current = payload.runId;
     activePlaybackFlowName.current = payload.flowName;
+    setTargetSafetyRunId(null);
     setInfiniteLoopWarningVisible(false);
     setRunLogs((current) => appendPlaybackStartLog(current, payload));
     setStatus(payload.status);
-    setSaveStatus("idle");
-    setSaveMessage(payload.message);
+    setSaveFeedback("idle", payload.message);
   }
 
   function applyPlaybackStop(payload: PlaybackControlPayload) {
@@ -138,19 +217,20 @@ export function App() {
     );
     setInfiniteLoopConfirmed(false);
     setStatus(payload.status);
-    setSaveStatus("idle");
-    setSaveMessage(payload.message);
+    setSaveFeedback("idle", payload.message);
   }
 
   function applyPlaybackFinished(payload: PlaybackFinishedPayload) {
     finishedPlaybackRunIds.current.add(payload.runId);
     activePlaybackRunId.current = null;
     activePlaybackFlowName.current = "";
+    setTargetSafetyRunId(
+      payload.reason === "safetyStopped" ? payload.runId : null,
+    );
     setInfiniteLoopConfirmed(false);
     setRunLogs((current) => appendPlaybackFinishedLog(current, payload));
     setStatus(payload.status);
-    setSaveStatus("idle");
-    setSaveMessage(payload.message);
+    setSaveFeedback("idle", payload.message);
   }
 
   useEffect(() => {
@@ -161,16 +241,20 @@ export function App() {
       try {
         const initialFlow = await getInitialFlow();
         if (cancelled) return;
-        setSavedFlow(initialFlow);
-        setSaveStatus(initialFlow.savedAt ? "saved" : "idle");
-        setSaveMessage(`本地流程: ${formatSavedAt(initialFlow.savedAt)}`);
+        setCurrentSavedFlow(initialFlow);
+        setSaveFeedback(
+          initialFlow.savedAt ? "saved" : "idle",
+          `本地流程: ${formatSavedAt(initialFlow.savedAt)}`,
+        );
+
+        const hotkeyStatus = await getEmergencyHotkeyStatus();
+        if (!cancelled) setEmergencyHotkeyStatus(hotkeyStatus);
 
         const summaries = await listFlows();
         if (!cancelled) setFlowSummaries(summaries);
       } catch (error) {
         if (cancelled) return;
-        setSaveStatus("error");
-        setSaveMessage(String(error));
+        setSaveError(error);
       }
     }
 
@@ -235,6 +319,65 @@ export function App() {
           return;
         }
         unlisteners.push(unlistenPlaybackFinished);
+
+        const unlistenFlowSaved = await listen<SavedFlow>(
+          "flow-saved",
+          (event) => {
+            if (cancelled) return;
+            applySavedFlow(event.payload, "已保存");
+            void refreshFlowSummaries().catch((error) => {
+              setSaveError(error);
+            });
+          },
+        );
+        if (cancelled) {
+          unlistenFlowSaved();
+          return;
+        }
+        unlisteners.push(unlistenFlowSaved);
+
+        const unlistenFlowLoaded = await listen<SavedFlow>(
+          "flow-loaded",
+          (event) => {
+            if (cancelled) return;
+            applySavedFlow(event.payload, "已加载");
+          },
+        );
+        if (cancelled) {
+          unlistenFlowLoaded();
+          return;
+        }
+        unlisteners.push(unlistenFlowLoaded);
+
+        const unlistenDraftUpdated = await listen<SavedFlow>(
+          FLOW_DRAFT_UPDATED_EVENT,
+          (event) => {
+            if (cancelled) return;
+            setCurrentSavedFlow(event.payload);
+            setSaveFeedback("idle", "有未保存更改");
+          },
+        );
+        if (cancelled) {
+          unlistenDraftUpdated();
+          return;
+        }
+        unlisteners.push(unlistenDraftUpdated);
+
+        const unlistenPlaybackOptionsUpdated =
+          await listen<PlaybackOptionsDraft>(
+            PLAYBACK_OPTIONS_UPDATED_EVENT,
+            (event) => {
+              if (cancelled) return;
+              setLoopCount(event.payload.loopCount);
+              setSpeed(event.payload.speed);
+              setInfiniteLoopConfirmed(event.payload.infiniteLoopConfirmed);
+            },
+          );
+        if (cancelled) {
+          unlistenPlaybackOptionsUpdated();
+          return;
+        }
+        unlisteners.push(unlistenPlaybackOptionsUpdated);
       } catch {
         // The browser preview fallback cannot register Tauri events.
       }
@@ -269,11 +412,23 @@ export function App() {
     return labels[status];
   }, [status]);
 
+  const emergencyStopHint = emergencyHotkeyStatus.available
+    ? `紧急停止: ${emergencyHotkeyStatus.shortcut}`
+    : "紧急停止热键不可用，请使用停止按钮";
+
+  const infiniteLoopWarning = emergencyHotkeyStatus.available
+    ? INFINITE_LOOP_WARNING
+    : "无限循环会一直重复执行；当前全局急停热键不可用，必须确认你能使用窗口里的停止按钮。";
+
   async function updateStatus(nextStatus: AppStatus) {
+    if (isFlowLoading && nextStatus === "playing") {
+      setSaveFeedback("idle", "正在加载本地流程，加载完成后再运行。");
+      return;
+    }
+
     if (nextStatus === "recording") {
       setRecordingWarningVisible(true);
-      setSaveStatus("idle");
-      setSaveMessage(RECORDING_SAFETY_WARNING);
+      setSaveFeedback("idle", RECORDING_SAFETY_WARNING);
       return;
     }
 
@@ -283,8 +438,7 @@ export function App() {
         applyRecordingStop(payload);
         await openWorkbench();
       } catch (error) {
-        setSaveStatus("error");
-        setSaveMessage(String(error));
+        setSaveError(error);
       }
       return;
     }
@@ -292,8 +446,7 @@ export function App() {
     if (nextStatus === "playing") {
       if (loopCount === 0 && !infiniteLoopConfirmed) {
         setInfiniteLoopWarningVisible(true);
-        setSaveStatus("idle");
-        setSaveMessage(INFINITE_LOOP_WARNING);
+        setSaveFeedback("idle", infiniteLoopWarning);
         return;
       }
 
@@ -306,8 +459,7 @@ export function App() {
         );
         applyPlaybackStart(payload);
       } catch (error) {
-        setSaveStatus("error");
-        setSaveMessage(String(error));
+        setSaveError(error);
       }
       return;
     }
@@ -317,14 +469,12 @@ export function App() {
         const payload = await stopPlayback();
         applyPlaybackStop(payload);
       } catch (error) {
-        setSaveStatus("error");
-        setSaveMessage(String(error));
+        setSaveError(error);
       }
       return;
     }
 
-    const payload = await setBackendStatus(nextStatus);
-    setStatus(payload.status);
+    setStatus(nextStatus);
   }
 
   async function confirmRecordingStart() {
@@ -333,15 +483,13 @@ export function App() {
       const payload = await startRecording();
       applyRecordingStart(payload);
     } catch (error) {
-      setSaveStatus("error");
-      setSaveMessage(String(error));
+      setSaveError(error);
     }
   }
 
   function cancelRecordingStart() {
     setRecordingWarningVisible(false);
-    setSaveStatus("idle");
-    setSaveMessage("已取消录制");
+    setSaveFeedback("idle", "已取消录制");
   }
 
   function handleLoopCountChange(value: number) {
@@ -353,30 +501,61 @@ export function App() {
       setLoopCount(0);
       setInfiniteLoopConfirmed(false);
       setInfiniteLoopWarningVisible(true);
-      setSaveStatus("idle");
-      setSaveMessage(INFINITE_LOOP_WARNING);
+      setSaveFeedback("idle", infiniteLoopWarning);
+      broadcastPlaybackOptions({
+        loopCount: 0,
+        speed,
+        infiniteLoopConfirmed: false,
+      });
       return;
     }
 
     setLoopCount(nextLoopCount);
     setInfiniteLoopConfirmed(false);
     setInfiniteLoopWarningVisible(false);
+    broadcastPlaybackOptions({
+      loopCount: nextLoopCount,
+      speed,
+      infiniteLoopConfirmed: false,
+    });
+  }
+
+  function handleSpeedChange(nextSpeed: string) {
+    setSpeed(nextSpeed);
+    broadcastPlaybackOptions({
+      loopCount,
+      speed: nextSpeed,
+      infiniteLoopConfirmed,
+    });
   }
 
   function confirmInfiniteLoop() {
     setLoopCount(0);
     setInfiniteLoopConfirmed(true);
     setInfiniteLoopWarningVisible(false);
-    setSaveStatus("idle");
-    setSaveMessage("已确认无限循环；运行后请使用停止或 Ctrl + Alt + S 结束。");
+    broadcastPlaybackOptions({
+      loopCount: 0,
+      speed,
+      infiniteLoopConfirmed: true,
+    });
+    setSaveFeedback(
+      "idle",
+      emergencyHotkeyStatus.available
+        ? `已确认无限循环；运行后请使用停止或 ${emergencyHotkeyStatus.shortcut} 结束。`
+        : "已确认无限循环；运行后请使用窗口里的停止按钮结束。",
+    );
   }
 
   function cancelInfiniteLoop() {
     setLoopCount(1);
     setInfiniteLoopConfirmed(false);
     setInfiniteLoopWarningVisible(false);
-    setSaveStatus("idle");
-    setSaveMessage("已取消无限循环");
+    broadcastPlaybackOptions({
+      loopCount: 1,
+      speed,
+      infiniteLoopConfirmed: false,
+    });
+    setSaveFeedback("idle", "已取消无限循环");
   }
 
   async function refreshFlowSummaries() {
@@ -385,184 +564,164 @@ export function App() {
   }
 
   async function handleSaveFlow() {
-    setSaveStatus("saving");
-    setSaveMessage("正在保存到本地");
+    if (isFlowLoading) {
+      setSaveFeedback("idle", "正在加载本地流程，加载完成后再保存。");
+      return;
+    }
+    setSaveFeedback("saving", "正在保存到本地");
     try {
-      const nextSavedFlow = await saveFlow(flow);
-      setSavedFlow(nextSavedFlow);
-      setSaveStatus("saved");
-      setSaveMessage(`已保存: ${formatSavedAt(nextSavedFlow.savedAt)}`);
+      const nextSavedFlow = await saveFlow(savedFlow.fileName, flow);
+      applySavedFlow(nextSavedFlow, "已保存");
       await refreshFlowSummaries();
     } catch (error) {
-      setSaveStatus("error");
-      setSaveMessage(String(error));
+      setSaveError(error);
     }
   }
 
   async function handleSaveFlowAs() {
-    setSaveStatus("saving");
-    setSaveMessage("正在另存为本地副本");
+    if (isFlowLoading) {
+      setSaveFeedback("idle", "正在加载本地流程，加载完成后再保存。");
+      return;
+    }
+    setSaveFeedback("saving", "正在另存为本地副本");
     try {
       const nextSavedFlow = await saveFlowAs(flow, `${flow.displayName} Copy`);
-      setSavedFlow(nextSavedFlow);
-      setSaveStatus("saved");
-      setSaveMessage(`已另存为: ${formatSavedAt(nextSavedFlow.savedAt)}`);
+      applySavedFlow(nextSavedFlow, "已保存");
       await refreshFlowSummaries();
     } catch (error) {
-      setSaveStatus("error");
-      setSaveMessage(String(error));
+      setSaveError(error);
     }
   }
 
   function handleFlowDisplayNameChange(displayName: string) {
-    setSavedFlow((current) => ({
+    const current = savedFlowRef.current;
+    commitDraft({
       ...current,
       flow: {
         ...current.flow,
         displayName,
       },
-    }));
-    setSaveStatus("idle");
-    setSaveMessage("有未保存更改");
+    });
   }
 
   function handleStepDelayChange(stepId: number, delayMs: number) {
-    setSavedFlow((current) => ({
+    const current = savedFlowRef.current;
+    commitDraft({
       ...current,
       flow: updateStepDelayMs(current.flow, stepId, delayMs),
-    }));
+    });
     setSelectedStepId(stepId);
-    setSaveStatus("idle");
-    setSaveMessage("有未保存更改");
   }
 
   function handleStepClickCoordinatesChange(stepId: number, x: number, y: number) {
-    setSavedFlow((current) => ({
+    const current = savedFlowRef.current;
+    commitDraft({
       ...current,
       flow: updateStepClickCoordinates(current.flow, stepId, x, y),
-    }));
+    });
     setSelectedStepId(stepId);
-    setSaveStatus("idle");
-    setSaveMessage("有未保存更改");
   }
 
   function handleStepTextChange(stepId: number, text: string) {
-    setSavedFlow((current) => ({
+    const current = savedFlowRef.current;
+    commitDraft({
       ...current,
       flow: updateStepText(current.flow, stepId, text),
-    }));
+    });
     setSelectedStepId(stepId);
-    setSaveStatus("idle");
-    setSaveMessage("有未保存更改");
   }
 
   function handleStepHotkeyChange(stepId: number, hotkeyText: string) {
-    setSavedFlow((current) => ({
+    const current = savedFlowRef.current;
+    commitDraft({
       ...current,
       flow: updateStepHotkeyText(current.flow, stepId, hotkeyText),
-    }));
+    });
     setSelectedStepId(stepId);
-    setSaveStatus("idle");
-    setSaveMessage("有未保存更改");
   }
 
   function handleStepKeyChange(stepId: number, keyText: string) {
-    setSavedFlow((current) => ({
+    const current = savedFlowRef.current;
+    commitDraft({
       ...current,
       flow: updateStepKeyText(current.flow, stepId, keyText),
-    }));
+    });
     setSelectedStepId(stepId);
-    setSaveStatus("idle");
-    setSaveMessage("有未保存更改");
   }
 
   function handleTargetWindowMatchedChange(matched: boolean) {
-    setSavedFlow((current) => ({
+    const current = savedFlowRef.current;
+    commitDraft({
       ...current,
       flow: updateTargetWindowMatched(current.flow, matched),
-    }));
-    setSaveStatus("idle");
-    setSaveMessage("有未保存更改");
+    });
+    setTargetSafetyRunId(null);
   }
 
   function handleStepDelete(stepId: number) {
-    setSavedFlow((current) => {
-      const result = deleteStep(current.flow, stepId);
-      setSelectedStepId(result.selectedStepId);
-      return {
-        ...current,
-        flow: result.flow,
-      };
+    const current = savedFlowRef.current;
+    const result = deleteStep(current.flow, stepId);
+    commitDraft({
+      ...current,
+      flow: result.flow,
     });
-    setSaveStatus("idle");
-    setSaveMessage("有未保存更改");
+    setSelectedStepId(result.selectedStepId);
   }
 
   function handleInsertWaitStep() {
-    setSavedFlow((current) => {
-      const result = insertWaitStepAfter(current.flow, selectedStepId);
-      setSelectedStepId(result.selectedStepId);
-      return {
-        ...current,
-        flow: result.flow,
-      };
+    const current = savedFlowRef.current;
+    const result = insertWaitStepAfter(current.flow, selectedStepId);
+    commitDraft({
+      ...current,
+      flow: result.flow,
     });
-    setSaveStatus("idle");
-    setSaveMessage("有未保存更改");
+    setSelectedStepId(result.selectedStepId);
   }
 
   function handleInsertTypeStep() {
-    setSavedFlow((current) => {
-      const result = insertTypeStepAfter(current.flow, selectedStepId);
-      setSelectedStepId(result.selectedStepId);
-      return {
-        ...current,
-        flow: result.flow,
-      };
+    const current = savedFlowRef.current;
+    const result = insertTypeStepAfter(current.flow, selectedStepId);
+    commitDraft({
+      ...current,
+      flow: result.flow,
     });
-    setSaveStatus("idle");
-    setSaveMessage("有未保存更改");
+    setSelectedStepId(result.selectedStepId);
   }
 
   function handleInsertHotkeyStep() {
-    setSavedFlow((current) => {
-      const result = insertHotkeyStepAfter(current.flow, selectedStepId);
-      setSelectedStepId(result.selectedStepId);
-      return {
-        ...current,
-        flow: result.flow,
-      };
+    const current = savedFlowRef.current;
+    const result = insertHotkeyStepAfter(current.flow, selectedStepId);
+    commitDraft({
+      ...current,
+      flow: result.flow,
     });
-    setSaveStatus("idle");
-    setSaveMessage("有未保存更改");
+    setSelectedStepId(result.selectedStepId);
   }
 
   function handleInsertKeyStep() {
-    setSavedFlow((current) => {
-      const result = insertKeyStepAfter(current.flow, selectedStepId);
-      setSelectedStepId(result.selectedStepId);
-      return {
-        ...current,
-        flow: result.flow,
-      };
+    const current = savedFlowRef.current;
+    const result = insertKeyStepAfter(current.flow, selectedStepId);
+    commitDraft({
+      ...current,
+      flow: result.flow,
     });
-    setSaveStatus("idle");
-    setSaveMessage("有未保存更改");
+    setSelectedStepId(result.selectedStepId);
   }
 
   async function handleLoadFlow(fileName: string) {
-    setSaveStatus("idle");
-    setSaveMessage("正在加载本地流程");
+    if (isFlowLoading) return;
+    setIsFlowLoading(true);
+    setSaveFeedback("idle", "正在加载本地流程");
     try {
       const nextSavedFlow = await loadFlow(fileName);
-      setSavedFlow(nextSavedFlow);
       setInfiniteLoopWarningVisible(false);
       setInfiniteLoopConfirmed(false);
-      setSaveStatus(nextSavedFlow.savedAt ? "saved" : "idle");
-      setSaveMessage(`已加载: ${formatSavedAt(nextSavedFlow.savedAt)}`);
+      setTargetSafetyRunId(null);
+      applySavedFlow(nextSavedFlow, "已加载");
     } catch (error) {
-      setSaveStatus("error");
-      setSaveMessage(String(error));
+      setSaveError(error);
+    } finally {
+      setIsFlowLoading(false);
     }
   }
 
@@ -576,18 +735,44 @@ export function App() {
       const payload = await emergencyStopPlayback();
       applyPlaybackStop(payload);
     } catch (error) {
-      setSaveStatus("error");
-      setSaveMessage(String(error));
+      setSaveError(error);
     }
   }
 
-  const sharedProps = {
+  const controlProps = {
     flow,
     flowSummaries,
+    selectedFileName: savedFlow.fileName,
+    status,
+    statusLabel,
+    loopCount,
+    speed,
+    isFlowLoading,
+    onLoopCountChange: handleLoopCountChange,
+    onSpeedChange: handleSpeedChange,
+    onStatusChange: updateStatus,
+    onFlowSelect: handleLoadFlow,
+    onOpenWorkbench: openWorkbench,
+    emergencyStopHint,
+    recordingWarningVisible,
+    recordingSafetyWarning: RECORDING_SAFETY_WARNING,
+    onConfirmRecordingStart: confirmRecordingStart,
+    onCancelRecordingStart: cancelRecordingStart,
+    infiniteLoopWarningVisible,
+    infiniteLoopConfirmed,
+    infiniteLoopWarning,
+    onConfirmInfiniteLoop: confirmInfiniteLoop,
+    onCancelInfiniteLoop: cancelInfiniteLoop,
+  };
+
+  const workbenchProps = {
+    flow,
     selectedFileName: savedFlow.fileName,
     savedAt: savedFlow.savedAt,
     saveStatus,
     saveMessage,
+    isFlowLoading,
+    targetSafetyRunId,
     selectedStepId,
     runLogs,
     status,
@@ -595,9 +780,8 @@ export function App() {
     loopCount,
     speed,
     onLoopCountChange: handleLoopCountChange,
-    onSpeedChange: setSpeed,
+    onSpeedChange: handleSpeedChange,
     onStatusChange: updateStatus,
-    onFlowSelect: handleLoadFlow,
     onFlowDisplayNameChange: handleFlowDisplayNameChange,
     onStepSelect: setSelectedStepId,
     onStepDelayChange: handleStepDelayChange,
@@ -613,22 +797,18 @@ export function App() {
     onInsertKeyStep: handleInsertKeyStep,
     onSaveFlow: handleSaveFlow,
     onSaveFlowAs: handleSaveFlowAs,
-    onOpenWorkbench: openWorkbench,
     onEmergencyStop: handleEmergencyStop,
-    recordingWarningVisible,
-    recordingSafetyWarning: RECORDING_SAFETY_WARNING,
-    onConfirmRecordingStart: confirmRecordingStart,
-    onCancelRecordingStart: cancelRecordingStart,
+    emergencyStopHint,
     infiniteLoopWarningVisible,
     infiniteLoopConfirmed,
-    infiniteLoopWarning: INFINITE_LOOP_WARNING,
+    infiniteLoopWarning,
     onConfirmInfiniteLoop: confirmInfiniteLoop,
     onCancelInfiniteLoop: cancelInfiniteLoop,
   };
 
   return route === "workbench" ? (
-    <WorkbenchWindow {...sharedProps} />
+    <WorkbenchWindow {...workbenchProps} />
   ) : (
-    <ControlWindow {...sharedProps} />
+    <ControlWindow {...controlProps} />
   );
 }

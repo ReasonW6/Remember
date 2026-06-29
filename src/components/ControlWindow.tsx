@@ -15,11 +15,13 @@ interface ControlWindowProps {
   statusLabel: string;
   loopCount: number;
   speed: string;
+  isFlowLoading: boolean;
   onLoopCountChange: (value: number) => void;
   onSpeedChange: (value: string) => void;
   onStatusChange: (status: AppStatus) => void;
   onFlowSelect: (fileName: string) => void;
   onOpenWorkbench: () => void;
+  emergencyStopHint: string;
   recordingWarningVisible: boolean;
   recordingSafetyWarning: string;
   onConfirmRecordingStart: () => void;
@@ -39,11 +41,13 @@ export function ControlWindow({
   statusLabel,
   loopCount,
   speed,
+  isFlowLoading,
   onLoopCountChange,
   onSpeedChange,
   onStatusChange,
   onFlowSelect,
   onOpenWorkbench,
+  emergencyStopHint,
   recordingWarningVisible,
   recordingSafetyWarning,
   onConfirmRecordingStart,
@@ -60,12 +64,18 @@ export function ControlWindow({
     displayName: flow.displayName,
     stepCount: flow.steps.length,
     savedAt: 0,
+    isValid: true,
+    error: null,
   };
   const flowOptions = flowSummaries.some(
     (summary) => summary.fileName === selectedFileName,
   )
     ? flowSummaries
     : [currentFlowSummary, ...flowSummaries];
+  const invalidFlowSummaries = flowOptions.filter((summary) => !summary.isValid);
+  const invalidFlowDetail = invalidFlowSummaries
+    .map((summary) => `${summary.displayName}: ${summary.error ?? "未知错误"}`)
+    .join("\n");
 
   return (
     <main className="control-window">
@@ -75,13 +85,20 @@ export function ControlWindow({
             <span>当前流程</span>
             <select
               aria-label="当前流程"
-              disabled={recordingWarningVisible || infiniteLoopWarningVisible}
+              disabled={
+                isFlowLoading || recordingWarningVisible || infiniteLoopWarningVisible
+              }
               value={selectedFileName}
               onChange={(event) => onFlowSelect(event.target.value)}
             >
               {flowOptions.map((summary) => (
-                <option value={summary.fileName} key={summary.fileName}>
-                  {summary.displayName}
+                <option
+                  disabled={!summary.isValid}
+                  value={summary.fileName}
+                  key={summary.fileName}
+                  title={summary.error ?? undefined}
+                >
+                  {summary.isValid ? summary.displayName : `${summary.displayName} - 无法加载`}
                 </option>
               ))}
             </select>
@@ -91,6 +108,7 @@ export function ControlWindow({
             className="action-button record"
             disabled={
               status === "recording" ||
+              isFlowLoading ||
               recordingWarningVisible ||
               infiniteLoopWarningVisible
             }
@@ -104,6 +122,7 @@ export function ControlWindow({
             disabled={
               recordingWarningVisible ||
               infiniteLoopWarningVisible ||
+              isFlowLoading ||
               status === "recording" ||
               status === "playing"
             }
@@ -117,6 +136,7 @@ export function ControlWindow({
             disabled={
               recordingWarningVisible ||
               infiniteLoopWarningVisible ||
+              isFlowLoading ||
               status === "ready" ||
               status === "stopped"
             }
@@ -130,6 +150,7 @@ export function ControlWindow({
             <span>速度</span>
             <select
               aria-label="速度"
+              disabled={isFlowLoading}
               value={speed}
               onChange={(event) => onSpeedChange(event.target.value)}
             >
@@ -144,6 +165,7 @@ export function ControlWindow({
             <span>次数</span>
             <select
               aria-label="次数"
+              disabled={isFlowLoading}
               value={loopCount}
               onChange={(event) => onLoopCountChange(Number(event.target.value))}
             >
@@ -157,7 +179,9 @@ export function ControlWindow({
           <button
             className="icon-button settings-button"
             aria-label="设置"
-            disabled={recordingWarningVisible || infiniteLoopWarningVisible}
+            disabled={
+              isFlowLoading || recordingWarningVisible || infiniteLoopWarningVisible
+            }
             onClick={onOpenWorkbench}
           >
             <Settings size={18} />
@@ -170,11 +194,18 @@ export function ControlWindow({
             {statusLabel}
           </span>
           <span className="hotkey-hint">
-            {loopCount === 0 && infiniteLoopConfirmed
-              ? "无限循环已确认"
-              : "紧急停止: Ctrl + Alt + S"}
+            {invalidFlowSummaries.length
+              ? `${invalidFlowSummaries.length} 个流程无法加载`
+              : loopCount === 0 && infiniteLoopConfirmed
+                ? "无限循环已确认"
+                : emergencyStopHint}
             <Keyboard size={14} />
           </span>
+          {invalidFlowSummaries.length ? (
+            <span className="invalid-flow-detail" title={invalidFlowDetail}>
+              查看错误
+            </span>
+          ) : null}
         </footer>
 
         {recordingWarningVisible ? (

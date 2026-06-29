@@ -30,6 +30,12 @@ fn stop_recording_uses_session_target_window_metadata() {
     recorder
         .start_with_target_window(target_window.clone())
         .expect("recording should start with target metadata");
+    let started_at_ms = recorder
+        .active_started_at_ms()
+        .expect("active session should expose start time");
+    recorder
+        .record_mouse_click_at(120, 240, RecordedMouseButton::Left, started_at_ms + 100)
+        .expect("click without target metadata should be recorded");
 
     let stopped = recorder.stop().expect("recording should stop");
 
@@ -196,6 +202,8 @@ fn stop_recording_converts_mouse_wheel_to_scroll_steps_with_wait_timing() {
     assert_eq!(stopped.flow.steps.len(), 2);
     match &stopped.flow.steps[0] {
         FlowStep::Scroll {
+            x,
+            y,
             action,
             delta_x,
             delta_y,
@@ -204,6 +212,7 @@ fn stop_recording_converts_mouse_wheel_to_scroll_steps_with_wait_timing() {
             ..
         } => {
             assert_eq!(action, "滚动");
+            assert_eq!((*x, *y), (Some(220), Some(340)));
             assert_eq!((*delta_x, *delta_y), (0, -120));
             assert_eq!(*delay_ms, 350);
             assert!(note.contains("鼠标滚轮"));
@@ -212,11 +221,14 @@ fn stop_recording_converts_mouse_wheel_to_scroll_steps_with_wait_timing() {
     }
     match &stopped.flow.steps[1] {
         FlowStep::Scroll {
+            x,
+            y,
             delta_x,
             delta_y,
             delay_ms,
             ..
         } => {
+            assert_eq!((*x, *y), (Some(220), Some(340)));
             assert_eq!((*delta_x, *delta_y), (120, 0));
             assert_eq!(*delay_ms, 450);
         }
@@ -306,6 +318,57 @@ fn stop_recording_excludes_clicks_inside_app_windows() {
 }
 
 #[test]
+fn stop_recording_excludes_mouse_clicks_captured_on_remember_window() {
+    let mut recorder = RecorderState::default();
+    let remember_window = TargetWindow {
+        title: "Remember".to_string(),
+        process: "remember.exe".to_string(),
+        size: "536 x 209".to_string(),
+        matched: true,
+    };
+    let target_window = TargetWindow {
+        title: "Report - Notepad".to_string(),
+        process: "notepad.exe".to_string(),
+        size: "1024 x 768".to_string(),
+        matched: true,
+    };
+    recorder.start().expect("recording should start");
+    let started_at_ms = recorder
+        .active_started_at_ms()
+        .expect("active session should expose start time");
+
+    recorder
+        .record_mouse_click_at_target(
+            500,
+            500,
+            RecordedMouseButton::Left,
+            started_at_ms + 100,
+            remember_window,
+        )
+        .expect("remember click should be collected before filtering");
+    recorder
+        .record_mouse_click_at_target(
+            620,
+            640,
+            RecordedMouseButton::Left,
+            started_at_ms + 350,
+            target_window,
+        )
+        .expect("target click should be recorded");
+
+    let stopped = recorder.stop().expect("recording should stop");
+
+    assert_eq!(stopped.flow.steps.len(), 1);
+    match &stopped.flow.steps[0] {
+        FlowStep::Click { x, y, delay_ms, .. } => {
+            assert_eq!((*x, *y), (620, 640));
+            assert_eq!(*delay_ms, 350);
+        }
+        step => panic!("expected target click, got {step:?}"),
+    }
+}
+
+#[test]
 fn stop_recording_merges_text_input_and_records_hotkeys_with_wait_timing() {
     let mut recorder = RecorderState::default();
     recorder.start().expect("recording should start");
@@ -362,6 +425,121 @@ fn stop_recording_merges_text_input_and_records_hotkeys_with_wait_timing() {
         }
         step => panic!("expected hotkey step, got {step:?}"),
     }
+}
+
+#[test]
+fn stop_recording_splits_text_input_when_target_window_changes() {
+    let mut recorder = RecorderState::default();
+    let first_target_window = TargetWindow {
+        title: "First - Notepad".to_string(),
+        process: "notepad.exe".to_string(),
+        size: "1024 x 768".to_string(),
+        matched: true,
+    };
+    let second_target_window = TargetWindow {
+        title: "Second - Notepad".to_string(),
+        process: "notepad.exe".to_string(),
+        size: "1024 x 768".to_string(),
+        matched: true,
+    };
+    recorder.start().expect("recording should start");
+    let started_at_ms = recorder
+        .active_started_at_ms()
+        .expect("active session should expose start time");
+
+    recorder
+        .record_text_input_at_target("A", started_at_ms + 100, first_target_window)
+        .expect("first window text should be recorded");
+    recorder
+        .record_text_input_at_target("B", started_at_ms + 180, second_target_window)
+        .expect("second window text should be recorded");
+
+    let stopped = recorder.stop().expect("recording should stop");
+
+    assert_eq!(stopped.flow.steps.len(), 2);
+    match &stopped.flow.steps[0] {
+        FlowStep::Type { text, delay_ms, .. } => {
+            assert_eq!(text, "A");
+            assert_eq!(*delay_ms, 100);
+        }
+        step => panic!("expected first type step, got {step:?}"),
+    }
+    match &stopped.flow.steps[1] {
+        FlowStep::Type { text, delay_ms, .. } => {
+            assert_eq!(text, "B");
+            assert_eq!(*delay_ms, 80);
+        }
+        step => panic!("expected second type step, got {step:?}"),
+    }
+}
+
+#[test]
+fn stop_recording_excludes_keyboard_input_inside_remember_windows() {
+    let mut recorder = RecorderState::default();
+    let remember_window = TargetWindow {
+        title: "Remember".to_string(),
+        process: "remember.exe".to_string(),
+        size: "536 x 209".to_string(),
+        matched: true,
+    };
+    recorder.start().expect("recording should start");
+    let started_at_ms = recorder
+        .active_started_at_ms()
+        .expect("active session should expose start time");
+
+    recorder
+        .record_text_input_at_target("x", started_at_ms + 100, remember_window)
+        .expect("remember window text should be collected before filtering");
+
+    let stopped = recorder.stop().expect("recording should stop");
+
+    assert!(stopped.flow.steps.is_empty());
+    assert!(!stopped.flow.target_window.matched);
+}
+
+#[test]
+fn stop_recording_excludes_sensitive_keyboard_input() {
+    let mut recorder = RecorderState::default();
+    let password_window = TargetWindow {
+        title: "Password - Browser".to_string(),
+        process: "browser.exe".to_string(),
+        size: "1024 x 768".to_string(),
+        matched: true,
+    };
+    recorder.start().expect("recording should start");
+    let started_at_ms = recorder
+        .active_started_at_ms()
+        .expect("active session should expose start time");
+
+    recorder
+        .record_text_input_at_target("secret", started_at_ms + 100, password_window)
+        .expect("sensitive text should be collected before filtering");
+
+    let stopped = recorder.stop().expect("recording should stop");
+
+    assert!(stopped.flow.steps.is_empty());
+    assert!(!stopped.flow.target_window.matched);
+}
+
+#[test]
+fn stop_recording_excludes_high_risk_hotkeys() {
+    let mut recorder = RecorderState::default();
+    recorder.start().expect("recording should start");
+    let started_at_ms = recorder
+        .active_started_at_ms()
+        .expect("active session should expose start time");
+
+    recorder
+        .record_hotkey_at(
+            vec!["Alt".to_string(), "F4".to_string()],
+            started_at_ms + 100,
+        )
+        .expect("unsafe hotkey should be collected before filtering");
+
+    let stopped = recorder.stop().expect("recording should stop");
+
+    assert!(stopped.flow.steps.is_empty());
+    assert!(!stopped.flow.target_window.matched);
 }
 
 #[test]
@@ -460,7 +638,7 @@ fn stop_recording_orders_mouse_text_and_hotkey_events_by_capture_time() {
 }
 
 #[test]
-fn stop_recording_returns_safe_placeholder_flow_and_closes_session() {
+fn stop_recording_returns_empty_flow_and_closes_session() {
     let mut recorder = RecorderState::default();
     recorder.start().expect("recording should start");
 
@@ -469,23 +647,9 @@ fn stop_recording_returns_safe_placeholder_flow_and_closes_session() {
     assert!(!recorder.is_recording());
     assert_eq!(stopped.label, "已停止");
     assert!(stopped.flow.name.starts_with("recording-"));
-    assert!(stopped.flow.display_name.contains("安全占位"));
+    assert!(stopped.flow.display_name.contains("空录制"));
     assert!(!stopped.flow.target_window.matched);
-    assert_eq!(stopped.flow.steps.len(), 1);
-
-    match &stopped.flow.steps[0] {
-        FlowStep::Wait {
-            action,
-            duration_ms,
-            note,
-            ..
-        } => {
-            assert_eq!(action, "等待");
-            assert_eq!(*duration_ms, 500);
-            assert!(note.contains("尚未捕获真实输入"));
-        }
-        step => panic!("expected safe wait placeholder, got {step:?}"),
-    }
+    assert!(stopped.flow.steps.is_empty());
 
     assert!(recorder.stop().is_err());
 }

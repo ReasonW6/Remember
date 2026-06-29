@@ -90,9 +90,11 @@ export function appendPlaybackFinishedLog(
 export function findLatestSafetyStopLog(
   entries: RunLogEntry[],
   flowName?: string,
+  runId?: number,
 ) {
   for (const entry of entries) {
     if (flowName && entry.flowName !== flowName) continue;
+    if (runId !== undefined && entry.runId !== runId) continue;
     if (entry.reason === "safetyStopped") return entry;
     if (entry.reason || entry.title === "开始回放") return undefined;
   }

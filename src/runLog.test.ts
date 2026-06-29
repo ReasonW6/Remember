@@ -114,3 +114,19 @@ test("returns the latest current safety stop for a flow", () => {
   assert.equal(findLatestSafetyStopLog([completedLater, safetyStop], "Daily Report"), undefined);
   assert.equal(findLatestSafetyStopLog([safetyStop], "Other Flow"), undefined);
 });
+
+test("returns a safety stop only for the requested run id", () => {
+  const safetyStop: RunLogEntry = {
+    id: "safety",
+    time: 2_000,
+    level: "danger",
+    title: "安全停止",
+    detail: "目标窗口不同。",
+    flowName: "Daily Report",
+    runId: 7,
+    reason: "safetyStopped",
+  };
+
+  assert.equal(findLatestSafetyStopLog([safetyStop], "Daily Report", 8), undefined);
+  assert.equal(findLatestSafetyStopLog([safetyStop], "Daily Report", 7), safetyStop);
+});

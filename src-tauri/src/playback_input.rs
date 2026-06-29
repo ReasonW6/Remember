@@ -1,4 +1,5 @@
 use crate::{storage::TargetWindow, windows};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaybackMouseButton {
@@ -32,7 +33,32 @@ pub trait PlaybackInput: Send + Sync + 'static {
         Err("drag playback is unavailable for this input backend".to_string())
     }
 
-    fn scroll(&self, delta_x: i32, delta_y: i32) -> Result<(), String>;
+    fn drag_cancelable(
+        &self,
+        button: PlaybackMouseButton,
+        start_x: i32,
+        start_y: i32,
+        end_x: i32,
+        end_y: i32,
+        duration_ms: u64,
+        cancel_requested: &AtomicBool,
+    ) -> Result<bool, String> {
+        if cancel_requested.load(Ordering::SeqCst) {
+            return Ok(true);
+        }
+        self.drag(button, start_x, start_y, end_x, end_y, duration_ms)?;
+        Ok(cancel_requested.load(Ordering::SeqCst))
+    }
+
+    fn scroll(&self, delta_x: i32, delta_y: i32) -> Result<(), String> {
+        let _ = (delta_x, delta_y);
+        Err("scroll playback is unavailable for this input backend".to_string())
+    }
+
+    fn scroll_at(&self, x: i32, y: i32, delta_x: i32, delta_y: i32) -> Result<(), String> {
+        let _ = (x, y);
+        self.scroll(delta_x, delta_y)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -71,8 +97,33 @@ impl PlaybackInput for SystemPlaybackInput {
         platform::drag(button, start_x, start_y, end_x, end_y, duration_ms)
     }
 
+    fn drag_cancelable(
+        &self,
+        button: PlaybackMouseButton,
+        start_x: i32,
+        start_y: i32,
+        end_x: i32,
+        end_y: i32,
+        duration_ms: u64,
+        cancel_requested: &AtomicBool,
+    ) -> Result<bool, String> {
+        platform::drag_cancelable(
+            button,
+            start_x,
+            start_y,
+            end_x,
+            end_y,
+            duration_ms,
+            cancel_requested,
+        )
+    }
+
     fn scroll(&self, delta_x: i32, delta_y: i32) -> Result<(), String> {
         platform::scroll(delta_x, delta_y)
+    }
+
+    fn scroll_at(&self, x: i32, y: i32, delta_x: i32, delta_y: i32) -> Result<(), String> {
+        platform::scroll_at(x, y, delta_x, delta_y)
     }
 }
 
@@ -80,6 +131,7 @@ impl PlaybackInput for SystemPlaybackInput {
 mod platform {
     use super::PlaybackMouseButton;
     use std::mem::size_of;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::{thread, time::Duration};
 
     const INPUT_KEYBOARD: u32 = 1;
@@ -179,8 +231,12 @@ mod platform {
             let progress = index as f64 / step_count as f64;
             let x = start_x + ((end_x - start_x) as f64 * progress).round() as i32;
             let y = start_y + ((end_y - start_y) as f64 * progress).round() as i32;
-            unsafe {
-                SetCursorPos(x, y);
+            let positioned = unsafe { SetCursorPos(x, y) };
+            if positioned == 0 {
+                unsafe {
+                    mouse_event(up, 0, 0, 0, 0);
+                }
+                return Err(format!("failed to move cursor to ({x}, {y})"));
             }
             if sleep_ms > 0 {
                 thread::sleep(Duration::from_millis(sleep_ms));
@@ -192,6 +248,75 @@ mod platform {
         }
 
         Ok(())
+    }
+
+    pub fn drag_cancelable(
+        button: PlaybackMouseButton,
+        start_x: i32,
+        start_y: i32,
+        end_x: i32,
+        end_y: i32,
+        duration_ms: u64,
+        cancel_requested: &AtomicBool,
+    ) -> Result<bool, String> {
+        let positioned = unsafe { SetCursorPos(start_x, start_y) };
+        if positioned == 0 {
+            return Err(format!("failed to move cursor to ({start_x}, {start_y})"));
+        }
+
+        let (down, up) = match button {
+            PlaybackMouseButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+            PlaybackMouseButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+        };
+
+        unsafe {
+            mouse_event(down, 0, 0, 0, 0);
+        }
+
+        let mut canceled = cancel_requested.load(Ordering::SeqCst);
+        if !canceled {
+            let step_count = 12u64;
+            let sleep_ms = duration_ms / step_count;
+            for index in 1..=step_count {
+                if cancel_requested.load(Ordering::SeqCst) {
+                    canceled = true;
+                    break;
+                }
+                let progress = index as f64 / step_count as f64;
+                let x = start_x + ((end_x - start_x) as f64 * progress).round() as i32;
+                let y = start_y + ((end_y - start_y) as f64 * progress).round() as i32;
+                let positioned = unsafe { SetCursorPos(x, y) };
+                if positioned == 0 {
+                    unsafe {
+                        mouse_event(up, 0, 0, 0, 0);
+                    }
+                    return Err(format!("failed to move cursor to ({x}, {y})"));
+                }
+                if sleep_ms > 0 {
+                    let sleep_for = Duration::from_millis(sleep_ms);
+                    let slice = Duration::from_millis(10);
+                    let mut elapsed = Duration::ZERO;
+                    while elapsed < sleep_for {
+                        if cancel_requested.load(Ordering::SeqCst) {
+                            canceled = true;
+                            break;
+                        }
+                        let next = sleep_for.saturating_sub(elapsed).min(slice);
+                        thread::sleep(next);
+                        elapsed += next;
+                    }
+                    if canceled {
+                        break;
+                    }
+                }
+            }
+        }
+
+        unsafe {
+            mouse_event(up, 0, 0, 0, 0);
+        }
+
+        Ok(canceled || cancel_requested.load(Ordering::SeqCst))
     }
 
     pub fn type_text(text: &str) -> Result<(), String> {
@@ -255,6 +380,14 @@ mod platform {
         }
 
         Ok(())
+    }
+
+    pub fn scroll_at(x: i32, y: i32, delta_x: i32, delta_y: i32) -> Result<(), String> {
+        let positioned = unsafe { SetCursorPos(x, y) };
+        if positioned == 0 {
+            return Err(format!("failed to move cursor to ({x}, {y})"));
+        }
+        scroll(delta_x, delta_y)
     }
 
     fn send_keyboard_inputs(inputs: &[Input], label: &str) -> Result<(), String> {
@@ -363,6 +496,7 @@ mod platform {
 #[cfg(not(target_os = "windows"))]
 mod platform {
     use super::PlaybackMouseButton;
+    use std::sync::atomic::AtomicBool;
 
     pub fn click(_button: PlaybackMouseButton, _x: i32, _y: i32) -> Result<(), String> {
         Err("mouse playback is only available on Windows".to_string())
@@ -391,7 +525,23 @@ mod platform {
         Err("drag playback is only available on Windows".to_string())
     }
 
+    pub fn drag_cancelable(
+        _button: PlaybackMouseButton,
+        _start_x: i32,
+        _start_y: i32,
+        _end_x: i32,
+        _end_y: i32,
+        _duration_ms: u64,
+        _cancel_requested: &AtomicBool,
+    ) -> Result<bool, String> {
+        Err("drag playback is only available on Windows".to_string())
+    }
+
     pub fn scroll(_delta_x: i32, _delta_y: i32) -> Result<(), String> {
+        Err("scroll playback is only available on Windows".to_string())
+    }
+
+    pub fn scroll_at(_x: i32, _y: i32, _delta_x: i32, _delta_y: i32) -> Result<(), String> {
         Err("scroll playback is only available on Windows".to_string())
     }
 }

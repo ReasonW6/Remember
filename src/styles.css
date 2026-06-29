@@ -187,7 +187,6 @@ button:focus-visible {
 .action-button,
 .toolbar-button,
 .icon-button,
-.ghost-icon,
 .sidebar-item,
 .tab,
 .add-node,
@@ -206,7 +205,6 @@ button:focus-visible {
 .action-button:hover,
 .toolbar-button:hover,
 .icon-button:hover,
-.ghost-icon:hover,
 .sidebar-item:hover,
 .tab:hover,
 .add-node:hover,
@@ -218,7 +216,6 @@ button:focus-visible {
 .action-button:active,
 .toolbar-button:active,
 .icon-button:active,
-.ghost-icon:active,
 .sidebar-item:active,
 .tab:active,
 .add-node:active,
@@ -250,8 +247,7 @@ button:focus-visible {
   color: #b7c0cc;
 }
 
-.icon-button,
-.ghost-icon {
+.icon-button {
   display: inline-grid;
   place-items: center;
   width: 36px;
@@ -309,6 +305,13 @@ button:focus-visible {
   justify-content: flex-end;
   overflow: hidden;
   white-space: nowrap;
+}
+
+.invalid-flow-detail {
+  flex: 0 0 auto;
+  color: #ffb9b9;
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .workbench-window {
@@ -378,13 +381,12 @@ button:focus-visible {
 .workspace {
   position: relative;
   display: grid;
-  grid-template-rows: 58px 42px 112px minmax(0, 1fr) 150px;
+  grid-template-rows: 58px 112px minmax(0, 1fr) 150px;
   min-width: 0;
   min-height: 0;
 }
 
 .workspace-header,
-.timeline-toolbar,
 .tabs-row {
   display: flex;
   align-items: center;
@@ -496,35 +498,6 @@ button:focus-visible {
 .toolbar-button.slim {
   height: 28px;
   padding: 0 10px;
-  font-size: 12px;
-}
-
-.timeline-toolbar {
-  justify-content: space-between;
-  padding: 0 22px;
-}
-
-.zoom-control {
-  display: flex;
-  align-items: center;
-  height: 30px;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: rgba(12, 22, 34, 0.5);
-}
-
-.zoom-control button {
-  width: 32px;
-  height: 100%;
-  border: 0;
-  background: transparent;
-  color: var(--text);
-}
-
-.zoom-control span {
-  width: 58px;
-  text-align: center;
   font-size: 12px;
 }
 
@@ -789,9 +762,20 @@ button:focus-visible {
   color: var(--text);
 }
 
+.readonly-value {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  border: 1px solid rgba(144, 162, 184, 0.24);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+}
+
 .coordinate-row {
   display: grid;
-  grid-template-columns: 1fr 1fr 88px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
   margin-bottom: 12px;
 }
@@ -866,13 +850,6 @@ input[type="checkbox"] {
   accent-color: var(--blue);
 }
 
-.inline-input {
-  width: 72px;
-  height: 26px;
-  margin-left: auto;
-  padding: 0 8px;
-}
-
 .run-controls {
   display: grid;
   gap: 12px;
@@ -929,11 +906,6 @@ input[type="checkbox"] {
   font-weight: 600;
 }
 
-.inspector-delete {
-  width: 100%;
-  margin-bottom: 14px;
-}
-
 .bottom-grid {
   display: grid;
   grid-template-columns: 320px minmax(360px, 1fr) 230px;
@@ -955,10 +927,14 @@ input[type="checkbox"] {
 
 .preview-body {
   display: grid;
-  grid-template-columns: 112px 1fr 86px;
   gap: 12px;
   align-items: center;
   margin-top: 12px;
+}
+
+.target-window-summary {
+  min-width: 0;
+  padding-right: 14px;
 }
 
 .preview-body strong,
@@ -1004,50 +980,6 @@ input[type="checkbox"] {
 
 .target-safety-detail.safety-stopped {
   color: #ffb9b9;
-}
-
-.target-match-toggle {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  margin-top: 8px;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.excel-preview {
-  display: flex;
-  align-items: end;
-  gap: 8px;
-  height: 72px;
-  padding: 12px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background:
-    linear-gradient(90deg, rgba(255, 255, 255, 0.08) 1px, transparent 1px),
-    linear-gradient(0deg, rgba(255, 255, 255, 0.08) 1px, transparent 1px),
-    rgba(230, 238, 246, 0.9);
-  background-size: 15px 15px;
-}
-
-.excel-preview span {
-  width: 14px;
-  border-radius: 3px 3px 0 0;
-}
-
-.excel-preview span:nth-child(1) {
-  height: 28px;
-  background: #48a2ff;
-}
-
-.excel-preview span:nth-child(2) {
-  height: 45px;
-  background: #27b36b;
-}
-
-.excel-preview span:nth-child(3) {
-  height: 36px;
-  background: #f06b5b;
 }
 
 .run-log-panel {
@@ -1138,18 +1070,6 @@ input[type="checkbox"] {
 
 .empty-run-log {
   margin: 0;
-}
-
-kbd {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 28px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: rgba(7, 14, 24, 0.42);
-  color: #d7e3ef;
-  font: inherit;
 }
 
 .status-panel {

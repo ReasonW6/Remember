@@ -1,14 +1,22 @@
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
-    fmt, fs, io,
+    fmt, fs,
+    fs::File,
+    io::{self, Write},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 const FLOW_DIR_NAME: &str = "flows";
 const FLOW_FILE_SUFFIX: &str = ".remember.json";
-const DEFAULT_FLOW_FILE_NAME: &str = "daily-report.remember.json";
+const CLICK_ACTIONS: &[&str] = &["左键单击", "右键单击", "双击"];
+const DRAG_ACTIONS: &[&str] = &["左键拖拽", "右键拖拽"];
+const MAX_STEP_TIMING_MS: u64 = 300_000;
+const RESERVED_WINDOWS_FILE_NAMES: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
 
 #[derive(Debug)]
 pub enum StorageError {
@@ -140,6 +148,10 @@ pub enum FlowStep {
     Scroll {
         id: u32,
         action: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        x: Option<i32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        y: Option<i32>,
         #[serde(rename = "deltaX")]
         delta_x: i32,
         #[serde(rename = "deltaY")]
@@ -156,8 +168,6 @@ pub struct SavedFlow {
     pub file_name: String,
     pub saved_at: u64,
     pub flow: Flow,
-    #[serde(skip)]
-    pub path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,6 +178,8 @@ pub struct FlowSummary {
     pub display_name: String,
     pub step_count: usize,
     pub saved_at: u64,
+    pub is_valid: bool,
+    pub error: Option<String>,
 }
 
 pub fn sample_flow() -> Flow {
@@ -246,35 +258,17 @@ pub fn sample_flow() -> Flow {
     }
 }
 
-pub fn empty_flow(display_name: &str) -> Flow {
-    let normalized_name = slugify_flow_name(display_name);
-    Flow {
-        version: 1,
-        name: normalized_name,
-        display_name: display_name.trim().to_string(),
-        target_window: TargetWindow {
-            title: String::new(),
-            process: String::new(),
-            size: String::new(),
-            matched: false,
-        },
-        steps: Vec::new(),
-    }
-}
-
 pub fn ensure_default_flow_in_dir(root: &Path) -> StorageResult<SavedFlow> {
     fs::create_dir_all(flows_dir(root))?;
 
-    if let Some(summary) = list_flow_summaries_in_dir(root)?.into_iter().next() {
+    if let Some(summary) = list_flow_summaries_in_dir(root)?
+        .into_iter()
+        .find(|summary| summary.is_valid)
+    {
         return load_flow_file(root, &summary.file_name);
     }
 
     save_flow_to_dir(root, &sample_flow())
-}
-
-pub fn create_flow_in_dir(root: &Path, display_name: &str) -> StorageResult<SavedFlow> {
-    let flow = empty_flow(display_name);
-    save_flow_to_dir(root, &flow)
 }
 
 pub fn save_flow_as_to_dir(
@@ -306,8 +300,7 @@ pub fn save_flow_as_to_dir(
                 format!("{base_display_name} {candidate_index}")
             };
             validate_flow(&copied_flow)?;
-            let json = serde_json::to_string_pretty(&copied_flow)?;
-            fs::write(&candidate_path, format!("{json}\n"))?;
+            write_flow_atomically(&candidate_path, &copied_flow)?;
             return Ok(saved_flow(candidate_file_name, candidate_path, copied_flow));
         }
 
@@ -316,16 +309,23 @@ pub fn save_flow_as_to_dir(
 }
 
 pub fn save_flow_to_dir(root: &Path, flow: &Flow) -> StorageResult<SavedFlow> {
+    let file_name = flow_file_name(flow);
+    save_flow_file_to_dir(root, &file_name, flow)
+}
+
+pub fn save_flow_file_to_dir(
+    root: &Path,
+    file_name: &str,
+    flow: &Flow,
+) -> StorageResult<SavedFlow> {
     validate_flow(flow)?;
     let flows_dir = flows_dir(root);
     fs::create_dir_all(&flows_dir)?;
 
-    let file_name = flow_file_name(flow);
-    let path = flows_dir.join(&file_name);
-    let json = serde_json::to_string_pretty(flow)?;
-    fs::write(&path, format!("{json}\n"))?;
+    let path = resolve_flow_file(root, file_name)?;
+    write_flow_atomically(&path, flow)?;
 
-    Ok(saved_flow(file_name, path, flow.clone()))
+    Ok(saved_flow(file_name.to_string(), path, flow.clone()))
 }
 
 pub fn load_flow_file(root: &Path, file_name: &str) -> StorageResult<SavedFlow> {
@@ -355,28 +355,37 @@ pub fn list_flow_summaries_in_dir(root: &Path) -> StorageResult<Vec<FlowSummary>
             continue;
         }
 
-        let Ok(flow) = load_flow_from_path(&path) else {
-            continue;
-        };
-
         let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
 
-        summaries.push(FlowSummary {
-            file_name: file_name.to_string(),
-            name: flow.name,
-            display_name: flow.display_name,
-            step_count: flow.steps.len(),
-            saved_at: file_modified_unix_seconds(&path),
-        });
+        match load_flow_from_path(&path) {
+            Ok(flow) => summaries.push(FlowSummary {
+                file_name: file_name.to_string(),
+                name: flow.name,
+                display_name: flow.display_name,
+                step_count: flow.steps.len(),
+                saved_at: file_modified_unix_seconds(&path),
+                is_valid: true,
+                error: None,
+            }),
+            Err(error) => summaries.push(FlowSummary {
+                file_name: file_name.to_string(),
+                name: display_name_from_file_name(file_name),
+                display_name: format!("{} (无法读取)", display_name_from_file_name(file_name)),
+                step_count: 0,
+                saved_at: file_modified_unix_seconds(&path),
+                is_valid: false,
+                error: Some(error.to_string()),
+            }),
+        }
     }
 
     summaries.sort_by(|left, right| left.display_name.cmp(&right.display_name));
     Ok(summaries)
 }
 
-fn validate_flow(flow: &Flow) -> StorageResult<()> {
+pub fn validate_flow(flow: &Flow) -> StorageResult<()> {
     if flow.version != 1 {
         return Err(StorageError::InvalidFlow(format!(
             "unsupported version {}",
@@ -405,6 +414,25 @@ fn validate_steps(steps: &[FlowStep]) -> StorageResult<()> {
             )));
         }
 
+        if let FlowStep::Click { id, action, .. } = step {
+            if !CLICK_ACTIONS.contains(&action.as_str()) {
+                return Err(StorageError::InvalidFlow(format!(
+                    "click step {id} has an unsupported action"
+                )));
+            }
+        }
+
+        if let FlowStep::Drag { id, action, .. } = step {
+            if !DRAG_ACTIONS.contains(&action.as_str()) {
+                return Err(StorageError::InvalidFlow(format!(
+                    "drag step {id} has an unsupported action"
+                )));
+            }
+        }
+
+        validate_step_metadata(step_id, step)?;
+        validate_step_timing(step_id, step)?;
+
         if let FlowStep::Wait {
             id,
             duration_ms,
@@ -418,9 +446,247 @@ fn validate_steps(steps: &[FlowStep]) -> StorageResult<()> {
                 )));
             }
         }
+
+        if let FlowStep::Key { id, key, .. } = step {
+            if key.trim().is_empty() {
+                return Err(StorageError::InvalidFlow(format!(
+                    "key step {id} key is required"
+                )));
+            }
+            if !key_is_allowed(key) {
+                return Err(StorageError::InvalidFlow(format!(
+                    "key step {id} is not allowed because it can trigger global system behavior"
+                )));
+            }
+        }
+
+        if let FlowStep::Type { id, text, .. } = step {
+            if type_text_looks_sensitive(text) {
+                return Err(StorageError::InvalidFlow(format!(
+                    "type step {id} contains sensitive text and must be removed or redacted before saving"
+                )));
+            }
+        }
+
+        if let FlowStep::Hotkey { id, keys, .. } = step {
+            if keys.is_empty() {
+                return Err(StorageError::InvalidFlow(format!(
+                    "hotkey step {id} needs at least one key"
+                )));
+            }
+            if keys.iter().any(|key| key.trim().is_empty()) {
+                return Err(StorageError::InvalidFlow(format!(
+                    "hotkey step {id} contains an empty key"
+                )));
+            }
+            if !hotkey_is_allowed(keys) {
+                return Err(StorageError::InvalidFlow(format!(
+                    "hotkey step {id} is not allowed because it can trigger global system behavior"
+                )));
+            }
+        }
     }
 
     Ok(())
+}
+
+fn validate_step_metadata(step_id: u32, step: &FlowStep) -> StorageResult<()> {
+    match step {
+        FlowStep::Click { target, note, .. } | FlowStep::Drag { target, note, .. } => {
+            validate_non_sensitive_text(&format!("step {step_id} target"), target)?;
+            validate_non_sensitive_text(&format!("step {step_id} note"), note)?;
+        }
+        FlowStep::Type { note, .. }
+        | FlowStep::Key { note, .. }
+        | FlowStep::Wait { note, .. }
+        | FlowStep::Hotkey { note, .. }
+        | FlowStep::Scroll { note, .. } => {
+            validate_non_sensitive_text(&format!("step {step_id} note"), note)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_step_timing(step_id: u32, step: &FlowStep) -> StorageResult<()> {
+    match step {
+        FlowStep::Click { delay_ms, .. }
+        | FlowStep::Type { delay_ms, .. }
+        | FlowStep::Key { delay_ms, .. }
+        | FlowStep::Hotkey { delay_ms, .. }
+        | FlowStep::Scroll { delay_ms, .. } => {
+            validate_max_timing(step_id, step_kind(step), "delayMs", *delay_ms)?;
+        }
+        FlowStep::Wait {
+            duration_ms,
+            delay_ms,
+            ..
+        } => {
+            validate_max_timing(step_id, "wait", "durationMs", *duration_ms)?;
+            validate_max_timing(step_id, "wait", "delayMs", *delay_ms)?;
+        }
+        FlowStep::Drag {
+            duration_ms,
+            delay_ms,
+            ..
+        } => {
+            validate_max_timing(step_id, "drag", "durationMs", *duration_ms)?;
+            validate_max_timing(step_id, "drag", "delayMs", *delay_ms)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_max_timing(
+    step_id: u32,
+    step_kind: &str,
+    field_name: &str,
+    value: u64,
+) -> StorageResult<()> {
+    if value > MAX_STEP_TIMING_MS {
+        return Err(StorageError::InvalidFlow(format!(
+            "{step_kind} step {step_id} {field_name} exceeds {MAX_STEP_TIMING_MS}ms"
+        )));
+    }
+    Ok(())
+}
+
+fn step_kind(step: &FlowStep) -> &'static str {
+    match step {
+        FlowStep::Click { .. } => "click",
+        FlowStep::Drag { .. } => "drag",
+        FlowStep::Type { .. } => "type",
+        FlowStep::Key { .. } => "key",
+        FlowStep::Wait { .. } => "wait",
+        FlowStep::Hotkey { .. } => "hotkey",
+        FlowStep::Scroll { .. } => "scroll",
+    }
+}
+
+fn validate_non_sensitive_text(field_name: &str, value: &str) -> StorageResult<()> {
+    if type_text_looks_sensitive(value) {
+        return Err(StorageError::InvalidFlow(format!(
+            "{field_name} contains sensitive text"
+        )));
+    }
+    Ok(())
+}
+
+pub fn hotkey_is_allowed(keys: &[String]) -> bool {
+    let normalized = keys
+        .iter()
+        .map(|key| normalize_key_name(key))
+        .collect::<HashSet<_>>();
+
+    if normalized
+        .iter()
+        .any(|key| key == "WIN" || key == "WINDOWS")
+    {
+        return false;
+    }
+
+    if normalized.contains("ALT") && (normalized.contains("F4") || normalized.contains("TAB")) {
+        return false;
+    }
+
+    if normalized.contains("ALT") && normalized.contains("ESC") {
+        return false;
+    }
+
+    if normalized.contains("CTRL") && normalized.contains("ESC") {
+        return false;
+    }
+
+    if normalized.contains("CTRL") && normalized.contains("ALT") && normalized.contains("DELETE") {
+        return false;
+    }
+
+    if normalized.contains("CTRL") && normalized.contains("ALT") && normalized.contains("S") {
+        return false;
+    }
+
+    true
+}
+
+fn key_is_allowed(key: &str) -> bool {
+    !matches!(
+        normalize_key_name(key).as_str(),
+        "WIN" | "WINDOWS" | "CTRL" | "ALT" | "SHIFT"
+    )
+}
+
+fn type_text_looks_sensitive(text: &str) -> bool {
+    let normalized = text.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+
+    if [
+        "password",
+        "passcode",
+        "verification code",
+        "one-time code",
+        "otp",
+        "2fa",
+        "credit card",
+        "card number",
+        "security code",
+        "cvv",
+        "cvc",
+        "api key",
+        "access token",
+        "secret",
+        "private key",
+        "密码",
+        "口令",
+        "验证码",
+        "动态码",
+        "银行卡",
+        "信用卡",
+        "支付密码",
+        "密钥",
+        "令牌",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
+    {
+        return true;
+    }
+
+    let digits = normalized
+        .chars()
+        .filter(|character| character.is_ascii_digit())
+        .collect::<String>();
+    if (13..=19).contains(&digits.len()) && luhn_checksum_is_valid(&digits) {
+        return true;
+    }
+
+    false
+}
+
+fn luhn_checksum_is_valid(digits: &str) -> bool {
+    let mut sum = 0;
+    let mut double = false;
+    for digit in digits.bytes().rev() {
+        let mut value = (digit - b'0') as u32;
+        if double {
+            value *= 2;
+            if value > 9 {
+                value -= 9;
+            }
+        }
+        sum += value;
+        double = !double;
+    }
+    sum % 10 == 0
+}
+
+fn normalize_key_name(key: &str) -> String {
+    match key.trim().to_ascii_uppercase().as_str() {
+        "CONTROL" => "CTRL".to_string(),
+        "ESCAPE" => "ESC".to_string(),
+        "DEL" => "DELETE".to_string(),
+        value => value.to_string(),
+    }
 }
 
 fn flow_step_id(step: &FlowStep) -> u32 {
@@ -441,20 +707,51 @@ fn saved_flow(file_name: String, path: PathBuf, flow: Flow) -> SavedFlow {
         file_name,
         saved_at,
         flow,
-        path,
     }
 }
 
 fn resolve_flow_file(root: &Path, file_name: &str) -> StorageResult<PathBuf> {
-    if file_name.contains('/') || file_name.contains('\\') || !file_name.ends_with(FLOW_FILE_SUFFIX)
-    {
+    if !flow_file_name_is_allowed(file_name) {
         return Err(StorageError::InvalidFileName(file_name.to_string()));
     }
     Ok(flows_dir(root).join(file_name))
 }
 
+fn flow_file_name_is_allowed(file_name: &str) -> bool {
+    let Some(stem) = file_name.strip_suffix(FLOW_FILE_SUFFIX) else {
+        return false;
+    };
+    if stem.is_empty()
+        || RESERVED_WINDOWS_FILE_NAMES
+            .iter()
+            .any(|reserved| stem.eq_ignore_ascii_case(reserved))
+    {
+        return false;
+    }
+
+    stem.chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '_')
+}
+
 fn flow_file_name(flow: &Flow) -> String {
     format!("{}{}", slugify_flow_name(&flow.name), FLOW_FILE_SUFFIX)
+}
+
+fn display_name_from_file_name(file_name: &str) -> String {
+    file_name
+        .strip_suffix(FLOW_FILE_SUFFIX)
+        .unwrap_or(file_name)
+        .split(['-', '_'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn slugify_flow_name(value: &str) -> String {
@@ -509,7 +806,80 @@ fn file_modified_unix_seconds(path: &Path) -> u64 {
         .as_secs()
 }
 
-#[allow(dead_code)]
-pub fn default_flow_file_name() -> &'static str {
-    DEFAULT_FLOW_FILE_NAME
+fn write_flow_atomically(path: &Path, flow: &Flow) -> StorageResult<()> {
+    let json = serde_json::to_string_pretty(flow)?;
+    let temp_path = temporary_flow_path(path)?;
+
+    let write_result = (|| -> io::Result<()> {
+        let mut file = File::create_new(&temp_path)?;
+        file.write_all(format!("{json}\n").as_bytes())?;
+        file.sync_all()?;
+        replace_file(&temp_path, path)
+    })();
+
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(StorageError::Io(error));
+    }
+
+    Ok(())
+}
+
+fn temporary_flow_path(path: &Path) -> StorageResult<PathBuf> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| StorageError::InvalidFileName(path.to_string_lossy().to_string()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| StorageError::InvalidFileName(path.to_string_lossy().to_string()))?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    Ok(parent.join(format!(".{file_name}.{}.{}.tmp", std::process::id(), stamp)))
+}
+
+#[cfg(target_os = "windows")]
+fn replace_file(temp_path: &Path, path: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn MoveFileExW(
+            existing_file_name: *const u16,
+            new_file_name: *const u16,
+            flags: u32,
+        ) -> i32;
+    }
+
+    fn wide_path(path: &Path) -> Vec<u16> {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    let temp = wide_path(temp_path);
+    let destination = wide_path(path);
+    let moved = unsafe {
+        MoveFileExW(
+            temp.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn replace_file(temp_path: &Path, path: &Path) -> io::Result<()> {
+    fs::rename(temp_path, path)
 }

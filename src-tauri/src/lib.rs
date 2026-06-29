@@ -7,7 +7,7 @@ pub mod recorder;
 pub mod storage;
 pub mod windows;
 
-use hotkeys::EmergencyHotkeyOutcome;
+use hotkeys::{EmergencyHotkeyOutcome, EMERGENCY_HOTKEY_LABEL};
 use player::{PlaybackControlPayload, PlaybackOptions, PlaybackStartPayload, PlayerState};
 use recorder::{RecorderState, RecordingStartPayload, RecordingStopPayload, ScreenRect};
 use serde::Serialize;
@@ -15,10 +15,30 @@ use std::{path::PathBuf, sync::Mutex};
 use storage::{Flow, FlowSummary, SavedFlow};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Position, State, WebviewWindow};
 
-#[derive(Serialize)]
-struct AppStatusPayload {
-    status: &'static str,
-    label: &'static str,
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EmergencyHotkeyStatusPayload {
+    available: bool,
+    shortcut: &'static str,
+    message: String,
+}
+
+fn emergency_hotkey_available_status() -> EmergencyHotkeyStatusPayload {
+    EmergencyHotkeyStatusPayload {
+        available: true,
+        shortcut: EMERGENCY_HOTKEY_LABEL,
+        message: format!("紧急停止热键可用: {EMERGENCY_HOTKEY_LABEL}"),
+    }
+}
+
+fn emergency_hotkey_unavailable_status(
+    error: impl std::fmt::Display,
+) -> EmergencyHotkeyStatusPayload {
+    EmergencyHotkeyStatusPayload {
+        available: false,
+        shortcut: EMERGENCY_HOTKEY_LABEL,
+        message: format!("紧急停止热键不可用: {error}"),
+    }
 }
 
 #[tauri::command]
@@ -77,17 +97,6 @@ fn place_workbench_pair(
     Ok(())
 }
 
-#[tauri::command]
-fn focus_control(app: AppHandle) -> Result<(), String> {
-    let window = app
-        .get_webview_window("control")
-        .ok_or_else(|| "control window was not created".to_string())?;
-
-    window.show().map_err(|error| error.to_string())?;
-    window.set_focus().map_err(|error| error.to_string())?;
-    Ok(())
-}
-
 fn app_data_root(app: &AppHandle) -> Result<PathBuf, String> {
     app.path().app_data_dir().map_err(|error| error.to_string())
 }
@@ -107,25 +116,41 @@ fn list_flows(app: AppHandle) -> Result<Vec<FlowSummary>, String> {
 #[tauri::command]
 fn load_flow(app: AppHandle, file_name: String) -> Result<SavedFlow, String> {
     let root = app_data_root(&app)?;
-    storage::load_flow_file(&root, &file_name).map_err(|error| error.to_string())
+    let saved_flow =
+        storage::load_flow_file(&root, &file_name).map_err(|error| error.to_string())?;
+    app.emit("flow-loaded", &saved_flow)
+        .map_err(|error| error.to_string())?;
+    Ok(saved_flow)
 }
 
 #[tauri::command]
-fn save_flow(app: AppHandle, flow: Flow) -> Result<SavedFlow, String> {
+fn get_emergency_hotkey_status(
+    status: State<'_, Mutex<EmergencyHotkeyStatusPayload>>,
+) -> Result<EmergencyHotkeyStatusPayload, String> {
+    status
+        .lock()
+        .map(|status| status.clone())
+        .map_err(|_| "emergency hotkey status is unavailable".to_string())
+}
+
+#[tauri::command]
+fn save_flow(app: AppHandle, file_name: String, flow: Flow) -> Result<SavedFlow, String> {
     let root = app_data_root(&app)?;
-    storage::save_flow_to_dir(&root, &flow).map_err(|error| error.to_string())
+    let saved_flow = storage::save_flow_file_to_dir(&root, &file_name, &flow)
+        .map_err(|error| error.to_string())?;
+    app.emit("flow-saved", &saved_flow)
+        .map_err(|error| error.to_string())?;
+    Ok(saved_flow)
 }
 
 #[tauri::command]
 fn save_flow_as(app: AppHandle, flow: Flow, display_name: String) -> Result<SavedFlow, String> {
     let root = app_data_root(&app)?;
-    storage::save_flow_as_to_dir(&root, &flow, &display_name).map_err(|error| error.to_string())
-}
-
-#[tauri::command]
-fn create_flow(app: AppHandle, display_name: String) -> Result<SavedFlow, String> {
-    let root = app_data_root(&app)?;
-    storage::create_flow_in_dir(&root, &display_name).map_err(|error| error.to_string())
+    let saved_flow = storage::save_flow_as_to_dir(&root, &flow, &display_name)
+        .map_err(|error| error.to_string())?;
+    app.emit("flow-saved", &saved_flow)
+        .map_err(|error| error.to_string())?;
+    Ok(saved_flow)
 }
 
 #[tauri::command]
@@ -246,45 +271,13 @@ fn app_window_regions(app: &AppHandle) -> Vec<ScreenRect> {
         .collect()
 }
 
-#[tauri::command]
-fn status_ready() -> AppStatusPayload {
-    AppStatusPayload {
-        status: "ready",
-        label: "就绪",
-    }
-}
-
-#[tauri::command]
-fn status_recording() -> AppStatusPayload {
-    AppStatusPayload {
-        status: "recording",
-        label: "录制中",
-    }
-}
-
-#[tauri::command]
-fn status_playing() -> AppStatusPayload {
-    AppStatusPayload {
-        status: "playing",
-        label: "回放中",
-    }
-}
-
-#[tauri::command]
-fn status_stopped() -> AppStatusPayload {
-    AppStatusPayload {
-        status: "stopped",
-        label: "已停止",
-    }
-}
-
 pub fn run() {
     tauri::Builder::default()
         .manage(Mutex::new(RecorderState::default()))
         .manage(Mutex::new(PlayerState::default()))
         .setup(|app| {
             let app_handle = app.handle().clone();
-            match hotkeys::start_emergency_hotkey(move || {
+            let hotkey_status = match hotkeys::start_emergency_hotkey(move || {
                 let player = app_handle.state::<Mutex<PlayerState>>();
                 let Ok(mut player) = player.lock() else {
                     return;
@@ -297,30 +290,51 @@ pub fn run() {
             }) {
                 Ok(guard) => {
                     app.manage(Mutex::new(guard));
+                    emergency_hotkey_available_status()
                 }
-                Err(error) => eprintln!("global emergency hotkey unavailable: {error}"),
-            }
+                Err(error) => emergency_hotkey_unavailable_status(error),
+            };
+            app.manage(Mutex::new(hotkey_status));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             show_workbench,
-            focus_control,
             get_initial_flow,
             list_flows,
             load_flow,
+            get_emergency_hotkey_status,
             save_flow,
             save_flow_as,
-            create_flow,
             start_recording,
             stop_recording,
             start_playback,
             stop_playback,
-            emergency_stop_playback,
-            status_ready,
-            status_recording,
-            status_playing,
-            status_stopped
+            emergency_stop_playback
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Remember app");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn emergency_hotkey_available_status_names_shortcut() {
+        let status = emergency_hotkey_available_status();
+
+        assert!(status.available);
+        assert_eq!(status.shortcut, EMERGENCY_HOTKEY_LABEL);
+        assert!(status.message.contains(EMERGENCY_HOTKEY_LABEL));
+    }
+
+    #[test]
+    fn emergency_hotkey_unavailable_status_exposes_failure() {
+        let status = emergency_hotkey_unavailable_status("registration denied");
+
+        assert!(!status.available);
+        assert_eq!(status.shortcut, EMERGENCY_HOTKEY_LABEL);
+        assert!(status.message.contains("不可用"));
+        assert!(status.message.contains("registration denied"));
+    }
 }

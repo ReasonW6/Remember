@@ -3,5 +3,9 @@
   "identifier": "default",
   "description": "Default capability for Remember desktop windows",
   "windows": ["control", "workbench"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:event:allow-emit"
+  ]
 }

@@ -7,7 +7,7 @@ use std::{
 
 use crate::keyboard;
 use crate::mouse;
-use crate::storage::{Flow, FlowStep, TargetWindow};
+use crate::storage::{hotkey_is_allowed, Flow, FlowStep, TargetWindow};
 
 pub const RECORDING_SAFETY_WARNING: &str =
     "录制会记录鼠标和键盘操作，请勿在录制期间输入密码、验证码或其他敏感信息。";
@@ -367,6 +367,24 @@ impl RecorderState {
         text: &str,
         captured_at_ms: u64,
     ) -> Result<(), RecorderError> {
+        self.record_text_input_at_maybe_target(text, captured_at_ms, None)
+    }
+
+    pub fn record_text_input_at_target(
+        &mut self,
+        text: &str,
+        captured_at_ms: u64,
+        target_window: TargetWindow,
+    ) -> Result<(), RecorderError> {
+        self.record_text_input_at_maybe_target(text, captured_at_ms, Some(target_window))
+    }
+
+    fn record_text_input_at_maybe_target(
+        &mut self,
+        text: &str,
+        captured_at_ms: u64,
+        target_window: Option<TargetWindow>,
+    ) -> Result<(), RecorderError> {
         let Some(session) = self.active_session.as_mut() else {
             return Err(RecorderError::NotRecording);
         };
@@ -380,7 +398,7 @@ impl RecorderState {
         keyboard_inputs.push(RecordedKeyboardInput::Text {
             text: text.to_string(),
             captured_at_ms,
-            target_window: None,
+            target_window,
         });
         Ok(())
     }
@@ -488,9 +506,10 @@ impl RecorderState {
             .map_err(|_| RecorderError::CaptureUnavailable)?
             .iter()
             .filter(|click| {
-                !excluded_regions
-                    .iter()
-                    .any(|region| region.contains(click.x, click.y))
+                !click.target_window.as_ref().is_some_and(is_remember_window)
+                    && !excluded_regions
+                        .iter()
+                        .any(|region| region.contains(click.x, click.y))
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -500,10 +519,11 @@ impl RecorderState {
             .map_err(|_| RecorderError::CaptureUnavailable)?
             .iter()
             .filter(|drag| {
-                !excluded_regions.iter().any(|region| {
-                    region.contains(drag.start_x, drag.start_y)
-                        || region.contains(drag.end_x, drag.end_y)
-                })
+                !drag.target_window.as_ref().is_some_and(is_remember_window)
+                    && !excluded_regions.iter().any(|region| {
+                        region.contains(drag.start_x, drag.start_y)
+                            || region.contains(drag.end_x, drag.end_y)
+                    })
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -513,9 +533,13 @@ impl RecorderState {
             .map_err(|_| RecorderError::CaptureUnavailable)?
             .iter()
             .filter(|scroll| {
-                !excluded_regions
-                    .iter()
-                    .any(|region| region.contains(scroll.x, scroll.y))
+                !scroll
+                    .target_window
+                    .as_ref()
+                    .is_some_and(is_remember_window)
+                    && !excluded_regions
+                        .iter()
+                        .any(|region| region.contains(scroll.x, scroll.y))
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -523,7 +547,10 @@ impl RecorderState {
             .keyboard_inputs
             .lock()
             .map_err(|_| RecorderError::CaptureUnavailable)?
-            .clone();
+            .iter()
+            .filter(|input| keyboard_input_is_safe(input))
+            .cloned()
+            .collect::<Vec<_>>();
         let flow = recorded_flow(
             session.started_at,
             session.started_at_ms,
@@ -536,7 +563,7 @@ impl RecorderState {
         let has_mouse_input =
             !mouse_clicks.is_empty() || !mouse_drags.is_empty() || !mouse_scrolls.is_empty();
         let message = if !has_mouse_input && keyboard_inputs.is_empty() {
-            "已停止录制会话；生成的是安全占位流程，尚未捕获真实输入。"
+            "已停止录制会话；尚未捕获真实输入。"
         } else if keyboard_inputs.is_empty() {
             "已停止录制会话；已捕获鼠标步骤，本次未捕获键盘输入。"
         } else if !has_mouse_input {
@@ -554,6 +581,61 @@ impl RecorderState {
             message,
         })
     }
+}
+
+fn keyboard_input_is_safe(input: &RecordedKeyboardInput) -> bool {
+    let target_window = match input {
+        RecordedKeyboardInput::Text { target_window, .. }
+        | RecordedKeyboardInput::Hotkey { target_window, .. }
+        | RecordedKeyboardInput::Key { target_window, .. } => target_window,
+    };
+
+    if target_window.as_ref().is_some_and(|target_window| {
+        is_remember_window(target_window) || is_sensitive_window(target_window)
+    }) {
+        return false;
+    }
+
+    match input {
+        RecordedKeyboardInput::Hotkey { keys, .. } => hotkey_is_allowed(keys),
+        RecordedKeyboardInput::Key { key, .. } => !key.trim().is_empty(),
+        RecordedKeyboardInput::Text { text, .. } => !text.is_empty(),
+    }
+}
+
+fn is_remember_window(target_window: &TargetWindow) -> bool {
+    target_window
+        .process
+        .trim()
+        .eq_ignore_ascii_case("remember.exe")
+}
+
+fn is_sensitive_window(target_window: &TargetWindow) -> bool {
+    let haystack = format!(
+        "{} {}",
+        target_window.title.to_ascii_lowercase(),
+        target_window.process.to_ascii_lowercase()
+    );
+    [
+        "password",
+        "passcode",
+        "login",
+        "sign in",
+        "signin",
+        "otp",
+        "2fa",
+        "verification",
+        "credit card",
+        "payment",
+        "密码",
+        "登录",
+        "登入",
+        "验证码",
+        "支付",
+        "银行卡",
+    ]
+    .iter()
+    .any(|needle| haystack.contains(needle))
 }
 
 fn recorded_flow(
@@ -579,16 +661,16 @@ fn recorded_flow(
         version: 1,
         name: format!("recording-{started_at}"),
         display_name: if steps.is_empty() {
-            format!("录制会话安全占位 {started_at}")
+            format!("空录制会话 {started_at}")
         } else {
             format!("录制会话 {started_at}")
         },
-        target_window,
-        steps: if steps.is_empty() {
-            safe_placeholder_steps()
+        target_window: if steps.is_empty() {
+            unknown_target_window()
         } else {
-            steps
+            target_window
         },
+        steps,
     }
 }
 
@@ -649,16 +731,6 @@ fn first_recorded_target_window(
         .map(|(_, target_window)| target_window)
         .find(|target_window| target_window.matched && target_window.process != "N/A")
         .cloned()
-}
-
-fn safe_placeholder_steps() -> Vec<FlowStep> {
-    vec![FlowStep::Wait {
-        id: 1,
-        action: "等待".to_string(),
-        duration_ms: 500,
-        delay_ms: 500,
-        note: "安全占位步骤：尚未捕获真实输入".to_string(),
-    }]
 }
 
 fn recorded_steps(
@@ -766,6 +838,8 @@ fn recorded_steps(
                 steps.push(FlowStep::Scroll {
                     id: (steps.len() + 1) as u32,
                     action: "滚动".to_string(),
+                    x: Some(scroll.x),
+                    y: Some(scroll.y),
                     delta_x: scroll.delta_x,
                     delta_y: scroll.delta_y,
                     delay_ms,
@@ -793,8 +867,13 @@ fn recorded_steps(
                 });
                 action_index += 1;
             }
-            RecordedAction::Text { captured_at_ms, .. } => {
+            RecordedAction::Text {
+                captured_at_ms,
+                target_window,
+                ..
+            } => {
                 let first_at_ms = *captured_at_ms;
+                let first_target_window = target_window.clone();
                 let delay_ms = first_at_ms.saturating_sub(previous_at_ms);
                 let mut text = String::new();
                 let mut last_at_ms = first_at_ms;
@@ -802,9 +881,12 @@ fn recorded_steps(
                 while let Some(RecordedAction::Text {
                     text: next_text,
                     captured_at_ms,
-                    ..
+                    target_window,
                 }) = actions.get(action_index)
                 {
+                    if target_window != &first_target_window {
+                        break;
+                    }
                     text.push_str(next_text);
                     last_at_ms = *captured_at_ms;
                     action_index += 1;
