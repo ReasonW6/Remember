@@ -115,6 +115,17 @@ impl AppController {
         self.recording.as_ref()
     }
 
+    pub fn saveable_recording(&self) -> Result<Recording, String> {
+        self.recording
+            .clone()
+            .ok_or_else(|| "no recording loaded".to_string())
+    }
+
+    pub fn mark_idle(&mut self, message: impl Into<String>) {
+        self.mode = AppMode::Idle;
+        self.message = message.into();
+    }
+
     pub fn start_playback(
         &mut self,
         loop_count: u32,
