@@ -80,7 +80,9 @@ pub fn play_actions<E: StepExecutor + ?Sized>(
             return Err("playback stopped".to_string());
         }
 
-        thread::sleep(Duration::from_millis(action.delay_ms));
+        if action.delay_ms > 0 {
+            thread::sleep(Duration::from_millis(action.delay_ms));
+        }
 
         if stop_token.is_stopped() {
             return Err("playback stopped".to_string());
