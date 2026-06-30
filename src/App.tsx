@@ -80,7 +80,7 @@ export function App() {
     };
   }, []);
 
-  async function applyState(action: () => Promise<UiState>) {
+  async function applyCommand(action: () => Promise<void>) {
     if (pendingCommandRef.current) {
       return;
     }
@@ -90,13 +90,19 @@ export function App() {
 
     try {
       setError("");
-      setState(await action());
+      await action();
     } catch (actionError) {
       setError(errorMessage(actionError));
     } finally {
       pendingCommandRef.current = false;
       setPendingCommand(false);
     }
+  }
+
+  function applyState(action: () => Promise<UiState>) {
+    return applyCommand(async () => {
+      setState(await action());
+    });
   }
 
   function handleRecord() {
@@ -120,11 +126,16 @@ export function App() {
   }
 
   function handleSave() {
-    setError("Save dialog wiring follows the command layer.");
+    void applyCommand(rememberApi.saveCurrentRecording);
   }
 
   function handleOpen() {
-    setError("Open dialog wiring follows the command layer.");
+    void applyCommand(async () => {
+      const loadedState = await rememberApi.openRecording();
+      if (loadedState) {
+        setState(loadedState);
+      }
+    });
   }
 
   const displayedError = validationError || error;

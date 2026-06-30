@@ -9,6 +9,8 @@ const apiMocks = vi.hoisted(() => ({
   stopRecording: vi.fn(),
   startPlayback: vi.fn(),
   stopPlayback: vi.fn(),
+  openRecording: vi.fn(),
+  saveCurrentRecording: vi.fn(),
   subscribeToState: vi.fn()
 }));
 
@@ -55,6 +57,8 @@ describe("App", () => {
     apiMocks.stopRecording.mockResolvedValue(stoppedState);
     apiMocks.startPlayback.mockResolvedValue(playingState);
     apiMocks.stopPlayback.mockResolvedValue(stoppedState);
+    apiMocks.openRecording.mockResolvedValue(null);
+    apiMocks.saveCurrentRecording.mockResolvedValue(undefined);
   });
 
   it("renders idle controls and hotkeys", async () => {
@@ -135,6 +139,43 @@ describe("App", () => {
       "Speed must be a finite number greater than 0."
     );
     expect(apiMocks.startPlayback).not.toHaveBeenCalled();
+  });
+
+  it("opens a recording and displays the loaded recording name", async () => {
+    const loadedState = {
+      mode: "idle",
+      recording_name: "loaded.remember.json",
+      step_count: 4,
+      duration_ms: 2400,
+      message: "Loaded recording"
+    };
+    apiMocks.openRecording.mockResolvedValue(loadedState);
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "Open" }));
+
+    await waitFor(() => expect(apiMocks.openRecording).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("loaded.remember.json")).toBeInTheDocument();
+  });
+
+  it("saves the current recording from the Save button", async () => {
+    const currentState = {
+      mode: "idle",
+      recording_name: "current",
+      step_count: 2,
+      duration_ms: 1500,
+      message: "Ready"
+    };
+    apiMocks.getState.mockResolvedValue(currentState);
+    const user = userEvent.setup();
+    render(<App />);
+
+    const save = await screen.findByRole("button", { name: "Save" });
+    await waitFor(() => expect(save).toBeEnabled());
+    await user.click(save);
+
+    await waitFor(() => expect(apiMocks.saveCurrentRecording).toHaveBeenCalledTimes(1));
   });
 
   it("ignores duplicate record clicks while the recording command is pending", async () => {
