@@ -4,7 +4,9 @@ use std::sync::{
     Arc,
 };
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const STOP_SLEEP_CHUNK: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlaybackSettings {
@@ -75,40 +77,178 @@ pub fn play_actions<E: StepExecutor + ?Sized>(
     executor: &E,
     stop_token: &StopToken,
 ) -> Result<(), String> {
+    let mut pressed_inputs = PressedInputs::default();
+
     for action in actions {
         if stop_token.is_stopped() {
-            return Err("playback stopped".to_string());
+            return cleanup_and_return(
+                &mut pressed_inputs,
+                executor,
+                "playback stopped".to_string(),
+            );
         }
 
-        if action.delay_ms > 0 {
-            thread::sleep(Duration::from_millis(action.delay_ms));
+        if let Err(err) = sleep_with_stop(action.delay_ms, stop_token) {
+            return cleanup_and_return(&mut pressed_inputs, executor, err);
         }
 
         if stop_token.is_stopped() {
-            return Err("playback stopped".to_string());
+            return cleanup_and_return(
+                &mut pressed_inputs,
+                executor,
+                "playback stopped".to_string(),
+            );
         }
 
-        match &action.step {
-            MacroStep::MouseMove { x, y, .. } => executor.mouse_move(*x, *y)?,
-            MacroStep::MouseButton {
-                x,
-                y,
-                button,
-                state,
-                ..
-            } => executor.mouse_button(*x, *y, *button, *state)?,
-            MacroStep::MouseWheel { x, y, delta, .. } => executor.mouse_wheel(*x, *y, *delta)?,
-            MacroStep::Key {
-                vk_code,
-                scan_code,
-                state,
-                ..
-            } => executor.key(*vk_code, *scan_code, *state)?,
-            MacroStep::Wait { .. } => {}
+        if let Err(err) = execute_step(&action.step, executor, &mut pressed_inputs) {
+            return cleanup_and_return(&mut pressed_inputs, executor, err);
         }
     }
 
     Ok(())
+}
+
+fn sleep_with_stop(delay_ms: u64, stop_token: &StopToken) -> Result<(), String> {
+    if delay_ms == 0 {
+        return Ok(());
+    }
+
+    let delay = Duration::from_millis(delay_ms);
+    let started = Instant::now();
+    loop {
+        if stop_token.is_stopped() {
+            return Err("playback stopped".to_string());
+        }
+
+        let elapsed = started.elapsed();
+        if elapsed >= delay {
+            return Ok(());
+        }
+
+        let remaining = delay.saturating_sub(elapsed);
+        let chunk = if remaining > STOP_SLEEP_CHUNK {
+            STOP_SLEEP_CHUNK
+        } else {
+            remaining
+        };
+        thread::sleep(chunk);
+    }
+}
+
+fn execute_step<E: StepExecutor + ?Sized>(
+    step: &MacroStep,
+    executor: &E,
+    pressed_inputs: &mut PressedInputs,
+) -> Result<(), String> {
+    match step {
+        MacroStep::MouseMove { x, y, .. } => executor.mouse_move(*x, *y),
+        MacroStep::MouseButton {
+            x,
+            y,
+            button,
+            state,
+            ..
+        } => {
+            executor.mouse_button(*x, *y, *button, *state)?;
+            match state {
+                ButtonState::Pressed => pressed_inputs.add_mouse_button(*button, *x, *y),
+                ButtonState::Released => pressed_inputs.remove_mouse_button(*button),
+            }
+            Ok(())
+        }
+        MacroStep::MouseWheel { x, y, delta, .. } => executor.mouse_wheel(*x, *y, *delta),
+        MacroStep::Key {
+            vk_code,
+            scan_code,
+            state,
+            ..
+        } => {
+            executor.key(*vk_code, *scan_code, *state)?;
+            match state {
+                KeyState::Pressed => pressed_inputs.add_key(*vk_code, *scan_code),
+                KeyState::Released => pressed_inputs.remove_key(*vk_code, *scan_code),
+            }
+            Ok(())
+        }
+        MacroStep::Wait { .. } => Ok(()),
+    }
+}
+
+fn cleanup_and_return<E: StepExecutor + ?Sized>(
+    pressed_inputs: &mut PressedInputs,
+    executor: &E,
+    err: String,
+) -> Result<(), String> {
+    pressed_inputs.release_all(executor);
+    Err(err)
+}
+
+#[derive(Default)]
+struct PressedInputs {
+    keys: Vec<(u16, u16)>,
+    mouse_buttons: Vec<PressedMouseButton>,
+}
+
+impl PressedInputs {
+    fn add_key(&mut self, vk_code: u16, scan_code: u16) {
+        if !self.keys.iter().any(|key| *key == (vk_code, scan_code)) {
+            self.keys.push((vk_code, scan_code));
+        }
+    }
+
+    fn remove_key(&mut self, vk_code: u16, scan_code: u16) {
+        if let Some(index) = self
+            .keys
+            .iter()
+            .position(|key| *key == (vk_code, scan_code))
+        {
+            self.keys.remove(index);
+        }
+    }
+
+    fn add_mouse_button(&mut self, button: MouseButton, x: i32, y: i32) {
+        if let Some(pressed_button) = self
+            .mouse_buttons
+            .iter_mut()
+            .find(|pressed_button| pressed_button.button == button)
+        {
+            pressed_button.x = x;
+            pressed_button.y = y;
+        } else {
+            self.mouse_buttons.push(PressedMouseButton { button, x, y });
+        }
+    }
+
+    fn remove_mouse_button(&mut self, button: MouseButton) {
+        if let Some(index) = self
+            .mouse_buttons
+            .iter()
+            .position(|pressed_button| pressed_button.button == button)
+        {
+            self.mouse_buttons.remove(index);
+        }
+    }
+
+    fn release_all<E: StepExecutor + ?Sized>(&mut self, executor: &E) {
+        for (vk_code, scan_code) in self.keys.drain(..).rev() {
+            let _ = executor.key(vk_code, scan_code, KeyState::Released);
+        }
+
+        for pressed_button in self.mouse_buttons.drain(..).rev() {
+            let _ = executor.mouse_button(
+                pressed_button.x,
+                pressed_button.y,
+                pressed_button.button,
+                ButtonState::Released,
+            );
+        }
+    }
+}
+
+struct PressedMouseButton {
+    button: MouseButton,
+    x: i32,
+    y: i32,
 }
 
 pub fn build_playback_plan(
