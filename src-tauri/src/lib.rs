@@ -1,4 +1,5 @@
 pub mod app_state;
+pub mod input;
 pub mod model;
 pub mod player;
 pub mod recorder;

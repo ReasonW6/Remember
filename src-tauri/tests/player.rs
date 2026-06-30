@@ -1,5 +1,8 @@
-use remember_lib::model::{KeyState, MacroStep, Recording};
-use remember_lib::player::{build_playback_plan, scaled_delay_ms, PlaybackSettings, StopToken};
+use remember_lib::model::{ButtonState, KeyState, MacroStep, MouseButton, Recording};
+use remember_lib::player::{
+    build_playback_plan, play_actions, scaled_delay_ms, PlaybackSettings, StepExecutor, StopToken,
+};
+use std::sync::{Arc, Mutex};
 
 fn recording() -> Recording {
     Recording::new(
@@ -55,4 +58,62 @@ fn stop_token_defaults_to_not_stopped() {
     assert!(!token.is_stopped());
     token.request_stop();
     assert!(token.is_stopped());
+}
+
+#[derive(Default)]
+struct FakeExecutor {
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
+impl StepExecutor for FakeExecutor {
+    fn mouse_move(&self, x: i32, y: i32) -> Result<(), String> {
+        self.calls.lock().unwrap().push(format!("move:{x}:{y}"));
+        Ok(())
+    }
+
+    fn mouse_button(
+        &self,
+        x: i32,
+        y: i32,
+        button: MouseButton,
+        state: ButtonState,
+    ) -> Result<(), String> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("button:{x}:{y}:{button:?}:{state:?}"));
+        Ok(())
+    }
+
+    fn mouse_wheel(&self, x: i32, y: i32, delta: i32) -> Result<(), String> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("wheel:{x}:{y}:{delta}"));
+        Ok(())
+    }
+
+    fn key(&self, vk_code: u16, scan_code: u16, state: KeyState) -> Result<(), String> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("key:{vk_code}:{scan_code}:{state:?}"));
+        Ok(())
+    }
+}
+
+#[test]
+fn play_actions_dispatches_steps_to_executor() {
+    let fake = FakeExecutor::default();
+    let calls = fake.calls.clone();
+    let settings = PlaybackSettings::new(1, 1000.0).expect("settings");
+    let plan = build_playback_plan(&recording(), settings);
+    let token = StopToken::default();
+
+    play_actions(&plan, &fake, &token).expect("play");
+
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        ["key:65:30:Pressed", "key:65:30:Released"]
+    );
 }
