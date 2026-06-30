@@ -1,3 +1,6 @@
+pub mod model;
+pub mod storage;
+
 pub fn product_name() -> &'static str {
     "Remember"
 }
