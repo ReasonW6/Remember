@@ -79,6 +79,9 @@ impl Recorder {
                 state,
             } => {
                 let elapsed_ms = active.elapsed_ms(at_ms);
+                if active.is_stale_elapsed(elapsed_ms) {
+                    return;
+                }
                 active.steps.push(MacroStep::MouseButton {
                     elapsed_ms,
                     x,
@@ -89,6 +92,9 @@ impl Recorder {
             }
             RawInputEvent::MouseWheel { at_ms, x, y, delta } => {
                 let elapsed_ms = active.elapsed_ms(at_ms);
+                if active.is_stale_elapsed(elapsed_ms) {
+                    return;
+                }
                 active.steps.push(MacroStep::MouseWheel {
                     elapsed_ms,
                     x,
@@ -103,6 +109,9 @@ impl Recorder {
                 state,
             } => {
                 let elapsed_ms = active.elapsed_ms(at_ms);
+                if active.is_stale_elapsed(elapsed_ms) {
+                    return;
+                }
                 active.steps.push(MacroStep::Key {
                     elapsed_ms,
                     vk_code,
@@ -118,11 +127,15 @@ impl Recorder {
             return Err("not recording".to_string());
         };
 
+        let duration_ms = stop_ms
+            .saturating_sub(active.start_ms)
+            .max(active.last_emitted_elapsed_ms().unwrap_or(0));
+
         Ok(Recording {
             version: RECORDING_VERSION,
             name: active.name,
             created_at: active.created_at,
-            duration_ms: stop_ms.saturating_sub(active.start_ms),
+            duration_ms,
             steps: active.steps,
         })
     }
@@ -146,8 +159,22 @@ impl ActiveRecording {
         at_ms.saturating_sub(self.start_ms)
     }
 
+    fn last_emitted_elapsed_ms(&self) -> Option<u64> {
+        self.steps.last().map(MacroStep::elapsed_ms)
+    }
+
+    fn is_stale_elapsed(&self, elapsed_ms: u64) -> bool {
+        self.last_emitted_elapsed_ms()
+            .map(|last| elapsed_ms < last)
+            .unwrap_or(false)
+    }
+
     fn capture_mouse_move(&mut self, at_ms: u64, x: i32, y: i32, move_sample_interval_ms: u64) {
         let elapsed_ms = self.elapsed_ms(at_ms);
+        if self.is_stale_elapsed(elapsed_ms) {
+            return;
+        }
+
         let should_sample = self
             .last_mouse_move_elapsed_ms
             .map(|last| elapsed_ms.saturating_sub(last) >= move_sample_interval_ms)

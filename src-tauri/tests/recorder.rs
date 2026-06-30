@@ -23,6 +23,7 @@ fn records_key_press_and_release() {
 
     let recording = recorder.stop(1_050).expect("stop");
 
+    recording.validate().expect("recording validates");
     assert_eq!(recording.steps.len(), 2);
     assert_eq!(recording.duration_ms, 50);
     assert!(matches!(
@@ -68,6 +69,7 @@ fn samples_mouse_moves_at_configured_interval() {
 
     let recording = recorder.stop(1_070).expect("stop");
 
+    recording.validate().expect("recording validates");
     assert_eq!(recording.steps.len(), 2);
     assert!(matches!(
         recording.steps[0],
@@ -109,6 +111,7 @@ fn preserves_click_position_even_after_recent_move() {
 
     let recording = recorder.stop(1_030).expect("stop");
 
+    recording.validate().expect("recording validates");
     assert!(matches!(
         recording.steps.last(),
         Some(MacroStep::MouseButton {
@@ -117,6 +120,90 @@ fn preserves_click_position_even_after_recent_move() {
             y: 20,
             button: MouseButton::Left,
             state: ButtonState::Pressed
+        })
+    ));
+}
+
+#[test]
+fn ignores_out_of_order_events_and_preserves_valid_recording() {
+    let mut recorder = Recorder::new(50);
+    recorder
+        .start("stale", 1_000, "2026-06-29T00:00:00Z")
+        .expect("start");
+
+    recorder.capture(RawInputEvent::Key {
+        at_ms: 1_050,
+        vk_code: 0x41,
+        scan_code: 0x1E,
+        state: KeyState::Pressed,
+    });
+    recorder.capture(RawInputEvent::Key {
+        at_ms: 1_040,
+        vk_code: 0x41,
+        scan_code: 0x1E,
+        state: KeyState::Released,
+    });
+    recorder.capture(RawInputEvent::MouseMove {
+        at_ms: 1_030,
+        x: 10,
+        y: 10,
+    });
+    recorder.capture(RawInputEvent::MouseButton {
+        at_ms: 1_060,
+        x: 20,
+        y: 20,
+        button: MouseButton::Left,
+        state: ButtonState::Released,
+    });
+
+    let recording = recorder.stop(1_070).expect("stop");
+
+    recording.validate().expect("recording validates");
+    assert_eq!(recording.steps.len(), 2);
+    assert!(matches!(
+        recording.steps[0],
+        MacroStep::Key {
+            elapsed_ms: 50,
+            state: KeyState::Pressed,
+            ..
+        }
+    ));
+    assert!(matches!(
+        recording.steps[1],
+        MacroStep::MouseButton {
+            elapsed_ms: 60,
+            x: 20,
+            y: 20,
+            button: MouseButton::Left,
+            state: ButtonState::Released
+        }
+    ));
+}
+
+#[test]
+fn stop_duration_is_at_least_final_step_elapsed() {
+    let mut recorder = Recorder::new(50);
+    recorder
+        .start("early stop", 1_000, "2026-06-29T00:00:00Z")
+        .expect("start");
+
+    recorder.capture(RawInputEvent::Key {
+        at_ms: 1_060,
+        vk_code: 0x41,
+        scan_code: 0x1E,
+        state: KeyState::Pressed,
+    });
+
+    let recording = recorder.stop(1_050).expect("stop");
+
+    recording.validate().expect("recording validates");
+    assert_eq!(recording.duration_ms, 60);
+    assert!(matches!(
+        recording.steps.last(),
+        Some(MacroStep::Key {
+            elapsed_ms: 60,
+            state: KeyState::Pressed,
+            ..
         })
     ));
 }
