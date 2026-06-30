@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Controls } from "./components/Controls";
 import { HotkeyPanel } from "./components/HotkeyPanel";
 import { PlaybackSettings } from "./components/PlaybackSettings";
@@ -19,18 +19,23 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
+const loopCountError = "Loop count must be a whole number of 1 or more.";
+const speedError = "Speed must be a finite number greater than 0.";
+
 export function App() {
   const [state, setState] = useState<UiState>(idleState);
   const [loopCount, setLoopCount] = useState(1);
   const [speedMultiplier, setSpeedMultiplier] = useState(1);
   const [error, setError] = useState("");
+  const [pendingCommand, setPendingCommand] = useState(false);
+  const pendingCommandRef = useRef(false);
   const hasRecording = state.step_count > 0;
   const validationError = useMemo(() => {
-    if (loopCount < 1) {
-      return "Loop count must be at least 1.";
+    if (!Number.isSafeInteger(loopCount) || loopCount < 1) {
+      return loopCountError;
     }
-    if (speedMultiplier <= 0) {
-      return "Speed must be greater than 0.";
+    if (!Number.isFinite(speedMultiplier) || speedMultiplier <= 0) {
+      return speedError;
     }
     return "";
   }, [loopCount, speedMultiplier]);
@@ -76,11 +81,21 @@ export function App() {
   }, []);
 
   async function applyState(action: () => Promise<UiState>) {
+    if (pendingCommandRef.current) {
+      return;
+    }
+
+    pendingCommandRef.current = true;
+    setPendingCommand(true);
+
     try {
       setError("");
       setState(await action());
     } catch (actionError) {
       setError(errorMessage(actionError));
+    } finally {
+      pendingCommandRef.current = false;
+      setPendingCommand(false);
     }
   }
 
@@ -128,6 +143,7 @@ export function App() {
           <Controls
             state={state}
             hasRecording={hasRecording}
+            pendingCommand={pendingCommand}
             onRecord={handleRecord}
             onPlay={handlePlay}
             onStop={handleStop}

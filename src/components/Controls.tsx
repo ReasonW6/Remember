@@ -4,6 +4,7 @@ import type { UiState } from "../types";
 interface ControlsProps {
   state: UiState;
   hasRecording: boolean;
+  pendingCommand: boolean;
   onRecord: () => void;
   onPlay: () => void;
   onStop: () => void;
@@ -14,6 +15,7 @@ interface ControlsProps {
 export function Controls({
   state,
   hasRecording,
+  pendingCommand,
   onRecord,
   onPlay,
   onStop,
@@ -30,7 +32,7 @@ export function Controls({
         className="action-button"
         type="button"
         onClick={onRecord}
-        disabled={isPlaying}
+        disabled={pendingCommand || isPlaying}
       >
         <Circle size={16} aria-hidden="true" />
         <span className="button-label">{isRecording ? "Stop recording" : "Record"}</span>
@@ -39,7 +41,7 @@ export function Controls({
         className="action-button"
         type="button"
         onClick={onPlay}
-        disabled={!hasRecording || isBusy}
+        disabled={pendingCommand || !hasRecording || isBusy}
       >
         <Play size={16} aria-hidden="true" />
         <span className="button-label">Play</span>
@@ -48,7 +50,7 @@ export function Controls({
         className="action-button"
         type="button"
         onClick={onStop}
-        disabled={!isBusy}
+        disabled={pendingCommand || !isBusy}
       >
         <Square size={16} aria-hidden="true" />
         <span className="button-label">Stop</span>
@@ -57,7 +59,7 @@ export function Controls({
         className="action-button"
         type="button"
         onClick={onSave}
-        disabled={!hasRecording || isBusy}
+        disabled={pendingCommand || !hasRecording || isBusy}
       >
         <Save size={16} aria-hidden="true" />
         <span className="button-label">Save</span>
@@ -66,7 +68,7 @@ export function Controls({
         className="action-button"
         type="button"
         onClick={onOpen}
-        disabled={isBusy}
+        disabled={pendingCommand || isBusy}
       >
         <FolderOpen size={16} aria-hidden="true" />
         <span className="button-label">Open</span>

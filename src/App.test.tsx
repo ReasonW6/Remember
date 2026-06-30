@@ -99,6 +99,53 @@ describe("App", () => {
     await user.clear(loopCount);
     await user.type(loopCount, "0");
 
-    expect(screen.getByRole("alert")).toHaveTextContent("Loop count must be at least 1.");
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Loop count must be a whole number of 1 or more."
+    );
+  });
+
+  it("does not start playback with a fractional loop count", async () => {
+    apiMocks.getState.mockResolvedValue(stoppedState);
+    const user = userEvent.setup();
+    render(<App />);
+
+    const loopCount = await screen.findByLabelText("Loop count");
+    await user.clear(loopCount);
+    await user.type(loopCount, "1.5");
+    await user.click(screen.getByRole("button", { name: "Play" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Loop count must be a whole number of 1 or more."
+    );
+    expect(apiMocks.startPlayback).not.toHaveBeenCalled();
+  });
+
+  it("does not start playback with a non-finite speed", async () => {
+    apiMocks.getState.mockResolvedValue(stoppedState);
+    const user = userEvent.setup();
+    render(<App />);
+
+    const speed = await screen.findByLabelText("Speed");
+    await user.clear(speed);
+    await user.click(speed);
+    await user.paste("1e309");
+    await user.click(screen.getByRole("button", { name: "Play" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Speed must be a finite number greater than 0."
+    );
+    expect(apiMocks.startPlayback).not.toHaveBeenCalled();
+  });
+
+  it("ignores duplicate record clicks while the recording command is pending", async () => {
+    apiMocks.startRecording.mockReturnValue(new Promise(() => undefined));
+    const user = userEvent.setup();
+    render(<App />);
+
+    const record = await screen.findByRole("button", { name: "Record" });
+    await user.dblClick(record);
+
+    expect(apiMocks.startRecording).toHaveBeenCalledTimes(1);
+    expect(record).toBeDisabled();
   });
 });

@@ -5,9 +5,12 @@ interface PlaybackSettingsProps {
   onSpeedMultiplierChange: (value: number) => void;
 }
 
-function inputNumber(value: number) {
-  return Number.isNaN(value) ? 0 : value;
+function displayNumber(value: number) {
+  return Number.isFinite(value) ? value : "";
 }
+
+const loopCountError = "Loop count must be a whole number of 1 or more.";
+const speedError = "Speed must be a finite number greater than 0.";
 
 export function PlaybackSettings({
   loopCount,
@@ -15,9 +18,11 @@ export function PlaybackSettings({
   onLoopCountChange,
   onSpeedMultiplierChange
 }: PlaybackSettingsProps) {
-  const loopError = loopCount < 1 ? "Loop count must be at least 1." : "";
-  const speedError = speedMultiplier <= 0 ? "Speed must be greater than 0." : "";
-  const validationMessage = loopError || speedError;
+  const loopValidationError =
+    !Number.isSafeInteger(loopCount) || loopCount < 1 ? loopCountError : "";
+  const speedValidationError =
+    !Number.isFinite(speedMultiplier) || speedMultiplier <= 0 ? speedError : "";
+  const validationMessage = loopValidationError || speedValidationError;
 
   return (
     <section className="panel settings-panel" aria-labelledby="playback-settings-title">
@@ -29,8 +34,8 @@ export function PlaybackSettings({
             type="number"
             min="1"
             step="1"
-            value={loopCount}
-            onChange={(event) => onLoopCountChange(inputNumber(event.currentTarget.valueAsNumber))}
+            value={displayNumber(loopCount)}
+            onChange={(event) => onLoopCountChange(event.currentTarget.valueAsNumber)}
           />
         </label>
         <label className="field">
@@ -39,10 +44,8 @@ export function PlaybackSettings({
             type="number"
             min="0.1"
             step="0.1"
-            value={speedMultiplier}
-            onChange={(event) =>
-              onSpeedMultiplierChange(inputNumber(event.currentTarget.valueAsNumber))
-            }
+            value={displayNumber(speedMultiplier)}
+            onChange={(event) => onSpeedMultiplierChange(event.currentTarget.valueAsNumber)}
           />
         </label>
       </div>
