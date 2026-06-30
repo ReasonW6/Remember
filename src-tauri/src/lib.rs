@@ -1,3 +1,4 @@
+pub mod app_state;
 pub mod model;
 pub mod player;
 pub mod recorder;
