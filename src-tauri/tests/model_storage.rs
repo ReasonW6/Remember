@@ -1,5 +1,8 @@
 use remember_lib::model::{KeyState, MacroStep, Recording};
-use remember_lib::storage::{recording_from_json, recording_to_json};
+use remember_lib::storage::{
+    load_recording, recording_from_json, recording_to_json, save_recording,
+};
+use std::{env, fs, process};
 
 fn sample_recording() -> Recording {
     Recording {
@@ -61,4 +64,46 @@ fn rejects_missing_required_fields() {
     let error = recording_from_json(r#"{"version":1}"#).expect_err("missing fields must fail");
 
     assert!(error.to_string().contains("invalid recording json"));
+}
+
+#[test]
+fn rejects_step_timestamps_that_move_backward() {
+    let mut recording = sample_recording();
+    recording.duration_ms = 100;
+    recording.steps = vec![
+        MacroStep::Key {
+            elapsed_ms: 100,
+            vk_code: 0x41,
+            scan_code: 0x1E,
+            state: KeyState::Pressed,
+        },
+        MacroStep::Key {
+            elapsed_ms: 50,
+            vk_code: 0x41,
+            scan_code: 0x1E,
+            state: KeyState::Released,
+        },
+    ];
+
+    let error = recording_to_json(&recording).expect_err("non-monotonic steps must fail");
+
+    assert!(error
+        .to_string()
+        .contains("step timestamps must be monotonic"));
+}
+
+#[test]
+fn saves_and_loads_recording_from_file() {
+    let recording = sample_recording();
+    let path = env::temp_dir().join(format!(
+        "remember-model-storage-{}-save-load.json",
+        process::id()
+    ));
+
+    save_recording(&path, &recording).expect("save recording");
+    let loaded = load_recording(&path).expect("load recording");
+
+    fs::remove_file(&path).expect("clean up temp recording");
+
+    assert_eq!(loaded, recording);
 }

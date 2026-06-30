@@ -105,6 +105,13 @@ impl Recording {
         if self.created_at.trim().is_empty() {
             return Err("created_at cannot be empty".to_string());
         }
+        if self
+            .steps
+            .windows(2)
+            .any(|pair| pair[1].elapsed_ms() < pair[0].elapsed_ms())
+        {
+            return Err("step timestamps must be monotonic".to_string());
+        }
         if self.duration_ms < self.steps.last().map(MacroStep::elapsed_ms).unwrap_or(0) {
             return Err("duration_ms cannot be shorter than the final step".to_string());
         }
