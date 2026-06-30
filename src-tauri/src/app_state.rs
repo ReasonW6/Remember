@@ -1,7 +1,7 @@
 use crate::{
     model::Recording,
     player::{build_playback_plan, PlaybackAction, PlaybackSettings, StopToken},
-    recorder::Recorder,
+    recorder::{RawInputEvent, Recorder},
 };
 use serde::Serialize;
 
@@ -109,6 +109,14 @@ impl AppController {
         self.mode = AppMode::Idle;
         self.message = "Recording stopped".to_string();
         Ok(recording)
+    }
+
+    pub fn capture_input(&mut self, event: RawInputEvent) {
+        if self.mode != AppMode::Recording {
+            return;
+        }
+
+        self.recorder.capture(event);
     }
 
     pub fn set_recording(&mut self, recording: Recording) -> Result<(), String> {

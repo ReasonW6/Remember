@@ -1,5 +1,9 @@
+#[cfg(not(target_os = "windows"))]
+use crate::app_state::AppController;
 use crate::model::{ButtonState, KeyState, MouseButton};
 use crate::player::StepExecutor;
+#[cfg(not(target_os = "windows"))]
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SystemInputExecutor;
@@ -25,6 +29,338 @@ impl StepExecutor for SystemInputExecutor {
 
     fn key(&self, vk_code: u16, scan_code: u16, state: KeyState) -> Result<(), String> {
         platform::key(vk_code, scan_code, state)
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub use capture::{start_capture, InputCaptureRuntime};
+
+#[cfg(not(target_os = "windows"))]
+#[derive(Debug, Default)]
+pub struct InputCaptureRuntime;
+
+#[cfg(not(target_os = "windows"))]
+pub fn start_capture(_shared: Arc<Mutex<AppController>>) -> Result<InputCaptureRuntime, String> {
+    Err("Remember input capture is Windows-only".to_string())
+}
+
+#[cfg(target_os = "windows")]
+mod capture {
+    use crate::{
+        app_state::AppController,
+        model::{ButtonState, KeyState, MouseButton},
+        recorder::RawInputEvent,
+    };
+    use std::{
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc, Mutex,
+        },
+        thread::{self, JoinHandle},
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
+    use windows::Win32::{
+        Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM},
+        System::LibraryLoader::GetModuleHandleW,
+        UI::WindowsAndMessaging::{
+            CallNextHookEx, DispatchMessageW, PeekMessageW, SetWindowsHookExW, TranslateMessage,
+            UnhookWindowsHookEx, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, PM_REMOVE,
+            WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
+            WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
+            WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1,
+            XBUTTON2,
+        },
+    };
+
+    static CAPTURE_CONTROLLER: Mutex<Option<Arc<Mutex<AppController>>>> = Mutex::new(None);
+
+    pub struct InputCaptureRuntime {
+        stop: Arc<AtomicBool>,
+        worker: Option<JoinHandle<()>>,
+    }
+
+    impl Drop for InputCaptureRuntime {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+
+            if let Some(worker) = self.worker.take() {
+                let _ = worker.join();
+            }
+
+            clear_capture_controller();
+        }
+    }
+
+    pub fn start_capture(shared: Arc<Mutex<AppController>>) -> Result<InputCaptureRuntime, String> {
+        set_capture_controller(shared)?;
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_for_thread = stop.clone();
+        let (installed_tx, installed_rx) = mpsc::channel();
+
+        let worker = thread::spawn(move || {
+            run_capture_thread(stop_for_thread, installed_tx);
+        });
+
+        match installed_rx.recv() {
+            Ok(Ok(())) => Ok(InputCaptureRuntime {
+                stop,
+                worker: Some(worker),
+            }),
+            Ok(Err(error)) => {
+                let _ = worker.join();
+                clear_capture_controller();
+                Err(error)
+            }
+            Err(_) => {
+                let _ = worker.join();
+                clear_capture_controller();
+                Err("input capture thread stopped before installing hooks".to_string())
+            }
+        }
+    }
+
+    fn set_capture_controller(shared: Arc<Mutex<AppController>>) -> Result<(), String> {
+        let mut controller = CAPTURE_CONTROLLER
+            .lock()
+            .map_err(|_| "input capture lock poisoned".to_string())?;
+        if controller.is_some() {
+            return Err("input capture already started".to_string());
+        }
+
+        *controller = Some(shared);
+        Ok(())
+    }
+
+    fn clear_capture_controller() {
+        if let Ok(mut controller) = CAPTURE_CONTROLLER.lock() {
+            *controller = None;
+        }
+    }
+
+    fn run_capture_thread(stop: Arc<AtomicBool>, installed_tx: mpsc::Sender<Result<(), String>>) {
+        let hooks = match HookHandles::install() {
+            Ok(hooks) => {
+                let _ = installed_tx.send(Ok(()));
+                hooks
+            }
+            Err(error) => {
+                let _ = installed_tx.send(Err(error));
+                return;
+            }
+        };
+
+        let mut message = MSG::default();
+        while !stop.load(Ordering::SeqCst) {
+            unsafe {
+                while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                    let _ = TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+            }
+
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        hooks.unhook();
+    }
+
+    struct HookHandles {
+        mouse: HHOOK,
+        keyboard: HHOOK,
+    }
+
+    impl HookHandles {
+        fn install() -> Result<Self, String> {
+            let module = unsafe { GetModuleHandleW(None) }
+                .map_err(|error| format!("GetModuleHandleW failed: {error}"))?;
+            let instance = HINSTANCE(module.0);
+
+            let mouse =
+                unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_hook_proc), instance, 0) }
+                    .map_err(|error| format!("SetWindowsHookExW mouse hook failed: {error}"))?;
+
+            let keyboard = match unsafe {
+                SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook_proc), instance, 0)
+            } {
+                Ok(keyboard) => keyboard,
+                Err(error) => {
+                    unsafe {
+                        let _ = UnhookWindowsHookEx(mouse);
+                    }
+                    return Err(format!("SetWindowsHookExW keyboard hook failed: {error}"));
+                }
+            };
+
+            Ok(Self { mouse, keyboard })
+        }
+
+        fn unhook(self) {
+            unsafe {
+                let _ = UnhookWindowsHookEx(self.mouse);
+                let _ = UnhookWindowsHookEx(self.keyboard);
+            }
+        }
+    }
+
+    unsafe extern "system" fn mouse_hook_proc(
+        code: i32,
+        w_param: WPARAM,
+        l_param: LPARAM,
+    ) -> LRESULT {
+        if code == HC_ACTION as i32 {
+            if let Some(event) = mouse_event(w_param, l_param) {
+                capture(event);
+            }
+        }
+
+        CallNextHookEx(HHOOK::default(), code, w_param, l_param)
+    }
+
+    unsafe extern "system" fn keyboard_hook_proc(
+        code: i32,
+        w_param: WPARAM,
+        l_param: LPARAM,
+    ) -> LRESULT {
+        if code == HC_ACTION as i32 {
+            if let Some(event) = key_event(w_param, l_param) {
+                capture(event);
+            }
+        }
+
+        CallNextHookEx(HHOOK::default(), code, w_param, l_param)
+    }
+
+    fn capture(event: RawInputEvent) {
+        let shared = match CAPTURE_CONTROLLER.lock() {
+            Ok(controller) => controller.clone(),
+            Err(_) => None,
+        };
+
+        if let Some(shared) = shared {
+            if let Ok(mut controller) = shared.lock() {
+                controller.capture_input(event);
+            }
+        }
+    }
+
+    fn mouse_event(w_param: WPARAM, l_param: LPARAM) -> Option<RawInputEvent> {
+        let info = unsafe { (l_param.0 as *const MSLLHOOKSTRUCT).as_ref()? };
+        let at_ms = now_ms();
+        let x = info.pt.x;
+        let y = info.pt.y;
+
+        match w_param.0 as u32 {
+            WM_MOUSEMOVE => Some(RawInputEvent::MouseMove { at_ms, x, y }),
+            WM_LBUTTONDOWN => Some(mouse_button(
+                at_ms,
+                x,
+                y,
+                MouseButton::Left,
+                ButtonState::Pressed,
+            )),
+            WM_LBUTTONUP => Some(mouse_button(
+                at_ms,
+                x,
+                y,
+                MouseButton::Left,
+                ButtonState::Released,
+            )),
+            WM_RBUTTONDOWN => Some(mouse_button(
+                at_ms,
+                x,
+                y,
+                MouseButton::Right,
+                ButtonState::Pressed,
+            )),
+            WM_RBUTTONUP => Some(mouse_button(
+                at_ms,
+                x,
+                y,
+                MouseButton::Right,
+                ButtonState::Released,
+            )),
+            WM_MBUTTONDOWN => Some(mouse_button(
+                at_ms,
+                x,
+                y,
+                MouseButton::Middle,
+                ButtonState::Pressed,
+            )),
+            WM_MBUTTONUP => Some(mouse_button(
+                at_ms,
+                x,
+                y,
+                MouseButton::Middle,
+                ButtonState::Released,
+            )),
+            WM_XBUTTONDOWN => x_button(info.mouseData)
+                .map(|button| mouse_button(at_ms, x, y, button, ButtonState::Pressed)),
+            WM_XBUTTONUP => x_button(info.mouseData)
+                .map(|button| mouse_button(at_ms, x, y, button, ButtonState::Released)),
+            WM_MOUSEWHEEL => Some(RawInputEvent::MouseWheel {
+                at_ms,
+                x,
+                y,
+                delta: signed_high_word(info.mouseData) as i32,
+            }),
+            _ => None,
+        }
+    }
+
+    fn mouse_button(
+        at_ms: u64,
+        x: i32,
+        y: i32,
+        button: MouseButton,
+        state: ButtonState,
+    ) -> RawInputEvent {
+        RawInputEvent::MouseButton {
+            at_ms,
+            x,
+            y,
+            button,
+            state,
+        }
+    }
+
+    fn x_button(mouse_data: u32) -> Option<MouseButton> {
+        match u32::from(high_word(mouse_data)) {
+            value if value == u32::from(XBUTTON1) => Some(MouseButton::X1),
+            value if value == u32::from(XBUTTON2) => Some(MouseButton::X2),
+            _ => None,
+        }
+    }
+
+    fn key_event(w_param: WPARAM, l_param: LPARAM) -> Option<RawInputEvent> {
+        let info = unsafe { (l_param.0 as *const KBDLLHOOKSTRUCT).as_ref()? };
+        let state = match w_param.0 as u32 {
+            WM_KEYDOWN | WM_SYSKEYDOWN => KeyState::Pressed,
+            WM_KEYUP | WM_SYSKEYUP => KeyState::Released,
+            _ => return None,
+        };
+
+        Some(RawInputEvent::Key {
+            at_ms: now_ms(),
+            vk_code: info.vkCode.try_into().ok()?,
+            scan_code: info.scanCode.try_into().ok()?,
+            state,
+        })
+    }
+
+    fn high_word(value: u32) -> u16 {
+        ((value >> 16) & 0xffff) as u16
+    }
+
+    fn signed_high_word(value: u32) -> i16 {
+        high_word(value) as i16
+    }
+
+    fn now_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
     }
 }
 
