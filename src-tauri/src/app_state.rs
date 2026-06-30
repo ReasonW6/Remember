@@ -78,8 +78,10 @@ impl AppController {
         started_at_ms: u64,
         created_at: impl Into<String>,
     ) -> Result<(), String> {
-        if self.mode == AppMode::Playing {
-            return Err("cannot record while playing".to_string());
+        match self.mode {
+            AppMode::Idle => {}
+            AppMode::Recording => return Err("cannot record while recording".to_string()),
+            AppMode::Playing => return Err("cannot record while playing".to_string()),
         }
         self.recorder.start(name, started_at_ms, created_at)?;
         self.recording = None;
@@ -97,6 +99,11 @@ impl AppController {
     }
 
     pub fn set_recording(&mut self, recording: Recording) -> Result<(), String> {
+        match self.mode {
+            AppMode::Idle => {}
+            AppMode::Recording => return Err("cannot load recording while recording".to_string()),
+            AppMode::Playing => return Err("cannot load recording while playing".to_string()),
+        }
         recording.validate()?;
         self.recording = Some(recording);
         self.mode = AppMode::Idle;
@@ -113,8 +120,10 @@ impl AppController {
         loop_count: u32,
         speed_multiplier: f64,
     ) -> Result<Vec<PlaybackAction>, String> {
-        if self.mode == AppMode::Recording {
-            return Err("cannot play while recording".to_string());
+        match self.mode {
+            AppMode::Idle => {}
+            AppMode::Recording => return Err("cannot play while recording".to_string()),
+            AppMode::Playing => return Err("cannot play while playing".to_string()),
         }
         let recording = self
             .recording
@@ -128,6 +137,9 @@ impl AppController {
     }
 
     pub fn stop_playback(&mut self) {
+        if self.mode != AppMode::Playing {
+            return;
+        }
         self.stop_token.request_stop();
         self.mode = AppMode::Idle;
         self.message = "Playback stopped".to_string();
