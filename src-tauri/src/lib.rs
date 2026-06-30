@@ -1,5 +1,6 @@
 pub mod model;
 pub mod player;
+pub mod recorder;
 pub mod storage;
 
 pub fn product_name() -> &'static str {
