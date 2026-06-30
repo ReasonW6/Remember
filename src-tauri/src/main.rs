@@ -1,3 +1,3 @@
 fn main() {
-    remember::run();
+    remember_lib::run();
 }

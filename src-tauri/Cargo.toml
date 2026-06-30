@@ -5,7 +5,7 @@ description = "Portable Windows macro recorder"
 edition = "2021"
 
 [lib]
-name = "remember"
+name = "remember_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [[bin]]
