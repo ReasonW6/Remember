@@ -102,13 +102,13 @@ pub fn start_playback(
     loop_count: u32,
     speed_multiplier: f64,
 ) -> Result<UiState, String> {
-    let (actions, stop_token, ui_state) = {
+    let (run, stop_token, ui_state) = {
         let mut controller = state
             .lock()
             .map_err(|_| "state lock poisoned".to_string())?;
-        let actions = controller.start_playback(loop_count, speed_multiplier)?;
+        let run = controller.start_playback(loop_count, speed_multiplier)?;
         let stop_token = controller.stop_token();
-        (actions, stop_token, controller.ui_state())
+        (run, stop_token, controller.ui_state())
     };
     emit_state(&app, ui_state.clone())?;
 
@@ -116,7 +116,7 @@ pub fn start_playback(
     let state_for_thread = state.inner().clone();
     thread::spawn(move || {
         let executor = SystemInputExecutor;
-        let result = play_actions(&actions, &executor, &stop_token);
+        let result = play_actions(&run.actions, &executor, &stop_token);
         let next_state = {
             match state_for_thread.lock() {
                 Ok(mut controller) => {
@@ -124,8 +124,11 @@ pub fn start_playback(
                         Ok(()) => "Playback finished".to_string(),
                         Err(error) => error,
                     };
-                    controller.mark_idle(message);
-                    Some(controller.ui_state())
+                    if controller.finish_playback_if_current(run.id, message) {
+                        Some(controller.ui_state())
+                    } else {
+                        None
+                    }
                 }
                 Err(_) => None,
             }

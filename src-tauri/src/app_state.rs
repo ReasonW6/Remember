@@ -22,11 +22,22 @@ pub struct UiState {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaybackRunId(u64);
+
+#[derive(Debug, Clone)]
+pub struct PlaybackRun {
+    pub id: PlaybackRunId,
+    pub actions: Vec<PlaybackAction>,
+}
+
 pub struct AppController {
     mode: AppMode,
     recorder: Recorder,
     recording: Option<Recording>,
     stop_token: StopToken,
+    next_playback_id: u64,
+    active_playback_id: Option<PlaybackRunId>,
     message: String,
 }
 
@@ -43,6 +54,8 @@ impl AppController {
             recorder: Recorder::new(50),
             recording: None,
             stop_token: StopToken::default(),
+            next_playback_id: 0,
+            active_playback_id: None,
             message: "Idle".to_string(),
         }
     }
@@ -123,14 +136,30 @@ impl AppController {
 
     pub fn mark_idle(&mut self, message: impl Into<String>) {
         self.mode = AppMode::Idle;
+        self.active_playback_id = None;
         self.message = message.into();
+    }
+
+    pub fn finish_playback_if_current(
+        &mut self,
+        id: PlaybackRunId,
+        message: impl Into<String>,
+    ) -> bool {
+        if self.mode != AppMode::Playing || self.active_playback_id != Some(id) {
+            return false;
+        }
+
+        self.mode = AppMode::Idle;
+        self.active_playback_id = None;
+        self.message = message.into();
+        true
     }
 
     pub fn start_playback(
         &mut self,
         loop_count: u32,
         speed_multiplier: f64,
-    ) -> Result<Vec<PlaybackAction>, String> {
+    ) -> Result<PlaybackRun, String> {
         match self.mode {
             AppMode::Idle => {}
             AppMode::Recording => return Err("cannot play while recording".to_string()),
@@ -142,9 +171,15 @@ impl AppController {
             .ok_or_else(|| "no recording loaded".to_string())?;
         let settings = PlaybackSettings::new(loop_count, speed_multiplier)?;
         self.stop_token = StopToken::default();
+        self.next_playback_id += 1;
+        let id = PlaybackRunId(self.next_playback_id);
+        self.active_playback_id = Some(id);
         self.mode = AppMode::Playing;
         self.message = "Playing".to_string();
-        Ok(build_playback_plan(recording, settings))
+        Ok(PlaybackRun {
+            id,
+            actions: build_playback_plan(recording, settings),
+        })
     }
 
     pub fn stop_playback(&mut self) {
@@ -153,6 +188,7 @@ impl AppController {
         }
         self.stop_token.request_stop();
         self.mode = AppMode::Idle;
+        self.active_playback_id = None;
         self.message = "Playback stopped".to_string();
     }
 

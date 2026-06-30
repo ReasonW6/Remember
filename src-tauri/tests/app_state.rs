@@ -41,10 +41,10 @@ fn loads_recording_and_starts_playback() {
     let mut app = AppController::new();
     app.set_recording(recording()).expect("load");
 
-    let plan = app.start_playback(2, 1.0).expect("play");
+    let run = app.start_playback(2, 1.0).expect("play");
 
     assert_eq!(app.mode(), AppMode::Playing);
-    assert_eq!(plan.len(), 2);
+    assert_eq!(run.actions.len(), 2);
 }
 
 #[test]
@@ -55,6 +55,52 @@ fn stop_playback_returns_to_idle() {
 
     app.stop_playback();
 
+    assert_eq!(app.mode(), AppMode::Idle);
+}
+
+#[test]
+fn stale_playback_finish_cannot_mark_idle_over_new_playback() {
+    let mut app = AppController::new();
+    app.set_recording(recording()).expect("load");
+
+    let first = app.start_playback(1, 1.0).expect("first playback");
+    app.stop_playback();
+    let second = app.start_playback(1, 1.0).expect("second playback");
+
+    let changed = app.finish_playback_if_current(first.id, "Playback finished");
+
+    assert!(!changed);
+    let state = app.ui_state();
+    assert_eq!(state.mode, AppMode::Playing);
+    assert_eq!(state.message, "Playing");
+
+    let changed = app.finish_playback_if_current(second.id, "Playback finished");
+
+    assert!(changed);
+    let state = app.ui_state();
+    assert_eq!(state.mode, AppMode::Idle);
+    assert_eq!(state.message, "Playback finished");
+}
+
+#[test]
+fn stale_playback_finish_cannot_mark_idle_over_recording() {
+    let mut app = AppController::new();
+    app.set_recording(recording()).expect("load");
+
+    let playback = app.start_playback(1, 1.0).expect("playback");
+    app.stop_playback();
+    app.start_recording("active", 100, "2026-06-29T00:00:00Z")
+        .expect("start recording");
+
+    let changed = app.finish_playback_if_current(playback.id, "Playback finished");
+
+    assert!(!changed);
+    let state = app.ui_state();
+    assert_eq!(state.mode, AppMode::Recording);
+    assert_eq!(state.message, "Recording");
+
+    let saved = app.stop_recording(150).expect("stop recording");
+    assert_eq!(saved.name, "active");
     assert_eq!(app.mode(), AppMode::Idle);
 }
 
