@@ -22,7 +22,7 @@ pub fn register(app: &AppHandle) -> Result<(), String> {
                 if is_recording {
                     let _ = commands::stop_recording(app.clone(), state);
                 } else {
-                    let _ = commands::start_recording(app.clone(), state);
+                    let _ = commands::start_recording_from_hotkey(app.clone(), state);
                 }
             }
         })

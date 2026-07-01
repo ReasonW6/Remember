@@ -37,16 +37,33 @@ pub fn get_state(state: State<'_, SharedApp>) -> Result<UiState, String> {
 
 #[tauri::command]
 pub fn start_recording(app: AppHandle, state: State<'_, SharedApp>) -> Result<UiState, String> {
+    start_recording_impl(app, state, false)
+}
+
+pub(crate) fn start_recording_from_hotkey(
+    app: AppHandle,
+    state: State<'_, SharedApp>,
+) -> Result<UiState, String> {
+    start_recording_impl(app, state, true)
+}
+
+fn start_recording_impl(
+    app: AppHandle,
+    state: State<'_, SharedApp>,
+    from_hotkey: bool,
+) -> Result<UiState, String> {
     let started_at_ms = now_ms();
     let ui_state = {
         let mut controller = state
             .lock()
             .map_err(|_| "state lock poisoned".to_string())?;
-        controller.start_recording(
-            format!("recording-{started_at_ms}"),
-            started_at_ms,
-            Utc::now().to_rfc3339(),
-        )?;
+        let name = format!("recording-{started_at_ms}");
+        let created_at = Utc::now().to_rfc3339();
+        if from_hotkey {
+            controller.start_recording_from_hotkey(name, started_at_ms, created_at)?;
+        } else {
+            controller.start_recording(name, started_at_ms, created_at)?;
+        }
         controller.ui_state()
     };
     emit_state(&app, ui_state.clone())?;

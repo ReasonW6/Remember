@@ -93,6 +93,25 @@ impl AppController {
         started_at_ms: u64,
         created_at: impl Into<String>,
     ) -> Result<(), String> {
+        self.start_recording_inner(name, started_at_ms, created_at, false)
+    }
+
+    pub fn start_recording_from_hotkey(
+        &mut self,
+        name: impl Into<String>,
+        started_at_ms: u64,
+        created_at: impl Into<String>,
+    ) -> Result<(), String> {
+        self.start_recording_inner(name, started_at_ms, created_at, true)
+    }
+
+    fn start_recording_inner(
+        &mut self,
+        name: impl Into<String>,
+        started_at_ms: u64,
+        created_at: impl Into<String>,
+        suppress_record_hotkey_release_tail: bool,
+    ) -> Result<(), String> {
         match self.mode {
             AppMode::Idle => {}
             AppMode::Recording => return Err("cannot record while recording".to_string()),
@@ -100,6 +119,9 @@ impl AppController {
         }
         self.recorder.start(name, started_at_ms, created_at)?;
         self.control_hotkeys.reset();
+        if suppress_record_hotkey_release_tail {
+            self.control_hotkeys.suppress_release_tail(0x52);
+        }
         self.recording = None;
         self.mode = AppMode::Recording;
         self.message = "Recording".to_string();
@@ -230,6 +252,13 @@ impl ControlHotkeySuppressor {
         self.suppress_ctrl_release = false;
         self.suppress_alt_release = false;
         self.suppressed_key = None;
+    }
+
+    fn suppress_release_tail(&mut self, vk_code: u16) {
+        self.pending_modifiers.clear();
+        self.suppressed_key = Some(vk_code);
+        self.suppress_ctrl_release = true;
+        self.suppress_alt_release = true;
     }
 
     fn filter(&mut self, event: RawInputEvent) -> Vec<RawInputEvent> {
