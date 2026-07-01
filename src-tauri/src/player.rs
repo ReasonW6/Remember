@@ -105,6 +105,7 @@ pub fn play_actions<E: StepExecutor + ?Sized>(
         }
     }
 
+    pressed_inputs.release_all(executor);
     Ok(())
 }
 

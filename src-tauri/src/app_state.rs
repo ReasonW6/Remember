@@ -1,5 +1,5 @@
 use crate::{
-    model::Recording,
+    model::{KeyState, Recording},
     player::{build_playback_plan, PlaybackAction, PlaybackSettings, StopToken},
     recorder::{RawInputEvent, Recorder},
 };
@@ -34,6 +34,7 @@ pub struct PlaybackRun {
 pub struct AppController {
     mode: AppMode,
     recorder: Recorder,
+    control_hotkeys: ControlHotkeySuppressor,
     recording: Option<Recording>,
     stop_token: StopToken,
     next_playback_id: u64,
@@ -52,6 +53,7 @@ impl AppController {
         Self {
             mode: AppMode::Idle,
             recorder: Recorder::new(50),
+            control_hotkeys: ControlHotkeySuppressor::default(),
             recording: None,
             stop_token: StopToken::default(),
             next_playback_id: 0,
@@ -97,6 +99,7 @@ impl AppController {
             AppMode::Playing => return Err("cannot record while playing".to_string()),
         }
         self.recorder.start(name, started_at_ms, created_at)?;
+        self.control_hotkeys.reset();
         self.recording = None;
         self.mode = AppMode::Recording;
         self.message = "Recording".to_string();
@@ -105,6 +108,7 @@ impl AppController {
 
     pub fn stop_recording(&mut self, stopped_at_ms: u64) -> Result<Recording, String> {
         let recording = self.recorder.stop(stopped_at_ms)?;
+        self.control_hotkeys.reset();
         self.recording = Some(recording.clone());
         self.mode = AppMode::Idle;
         self.message = "Recording stopped".to_string();
@@ -113,10 +117,13 @@ impl AppController {
 
     pub fn capture_input(&mut self, event: RawInputEvent) {
         if self.mode != AppMode::Recording {
+            self.control_hotkeys.reset();
             return;
         }
 
-        self.recorder.capture(event);
+        for event in self.control_hotkeys.filter(event) {
+            self.recorder.capture(event);
+        }
     }
 
     pub fn set_recording(&mut self, recording: Recording) -> Result<(), String> {
@@ -203,4 +210,105 @@ impl AppController {
     pub fn stop_token(&self) -> StopToken {
         self.stop_token.clone()
     }
+}
+
+#[derive(Default)]
+struct ControlHotkeySuppressor {
+    pending_modifiers: Vec<RawInputEvent>,
+    ctrl_down: bool,
+    alt_down: bool,
+    suppress_ctrl_release: bool,
+    suppress_alt_release: bool,
+    suppressed_key: Option<u16>,
+}
+
+impl ControlHotkeySuppressor {
+    fn reset(&mut self) {
+        self.pending_modifiers.clear();
+        self.ctrl_down = false;
+        self.alt_down = false;
+        self.suppress_ctrl_release = false;
+        self.suppress_alt_release = false;
+        self.suppressed_key = None;
+    }
+
+    fn filter(&mut self, event: RawInputEvent) -> Vec<RawInputEvent> {
+        let RawInputEvent::Key { vk_code, state, .. } = event else {
+            return self.flush_with(event);
+        };
+
+        match state {
+            KeyState::Pressed => self.filter_key_pressed(event, vk_code),
+            KeyState::Released => self.filter_key_released(event, vk_code),
+        }
+    }
+
+    fn filter_key_pressed(&mut self, event: RawInputEvent, vk_code: u16) -> Vec<RawInputEvent> {
+        if is_ctrl(vk_code) {
+            self.ctrl_down = true;
+            self.pending_modifiers.push(event);
+            return Vec::new();
+        }
+
+        if is_alt(vk_code) {
+            self.alt_down = true;
+            self.pending_modifiers.push(event);
+            return Vec::new();
+        }
+
+        if self.ctrl_down && self.alt_down && is_control_hotkey_key(vk_code) {
+            self.pending_modifiers.clear();
+            self.suppressed_key = Some(vk_code);
+            self.suppress_ctrl_release = true;
+            self.suppress_alt_release = true;
+            return Vec::new();
+        }
+
+        self.flush_with(event)
+    }
+
+    fn filter_key_released(&mut self, event: RawInputEvent, vk_code: u16) -> Vec<RawInputEvent> {
+        if self.suppressed_key == Some(vk_code) {
+            self.suppressed_key = None;
+            return Vec::new();
+        }
+
+        if is_ctrl(vk_code) {
+            self.ctrl_down = false;
+            if self.suppress_ctrl_release {
+                self.suppress_ctrl_release = false;
+                return Vec::new();
+            }
+            return self.flush_with(event);
+        }
+
+        if is_alt(vk_code) {
+            self.alt_down = false;
+            if self.suppress_alt_release {
+                self.suppress_alt_release = false;
+                return Vec::new();
+            }
+            return self.flush_with(event);
+        }
+
+        self.flush_with(event)
+    }
+
+    fn flush_with(&mut self, event: RawInputEvent) -> Vec<RawInputEvent> {
+        let mut events = std::mem::take(&mut self.pending_modifiers);
+        events.push(event);
+        events
+    }
+}
+
+fn is_ctrl(vk_code: u16) -> bool {
+    matches!(vk_code, 0x11 | 0xA2 | 0xA3)
+}
+
+fn is_alt(vk_code: u16) -> bool {
+    matches!(vk_code, 0x12 | 0xA4 | 0xA5)
+}
+
+fn is_control_hotkey_key(vk_code: u16) -> bool {
+    matches!(vk_code, 0x52 | 0x50 | 0x1B)
 }

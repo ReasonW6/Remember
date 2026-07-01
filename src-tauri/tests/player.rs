@@ -206,6 +206,57 @@ fn executor_error_after_key_press_releases_key_before_returning_error() {
 }
 
 #[test]
+fn normal_completion_releases_tracked_key_presses() {
+    let fake = FakeExecutor::default();
+    let calls = fake.calls.clone();
+    let token = StopToken::default();
+    let plan = vec![PlaybackAction {
+        loop_index: 0,
+        step_index: 0,
+        delay_ms: 0,
+        step: MacroStep::Key {
+            elapsed_ms: 0,
+            vk_code: 0x41,
+            scan_code: 0x1E,
+            state: KeyState::Pressed,
+        },
+    }];
+
+    play_actions(&plan, &fake, &token).expect("play");
+
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        ["key:65:30:Pressed", "key:65:30:Released"]
+    );
+}
+
+#[test]
+fn normal_completion_releases_tracked_mouse_presses() {
+    let fake = FakeExecutor::default();
+    let calls = fake.calls.clone();
+    let token = StopToken::default();
+    let plan = vec![PlaybackAction {
+        loop_index: 0,
+        step_index: 0,
+        delay_ms: 0,
+        step: MacroStep::MouseButton {
+            elapsed_ms: 0,
+            x: 42,
+            y: 84,
+            button: MouseButton::Left,
+            state: ButtonState::Pressed,
+        },
+    }];
+
+    play_actions(&plan, &fake, &token).expect("play");
+
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        ["button:42:84:Left:Pressed", "button:42:84:Left:Released"]
+    );
+}
+
+#[test]
 fn stop_after_mouse_button_press_releases_button_at_press_coordinates() {
     let fake = FakeExecutor::default();
     let calls = fake.calls.clone();

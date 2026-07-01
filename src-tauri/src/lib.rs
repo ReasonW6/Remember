@@ -38,7 +38,15 @@ pub fn run() {
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
             hotkeys::register(app.handle())
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
-            let capture_runtime = input::start_capture(capture_shared.clone())
+            #[cfg(target_os = "windows")]
+            let main_window_hwnd = app
+                .get_webview_window("main")
+                .and_then(|window| window.hwnd().ok())
+                .map(|hwnd| hwnd.0 as usize);
+            #[cfg(not(target_os = "windows"))]
+            let main_window_hwnd = None;
+
+            let capture_runtime = input::start_capture(capture_shared.clone(), main_window_hwnd)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
             if !app.manage(Mutex::new(capture_runtime)) {
                 return Err(std::io::Error::new(

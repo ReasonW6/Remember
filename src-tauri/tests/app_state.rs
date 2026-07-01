@@ -54,6 +54,100 @@ fn captures_input_while_recording() {
 }
 
 #[test]
+fn suppresses_global_hotkey_chords_while_recording() {
+    for (vk_code, scan_code) in [(0x52, 0x13), (0x50, 0x19), (0x1B, 0x01)] {
+        let mut app = AppController::new();
+        app.start_recording("test", 100, "2026-06-29T00:00:00Z")
+            .expect("start");
+
+        for (offset, vk_code, scan_code, state) in [
+            (10, 0x11, 0x1D, KeyState::Pressed),
+            (11, 0x12, 0x38, KeyState::Pressed),
+            (12, vk_code, scan_code, KeyState::Pressed),
+            (13, vk_code, scan_code, KeyState::Released),
+            (14, 0x12, 0x38, KeyState::Released),
+            (15, 0x11, 0x1D, KeyState::Released),
+        ] {
+            app.capture_input(RawInputEvent::Key {
+                at_ms: 100 + offset,
+                vk_code,
+                scan_code,
+                state,
+            });
+        }
+
+        let saved = app.stop_recording(120).expect("stop");
+        assert_eq!(saved.steps, Vec::new());
+    }
+}
+
+#[test]
+fn preserves_non_control_shortcuts_while_recording() {
+    let mut app = AppController::new();
+    app.start_recording("test", 100, "2026-06-29T00:00:00Z")
+        .expect("start");
+
+    for (offset, vk_code, scan_code, state) in [
+        (10, 0x11, 0x1D, KeyState::Pressed),
+        (11, 0x12, 0x38, KeyState::Pressed),
+        (12, 0x41, 0x1E, KeyState::Pressed),
+        (13, 0x41, 0x1E, KeyState::Released),
+        (14, 0x12, 0x38, KeyState::Released),
+        (15, 0x11, 0x1D, KeyState::Released),
+    ] {
+        app.capture_input(RawInputEvent::Key {
+            at_ms: 100 + offset,
+            vk_code,
+            scan_code,
+            state,
+        });
+    }
+
+    let saved = app.stop_recording(120).expect("stop");
+    assert_eq!(
+        saved.steps,
+        vec![
+            MacroStep::Key {
+                elapsed_ms: 10,
+                vk_code: 0x11,
+                scan_code: 0x1D,
+                state: KeyState::Pressed,
+            },
+            MacroStep::Key {
+                elapsed_ms: 11,
+                vk_code: 0x12,
+                scan_code: 0x38,
+                state: KeyState::Pressed,
+            },
+            MacroStep::Key {
+                elapsed_ms: 12,
+                vk_code: 0x41,
+                scan_code: 0x1E,
+                state: KeyState::Pressed,
+            },
+            MacroStep::Key {
+                elapsed_ms: 13,
+                vk_code: 0x41,
+                scan_code: 0x1E,
+                state: KeyState::Released,
+            },
+            MacroStep::Key {
+                elapsed_ms: 14,
+                vk_code: 0x12,
+                scan_code: 0x38,
+                state: KeyState::Released,
+            },
+            MacroStep::Key {
+                elapsed_ms: 15,
+                vk_code: 0x11,
+                scan_code: 0x1D,
+                state: KeyState::Released,
+            },
+        ]
+    );
+}
+
+#[test]
 fn ignores_captured_input_while_idle() {
     let mut app = AppController::new();
 
