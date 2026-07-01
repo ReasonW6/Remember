@@ -65,9 +65,12 @@ describe("App", () => {
     render(<App />);
 
     expect(screen.getByRole("heading", { name: "Remember" })).toBeInTheDocument();
-    expect(await screen.findByRole("button", { name: "Record" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Play" })).toBeDisabled();
+    expect(screen.getByAltText("Remember 图标")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "录制" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "播放" })).toBeDisabled();
+    expect(screen.getByText("模式：就绪")).toBeInTheDocument();
     expect(screen.getByText("Ctrl+Alt+R")).toBeInTheDocument();
+    expect(screen.getByText("快捷键")).toBeInTheDocument();
 
     await waitFor(() => expect(apiMocks.getState).toHaveBeenCalledTimes(1));
     expect(apiMocks.subscribeToState).toHaveBeenCalledWith(expect.any(Function));
@@ -77,10 +80,10 @@ describe("App", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(await screen.findByRole("button", { name: "Record" }));
+    await user.click(await screen.findByRole("button", { name: "录制" }));
 
     await waitFor(() => expect(apiMocks.startRecording).toHaveBeenCalledTimes(1));
-    expect(await screen.findAllByText("Recording")).not.toHaveLength(0);
+    expect(await screen.findAllByText("正在录制")).not.toHaveLength(0);
   });
 
   it("stops playback from the Stop button", async () => {
@@ -88,24 +91,22 @@ describe("App", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled());
-    await user.click(screen.getByRole("button", { name: "Stop" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "停止" })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: "停止" }));
 
     await waitFor(() => expect(apiMocks.stopPlayback).toHaveBeenCalledTimes(1));
-    expect(await screen.findAllByText("Playback stopped")).not.toHaveLength(0);
+    expect(await screen.findAllByText("回放已停止")).not.toHaveLength(0);
   });
 
   it("validates loop count", async () => {
     const user = userEvent.setup();
     render(<App />);
 
-    const loopCount = await screen.findByLabelText("Loop count");
+    const loopCount = await screen.findByLabelText("循环次数");
     await user.clear(loopCount);
     await user.type(loopCount, "0");
 
-    expect(screen.getByRole("alert")).toHaveTextContent(
-      "Loop count must be a whole number of 1 or more."
-    );
+    expect(screen.getByRole("alert")).toHaveTextContent("循环次数必须是大于等于 1 的整数。");
   });
 
   it("does not start playback with a fractional loop count", async () => {
@@ -113,14 +114,12 @@ describe("App", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    const loopCount = await screen.findByLabelText("Loop count");
+    const loopCount = await screen.findByLabelText("循环次数");
     await user.clear(loopCount);
     await user.type(loopCount, "1.5");
-    await user.click(screen.getByRole("button", { name: "Play" }));
+    await user.click(screen.getByRole("button", { name: "播放" }));
 
-    expect(screen.getByRole("alert")).toHaveTextContent(
-      "Loop count must be a whole number of 1 or more."
-    );
+    expect(screen.getByRole("alert")).toHaveTextContent("循环次数必须是大于等于 1 的整数。");
     expect(apiMocks.startPlayback).not.toHaveBeenCalled();
   });
 
@@ -129,15 +128,13 @@ describe("App", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    const speed = await screen.findByLabelText("Speed");
+    const speed = await screen.findByLabelText("速度");
     await user.clear(speed);
     await user.click(speed);
     await user.paste("1e309");
-    await user.click(screen.getByRole("button", { name: "Play" }));
+    await user.click(screen.getByRole("button", { name: "播放" }));
 
-    expect(screen.getByRole("alert")).toHaveTextContent(
-      "Speed must be a finite number greater than 0."
-    );
+    expect(screen.getByRole("alert")).toHaveTextContent("速度必须是大于 0 的有效数字。");
     expect(apiMocks.startPlayback).not.toHaveBeenCalled();
   });
 
@@ -153,7 +150,7 @@ describe("App", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(await screen.findByRole("button", { name: "Open" }));
+    await user.click(await screen.findByRole("button", { name: "打开" }));
 
     await waitFor(() => expect(apiMocks.openRecording).toHaveBeenCalledTimes(1));
     expect(await screen.findByText("loaded.remember.json")).toBeInTheDocument();
@@ -171,7 +168,7 @@ describe("App", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    const save = await screen.findByRole("button", { name: "Save" });
+    const save = await screen.findByRole("button", { name: "保存" });
     await waitFor(() => expect(save).toBeEnabled());
     await user.click(save);
 
@@ -183,7 +180,7 @@ describe("App", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    const record = await screen.findByRole("button", { name: "Record" });
+    const record = await screen.findByRole("button", { name: "录制" });
     await user.dblClick(record);
 
     expect(apiMocks.startRecording).toHaveBeenCalledTimes(1);

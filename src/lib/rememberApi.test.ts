@@ -50,6 +50,10 @@ describe("rememberApi", () => {
 
     await expect(openRecording()).resolves.toBe(loadedState);
 
+    expect(tauriMocks.open).toHaveBeenCalledWith({
+      multiple: false,
+      filters: [{ name: "Remember 录制文件", extensions: ["remember.json", "json"] }]
+    });
     expect(tauriMocks.invoke).toHaveBeenCalledWith("open_recording", { path });
   });
 
@@ -67,6 +71,9 @@ describe("rememberApi", () => {
 
     await saveCurrentRecording();
 
+    expect(tauriMocks.save).toHaveBeenCalledWith({
+      filters: [{ name: "Remember 录制文件", extensions: ["remember.json", "json"] }]
+    });
     expect(tauriMocks.invoke).toHaveBeenCalledWith("save_current_recording", { path });
   });
 });

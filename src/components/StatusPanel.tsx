@@ -1,4 +1,5 @@
 import type { UiState } from "../types";
+import { displayMessage, displayMode } from "../localization";
 
 interface StatusPanelProps {
   state: UiState;
@@ -9,25 +10,25 @@ export function StatusPanel({ state, error }: StatusPanelProps) {
   return (
     <section className="panel status-panel" aria-labelledby="status-title">
       <div className="section-heading">
-        <h2 id="status-title">Status</h2>
-        <span className={`mode-pill mode-${state.mode}`}>{state.mode}</span>
+        <h2 id="status-title">状态</h2>
+        <span className={`mode-pill mode-${state.mode}`}>{displayMode(state.mode)}</span>
       </div>
       {error ? <p className="status-message alert">{error}</p> : null}
       <dl className="status-list">
         <div>
-          <dt>Message</dt>
-          <dd>{state.message}</dd>
+          <dt>消息</dt>
+          <dd>{displayMessage(state.message)}</dd>
         </div>
         <div>
-          <dt>Recording</dt>
-          <dd>{state.recording_name ?? "None"}</dd>
+          <dt>录制文件</dt>
+          <dd>{state.recording_name ?? "无"}</dd>
         </div>
         <div>
-          <dt>Steps</dt>
+          <dt>步骤数</dt>
           <dd>{state.step_count}</dd>
         </div>
         <div>
-          <dt>Duration</dt>
+          <dt>时长</dt>
           <dd>{state.duration_ms} ms</dd>
         </div>
       </dl>

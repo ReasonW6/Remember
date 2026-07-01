@@ -29,7 +29,7 @@ export function stopPlayback() {
 export async function openRecording(): Promise<UiState | null> {
   const selected = await open({
     multiple: false,
-    filters: [{ name: "Remember Recording", extensions: ["remember.json", "json"] }]
+    filters: [{ name: "Remember 录制文件", extensions: ["remember.json", "json"] }]
   });
 
   if (typeof selected !== "string") {
@@ -41,7 +41,7 @@ export async function openRecording(): Promise<UiState | null> {
 
 export async function saveCurrentRecording(): Promise<void> {
   const selected = await save({
-    filters: [{ name: "Remember Recording", extensions: ["remember.json", "json"] }]
+    filters: [{ name: "Remember 录制文件", extensions: ["remember.json", "json"] }]
   });
 
   if (!selected) {

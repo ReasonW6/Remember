@@ -4,6 +4,7 @@ import { HotkeyPanel } from "./components/HotkeyPanel";
 import { PlaybackSettings } from "./components/PlaybackSettings";
 import { StatusPanel } from "./components/StatusPanel";
 import * as rememberApi from "./lib/rememberApi";
+import { displayMessage, displayMode } from "./localization";
 import "./styles.css";
 import type { UiState } from "./types";
 
@@ -19,8 +20,8 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
-const loopCountError = "Loop count must be a whole number of 1 or more.";
-const speedError = "Speed must be a finite number greater than 0.";
+const loopCountError = "循环次数必须是大于等于 1 的整数。";
+const speedError = "速度必须是大于 0 的有效数字。";
 
 export function App() {
   const [state, setState] = useState<UiState>(idleState);
@@ -143,11 +144,14 @@ export function App() {
   return (
     <main className="app-shell">
       <header className="app-header">
-        <div>
-          <h1>Remember</h1>
-          <p>Mode: {state.mode}</p>
+        <div className="brand-block">
+          <img className="app-icon" src="/remember-icon.svg" alt="Remember 图标" />
+          <div>
+            <h1>Remember</h1>
+            <p>模式：{displayMode(state.mode)}</p>
+          </div>
         </div>
-        <p className="mode-summary">{state.message}</p>
+        <p className="mode-summary">{displayMessage(state.message)}</p>
       </header>
       <div className="content-grid">
         <div className="main-stack">

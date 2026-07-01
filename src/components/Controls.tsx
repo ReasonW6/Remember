@@ -27,7 +27,7 @@ export function Controls({
   const isBusy = isRecording || isPlaying;
 
   return (
-    <section className="panel controls-panel" aria-label="Controls">
+    <section className="panel controls-panel" aria-label="控制">
       <button
         className="action-button"
         type="button"
@@ -35,7 +35,7 @@ export function Controls({
         disabled={pendingCommand || isPlaying}
       >
         <Circle size={16} aria-hidden="true" />
-        <span className="button-label">{isRecording ? "Stop recording" : "Record"}</span>
+        <span className="button-label">{isRecording ? "停止录制" : "录制"}</span>
       </button>
       <button
         className="action-button"
@@ -44,7 +44,7 @@ export function Controls({
         disabled={pendingCommand || !hasRecording || isBusy}
       >
         <Play size={16} aria-hidden="true" />
-        <span className="button-label">Play</span>
+        <span className="button-label">播放</span>
       </button>
       <button
         className="action-button"
@@ -53,7 +53,7 @@ export function Controls({
         disabled={pendingCommand || !isBusy}
       >
         <Square size={16} aria-hidden="true" />
-        <span className="button-label">Stop</span>
+        <span className="button-label">停止</span>
       </button>
       <button
         className="action-button"
@@ -62,7 +62,7 @@ export function Controls({
         disabled={pendingCommand || !hasRecording || isBusy}
       >
         <Save size={16} aria-hidden="true" />
-        <span className="button-label">Save</span>
+        <span className="button-label">保存</span>
       </button>
       <button
         className="action-button"
@@ -71,7 +71,7 @@ export function Controls({
         disabled={pendingCommand || isBusy}
       >
         <FolderOpen size={16} aria-hidden="true" />
-        <span className="button-label">Open</span>
+        <span className="button-label">打开</span>
       </button>
     </section>
   );

@@ -6,8 +6,8 @@ use tauri::{
 
 pub fn setup(app: &AppHandle) -> Result<(), String> {
     let menu = MenuBuilder::new(app)
-        .text("show", "Show Remember")
-        .text("quit", "Quit")
+        .text("show", "显示 Remember")
+        .text("quit", "退出")
         .build()
         .map_err(|error| error.to_string())?;
 

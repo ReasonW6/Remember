@@ -9,8 +9,8 @@ function displayNumber(value: number) {
   return Number.isFinite(value) ? value : "";
 }
 
-const loopCountError = "Loop count must be a whole number of 1 or more.";
-const speedError = "Speed must be a finite number greater than 0.";
+const loopCountError = "循环次数必须是大于等于 1 的整数。";
+const speedError = "速度必须是大于 0 的有效数字。";
 
 export function PlaybackSettings({
   loopCount,
@@ -26,10 +26,10 @@ export function PlaybackSettings({
 
   return (
     <section className="panel settings-panel" aria-labelledby="playback-settings-title">
-      <h2 id="playback-settings-title">Playback settings</h2>
+      <h2 id="playback-settings-title">回放设置</h2>
       <div className="settings-grid">
         <label className="field">
-          <span>Loop count</span>
+          <span>循环次数</span>
           <input
             type="number"
             min="1"
@@ -39,7 +39,7 @@ export function PlaybackSettings({
           />
         </label>
         <label className="field">
-          <span>Speed</span>
+          <span>速度</span>
           <input
             type="number"
             min="0.1"
