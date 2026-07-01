@@ -229,6 +229,17 @@ impl AppController {
         self.message = "Playback stopped".to_string();
     }
 
+    pub fn stop_active(&mut self, stopped_at_ms: u64) -> Result<(), String> {
+        match self.mode {
+            AppMode::Recording => {
+                self.stop_recording(stopped_at_ms)?;
+            }
+            AppMode::Playing => self.stop_playback(),
+            AppMode::Idle => {}
+        }
+        Ok(())
+    }
+
     pub fn stop_token(&self) -> StopToken {
         self.stop_token.clone()
     }

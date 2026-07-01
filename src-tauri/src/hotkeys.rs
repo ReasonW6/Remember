@@ -49,7 +49,7 @@ pub fn register(app: &AppHandle) -> Result<(), String> {
             }
 
             if let Some(state) = app.try_state::<SharedApp>() {
-                let _ = commands::stop_playback(app.clone(), state);
+                let _ = commands::stop_active(app.clone(), state);
             }
         })
         .map_err(|error| error.to_string())?;

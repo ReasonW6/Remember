@@ -170,3 +170,15 @@ pub fn stop_playback(app: AppHandle, state: State<'_, SharedApp>) -> Result<UiSt
     emit_state(&app, ui_state.clone())?;
     Ok(ui_state)
 }
+
+pub(crate) fn stop_active(app: AppHandle, state: State<'_, SharedApp>) -> Result<UiState, String> {
+    let ui_state = {
+        let mut controller = state
+            .lock()
+            .map_err(|_| "state lock poisoned".to_string())?;
+        controller.stop_active(now_ms())?;
+        controller.ui_state()
+    };
+    emit_state(&app, ui_state.clone())?;
+    Ok(ui_state)
+}

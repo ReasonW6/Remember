@@ -79,12 +79,12 @@ mod capture {
         Foundation::{HINSTANCE, LPARAM, LRESULT, POINT, WPARAM},
         System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::{
-            CallNextHookEx, DispatchMessageW, GetAncestor, PeekMessageW, SetWindowsHookExW,
-            TranslateMessage, UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, HC_ACTION, HHOOK,
-            KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, PM_REMOVE, WH_KEYBOARD_LL, WH_MOUSE_LL,
-            WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
-            WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
-            WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
+            CallNextHookEx, DispatchMessageW, GetAncestor, GetForegroundWindow, PeekMessageW,
+            SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WindowFromPoint, GA_ROOT,
+            HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, PM_REMOVE, WH_KEYBOARD_LL,
+            WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+            WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
+            WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
         },
     };
 
@@ -380,8 +380,25 @@ mod capture {
     }
 
     fn key_event(w_param: WPARAM, l_param: LPARAM) -> Option<RawInputEvent> {
+        key_event_from_foreground_root(
+            w_param,
+            l_param,
+            foreground_root_window(),
+            current_main_window_hwnd(),
+        )
+    }
+
+    fn key_event_from_foreground_root(
+        w_param: WPARAM,
+        l_param: LPARAM,
+        foreground_root_hwnd: Option<usize>,
+        main_window_hwnd: Option<usize>,
+    ) -> Option<RawInputEvent> {
         let info = unsafe { (l_param.0 as *const KBDLLHOOKSTRUCT).as_ref()? };
         if info.dwExtraInfo == REMEMBER_INPUT_EXTRA_INFO {
+            return None;
+        }
+        if same_root_window(foreground_root_hwnd, main_window_hwnd) {
             return None;
         }
 
@@ -399,12 +416,25 @@ mod capture {
         })
     }
 
+    fn foreground_root_window() -> Option<usize> {
+        let hwnd = unsafe { GetForegroundWindow() };
+        if hwnd.is_invalid() {
+            return None;
+        }
+
+        root_window(hwnd)
+    }
+
     fn root_window_from_point(x: i32, y: i32) -> Option<usize> {
         let hwnd = unsafe { WindowFromPoint(POINT { x, y }) };
         if hwnd.is_invalid() {
             return None;
         }
 
+        root_window(hwnd)
+    }
+
+    fn root_window(hwnd: windows::Win32::Foundation::HWND) -> Option<usize> {
         let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
         if root.is_invalid() {
             None
@@ -460,6 +490,54 @@ mod capture {
             );
 
             assert_eq!(event, None);
+        }
+
+        #[test]
+        fn key_event_ignores_input_when_foreground_root_is_main_window() {
+            let info = KBDLLHOOKSTRUCT {
+                vkCode: 0x41,
+                scanCode: 0x1E,
+                flags: Default::default(),
+                time: 0,
+                dwExtraInfo: 0,
+            };
+
+            let event = key_event_from_foreground_root(
+                WPARAM(WM_KEYDOWN as usize),
+                LPARAM((&info as *const KBDLLHOOKSTRUCT) as isize),
+                Some(0x55),
+                Some(0x55),
+            );
+
+            assert_eq!(event, None);
+        }
+
+        #[test]
+        fn key_event_keeps_input_when_foreground_root_is_not_main_window() {
+            let info = KBDLLHOOKSTRUCT {
+                vkCode: 0x41,
+                scanCode: 0x1E,
+                flags: Default::default(),
+                time: 0,
+                dwExtraInfo: 0,
+            };
+
+            let event = key_event_from_foreground_root(
+                WPARAM(WM_KEYDOWN as usize),
+                LPARAM((&info as *const KBDLLHOOKSTRUCT) as isize),
+                Some(0x55),
+                Some(0x66),
+            );
+
+            assert!(matches!(
+                event,
+                Some(RawInputEvent::Key {
+                    vk_code: 0x41,
+                    scan_code: 0x1E,
+                    state: KeyState::Pressed,
+                    ..
+                })
+            ));
         }
 
         #[test]

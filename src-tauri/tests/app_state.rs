@@ -254,6 +254,47 @@ fn stop_playback_returns_to_idle() {
 }
 
 #[test]
+fn stop_active_stops_recording() {
+    let mut app = AppController::new();
+    app.start_recording("active", 100, "2026-06-29T00:00:00Z")
+        .expect("start");
+
+    app.stop_active(150).expect("stop active");
+
+    let state = app.ui_state();
+    assert_eq!(state.mode, AppMode::Idle);
+    assert_eq!(state.recording_name.as_deref(), Some("active"));
+    assert_eq!(state.duration_ms, 50);
+    assert_eq!(state.message, "Recording stopped");
+}
+
+#[test]
+fn stop_active_stops_playback_and_requests_stop_token() {
+    let mut app = AppController::new();
+    app.set_recording(recording()).expect("load");
+    app.start_playback(1, 1.0).expect("play");
+    let token = app.stop_token();
+
+    app.stop_active(150).expect("stop active");
+
+    assert!(token.is_stopped());
+    let state = app.ui_state();
+    assert_eq!(state.mode, AppMode::Idle);
+    assert_eq!(state.message, "Playback stopped");
+}
+
+#[test]
+fn stop_active_while_idle_is_noop() {
+    let mut app = AppController::new();
+
+    app.stop_active(150).expect("stop active");
+
+    let state = app.ui_state();
+    assert_eq!(state.mode, AppMode::Idle);
+    assert_eq!(state.message, "Idle");
+}
+
+#[test]
 fn stale_playback_finish_cannot_mark_idle_over_new_playback() {
     let mut app = AppController::new();
     app.set_recording(recording()).expect("load");
