@@ -237,28 +237,27 @@ impl AppController {
 #[derive(Default)]
 struct ControlHotkeySuppressor {
     pending_modifiers: Vec<RawInputEvent>,
-    ctrl_down: bool,
-    alt_down: bool,
-    suppress_ctrl_release: bool,
-    suppress_alt_release: bool,
+    active_modifiers: Vec<u16>,
+    suppressed_modifier_releases: Vec<u16>,
+    suppress_unknown_modifier_release_tail: bool,
     suppressed_key: Option<u16>,
 }
 
 impl ControlHotkeySuppressor {
     fn reset(&mut self) {
         self.pending_modifiers.clear();
-        self.ctrl_down = false;
-        self.alt_down = false;
-        self.suppress_ctrl_release = false;
-        self.suppress_alt_release = false;
+        self.active_modifiers.clear();
+        self.suppressed_modifier_releases.clear();
+        self.suppress_unknown_modifier_release_tail = false;
         self.suppressed_key = None;
     }
 
     fn suppress_release_tail(&mut self, vk_code: u16) {
         self.pending_modifiers.clear();
+        self.active_modifiers.clear();
+        self.suppressed_modifier_releases.clear();
         self.suppressed_key = Some(vk_code);
-        self.suppress_ctrl_release = true;
-        self.suppress_alt_release = true;
+        self.suppress_unknown_modifier_release_tail = true;
     }
 
     fn filter(&mut self, event: RawInputEvent) -> Vec<RawInputEvent> {
@@ -273,23 +272,17 @@ impl ControlHotkeySuppressor {
     }
 
     fn filter_key_pressed(&mut self, event: RawInputEvent, vk_code: u16) -> Vec<RawInputEvent> {
-        if is_ctrl(vk_code) {
-            self.ctrl_down = true;
+        if is_modifier(vk_code) {
+            self.add_active_modifier(vk_code);
             self.pending_modifiers.push(event);
             return Vec::new();
         }
 
-        if is_alt(vk_code) {
-            self.alt_down = true;
-            self.pending_modifiers.push(event);
-            return Vec::new();
-        }
-
-        if self.ctrl_down && self.alt_down && is_control_hotkey_key(vk_code) {
+        if self.ctrl_down() && self.alt_down() && is_control_hotkey_key(vk_code) {
             self.pending_modifiers.clear();
             self.suppressed_key = Some(vk_code);
-            self.suppress_ctrl_release = true;
-            self.suppress_alt_release = true;
+            self.suppressed_modifier_releases = self.active_modifiers.clone();
+            self.suppress_unknown_modifier_release_tail = false;
             return Vec::new();
         }
 
@@ -302,19 +295,11 @@ impl ControlHotkeySuppressor {
             return Vec::new();
         }
 
-        if is_ctrl(vk_code) {
-            self.ctrl_down = false;
-            if self.suppress_ctrl_release {
-                self.suppress_ctrl_release = false;
-                return Vec::new();
-            }
-            return self.flush_with(event);
-        }
-
-        if is_alt(vk_code) {
-            self.alt_down = false;
-            if self.suppress_alt_release {
-                self.suppress_alt_release = false;
+        if is_modifier(vk_code) {
+            let was_active = self.remove_active_modifier(vk_code);
+            if self.remove_suppressed_modifier(vk_code)
+                || (!was_active && self.suppress_unknown_modifier_release_tail)
+            {
                 return Vec::new();
             }
             return self.flush_with(event);
@@ -328,6 +313,43 @@ impl ControlHotkeySuppressor {
         events.push(event);
         events
     }
+
+    fn add_active_modifier(&mut self, vk_code: u16) {
+        if !self.active_modifiers.contains(&vk_code) {
+            self.active_modifiers.push(vk_code);
+        }
+    }
+
+    fn remove_active_modifier(&mut self, vk_code: u16) -> bool {
+        remove_first(&mut self.active_modifiers, vk_code)
+    }
+
+    fn remove_suppressed_modifier(&mut self, vk_code: u16) -> bool {
+        remove_first(&mut self.suppressed_modifier_releases, vk_code)
+    }
+
+    fn ctrl_down(&self) -> bool {
+        self.active_modifiers
+            .iter()
+            .any(|vk_code| is_ctrl(*vk_code))
+    }
+
+    fn alt_down(&self) -> bool {
+        self.active_modifiers.iter().any(|vk_code| is_alt(*vk_code))
+    }
+}
+
+fn remove_first(values: &mut Vec<u16>, value: u16) -> bool {
+    if let Some(index) = values.iter().position(|existing| *existing == value) {
+        values.remove(index);
+        true
+    } else {
+        false
+    }
+}
+
+fn is_modifier(vk_code: u16) -> bool {
+    is_ctrl(vk_code) || is_alt(vk_code)
 }
 
 fn is_ctrl(vk_code: u16) -> bool {

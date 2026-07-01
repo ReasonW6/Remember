@@ -5,7 +5,17 @@ use crate::player::StepExecutor;
 #[cfg(not(target_os = "windows"))]
 use std::sync::{Arc, Mutex};
 
-pub const REMEMBER_INPUT_EXTRA_INFO: usize = 0x524d_4d42_5249_4e50;
+pub const REMEMBER_INPUT_EXTRA_INFO: usize = 0x524d_4d42;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remember_input_extra_info_fits_32_bit_windows_pointer() {
+        assert!(REMEMBER_INPUT_EXTRA_INFO <= u32::MAX as usize);
+    }
+}
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SystemInputExecutor;

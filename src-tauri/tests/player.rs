@@ -231,6 +231,32 @@ fn normal_completion_releases_tracked_key_presses() {
 }
 
 #[test]
+fn normal_completion_returns_synthetic_release_error() {
+    let fake = FakeExecutor::failing_on(2);
+    let calls = fake.calls.clone();
+    let token = StopToken::default();
+    let plan = vec![PlaybackAction {
+        loop_index: 0,
+        step_index: 0,
+        delay_ms: 0,
+        step: MacroStep::Key {
+            elapsed_ms: 0,
+            vk_code: 0x41,
+            scan_code: 0x1E,
+            state: KeyState::Pressed,
+        },
+    }];
+
+    let result = play_actions(&plan, &fake, &token);
+
+    assert_eq!(result, Err("executor failed".to_string()));
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        ["key:65:30:Pressed", "key:65:30:Released"]
+    );
+}
+
+#[test]
 fn normal_completion_releases_tracked_mouse_presses() {
     let fake = FakeExecutor::default();
     let calls = fake.calls.clone();

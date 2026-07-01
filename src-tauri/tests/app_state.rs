@@ -82,6 +82,36 @@ fn suppresses_global_hotkey_chords_while_recording() {
 }
 
 #[test]
+fn suppresses_all_control_hotkey_modifier_releases_while_recording() {
+    for (vk_code, scan_code) in [(0x52, 0x13), (0x50, 0x19), (0x1B, 0x01)] {
+        let mut app = AppController::new();
+        app.start_recording("test", 100, "2026-06-29T00:00:00Z")
+            .expect("start");
+
+        for (offset, vk_code, scan_code, state) in [
+            (10, 0xA2, 0x1D, KeyState::Pressed),
+            (11, 0xA3, 0x1D, KeyState::Pressed),
+            (12, 0x12, 0x38, KeyState::Pressed),
+            (13, vk_code, scan_code, KeyState::Pressed),
+            (14, vk_code, scan_code, KeyState::Released),
+            (15, 0x12, 0x38, KeyState::Released),
+            (16, 0xA2, 0x1D, KeyState::Released),
+            (17, 0xA3, 0x1D, KeyState::Released),
+        ] {
+            app.capture_input(RawInputEvent::Key {
+                at_ms: 100 + offset,
+                vk_code,
+                scan_code,
+                state,
+            });
+        }
+
+        let saved = app.stop_recording(120).expect("stop");
+        assert_eq!(saved.steps, Vec::new());
+    }
+}
+
+#[test]
 fn suppresses_record_hotkey_release_tail_when_started_from_idle_hotkey() {
     let mut app = AppController::new();
 

@@ -105,8 +105,7 @@ pub fn play_actions<E: StepExecutor + ?Sized>(
         }
     }
 
-    pressed_inputs.release_all(executor);
-    Ok(())
+    pressed_inputs.release_all(executor)
 }
 
 fn sleep_with_stop(delay_ms: u64, stop_token: &StopToken) -> Result<(), String> {
@@ -180,7 +179,7 @@ fn cleanup_and_return<E: StepExecutor + ?Sized>(
     executor: &E,
     err: String,
 ) -> Result<(), String> {
-    pressed_inputs.release_all(executor);
+    let _ = pressed_inputs.release_all(executor);
     Err(err)
 }
 
@@ -230,19 +229,27 @@ impl PressedInputs {
         }
     }
 
-    fn release_all<E: StepExecutor + ?Sized>(&mut self, executor: &E) {
+    fn release_all<E: StepExecutor + ?Sized>(&mut self, executor: &E) -> Result<(), String> {
+        let mut first_error = None;
+
         for (vk_code, scan_code) in self.keys.drain(..).rev() {
-            let _ = executor.key(vk_code, scan_code, KeyState::Released);
+            if let Err(error) = executor.key(vk_code, scan_code, KeyState::Released) {
+                first_error.get_or_insert(error);
+            }
         }
 
         for pressed_button in self.mouse_buttons.drain(..).rev() {
-            let _ = executor.mouse_button(
+            if let Err(error) = executor.mouse_button(
                 pressed_button.x,
                 pressed_button.y,
                 pressed_button.button,
                 ButtonState::Released,
-            );
+            ) {
+                first_error.get_or_insert(error);
+            }
         }
+
+        first_error.map_or(Ok(()), Err)
     }
 }
 
