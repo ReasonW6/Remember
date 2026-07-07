@@ -1,8 +1,12 @@
 use remember_lib::model::{KeyState, MacroStep, Recording};
 use remember_lib::storage::{
-    load_recording, recording_from_json, recording_to_json, save_recording,
+    delete_recording_from_library, list_recordings, load_recording, recording_from_json,
+    recording_to_json, save_recording, save_recording_to_library,
 };
-use std::{env, fs, process};
+use std::{
+    env, fs, process,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 fn sample_recording() -> Recording {
     Recording {
@@ -106,4 +110,51 @@ fn saves_and_loads_recording_from_file() {
     fs::remove_file(&path).expect("clean up temp recording");
 
     assert_eq!(loaded, recording);
+}
+
+#[test]
+fn saves_recording_to_library_and_lists_it() {
+    let recording = sample_recording();
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time")
+        .as_nanos();
+    let library_dir = env::temp_dir().join(format!(
+        "remember-model-storage-{}-{unique}-library",
+        process::id(),
+    ));
+    let path = save_recording_to_library(&library_dir, &recording).expect("save to library");
+
+    let files = list_recordings(&library_dir).expect("list recordings");
+
+    fs::remove_file(&path).expect("clean up recording");
+    fs::remove_dir(&library_dir).expect("clean up library");
+
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].name, recording.name);
+    assert_eq!(files[0].path, path.to_string_lossy());
+    assert_eq!(files[0].step_count, recording.steps.len());
+    assert_eq!(files[0].duration_ms, recording.duration_ms);
+}
+
+#[test]
+fn deletes_recording_from_library() {
+    let recording = sample_recording();
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time")
+        .as_nanos();
+    let library_dir = env::temp_dir().join(format!(
+        "remember-model-storage-{}-{unique}-delete",
+        process::id(),
+    ));
+    let path = save_recording_to_library(&library_dir, &recording).expect("save to library");
+
+    delete_recording_from_library(&library_dir, &path).expect("delete from library");
+    let files = list_recordings(&library_dir).expect("list recordings");
+
+    fs::remove_dir(&library_dir).expect("clean up library");
+
+    assert!(files.is_empty());
+    assert!(!path.exists());
 }

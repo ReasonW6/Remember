@@ -1,6 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { UiState } from "../types";
-import { openRecording, saveCurrentRecording } from "./rememberApi";
+import {
+  getHotkeys,
+  listRecordings,
+  loadRecording,
+  openRecording,
+  saveCurrentRecording,
+  setHotkeys,
+  deleteRecording,
+  setPlaybackSettings
+} from "./rememberApi";
 
 const tauriMocks = vi.hoisted(() => ({
   invoke: vi.fn(),
@@ -57,6 +66,53 @@ describe("rememberApi", () => {
     expect(tauriMocks.invoke).toHaveBeenCalledWith("open_recording", { path });
   });
 
+  it("loads a recording directly by path", async () => {
+    const path = "C:\\Recordings\\selected.remember.json";
+    tauriMocks.invoke.mockResolvedValue(loadedState);
+
+    await expect(loadRecording(path)).resolves.toBe(loadedState);
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("open_recording", { path });
+  });
+
+  it("lists saved recordings", async () => {
+    const recordings = [
+      {
+        name: "selected",
+        path: "C:\\Recordings\\selected.remember.json",
+        step_count: 3,
+        duration_ms: 1200,
+        created_at: "2026-07-01T00:00:00Z",
+        updated_at_ms: 1782864000000
+      }
+    ];
+    tauriMocks.invoke.mockResolvedValue(recordings);
+
+    await expect(listRecordings()).resolves.toBe(recordings);
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("list_recordings");
+  });
+
+  it("deletes a saved recording", async () => {
+    const path = "C:\\Recordings\\selected.remember.json";
+    tauriMocks.invoke.mockResolvedValue(undefined);
+
+    await expect(deleteRecording(path)).resolves.toBeUndefined();
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("delete_recording", { path });
+  });
+
+  it("saves playback settings for hotkey playback", async () => {
+    tauriMocks.invoke.mockResolvedValue(undefined);
+
+    await expect(setPlaybackSettings(3, 2)).resolves.toBeUndefined();
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("set_playback_settings", {
+      loopCount: 3,
+      speedMultiplier: 2
+    });
+  });
+
   it("returns without invoking Rust when save dialog is cancelled", async () => {
     tauriMocks.save.mockResolvedValue(null);
 
@@ -75,5 +131,16 @@ describe("rememberApi", () => {
       filters: [{ name: "Remember 录制文件", extensions: ["remember.json", "json"] }]
     });
     expect(tauriMocks.invoke).toHaveBeenCalledWith("save_current_recording", { path });
+  });
+
+  it("reads and saves hotkeys", async () => {
+    const config = { record: "F6", playback: "F7", stop: "F8" };
+    tauriMocks.invoke.mockResolvedValue(config);
+
+    await expect(getHotkeys()).resolves.toBe(config);
+    await expect(setHotkeys(config)).resolves.toBe(config);
+
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(1, "get_hotkeys");
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(2, "set_hotkeys", { config });
   });
 });

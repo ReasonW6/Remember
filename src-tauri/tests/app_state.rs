@@ -1,4 +1,7 @@
-use remember_lib::app_state::{AppController, AppMode};
+use remember_lib::app_state::{
+    AppController, AppMode, ControlHotkey, ControlHotkeyAction, ControlHotkeyDecision,
+    ControlHotkeyModifiers,
+};
 use remember_lib::model::{KeyState, MacroStep, Recording};
 use remember_lib::recorder::RawInputEvent;
 
@@ -13,6 +16,24 @@ fn recording() -> Recording {
             state: KeyState::Pressed,
         }],
     )
+}
+
+fn hotkey(vk_code: u16) -> ControlHotkey {
+    ControlHotkey {
+        vk_code,
+        modifiers: ControlHotkeyModifiers::default(),
+    }
+}
+
+fn ctrl_shift_hotkey(vk_code: u16) -> ControlHotkey {
+    ControlHotkey {
+        vk_code,
+        modifiers: ControlHotkeyModifiers {
+            ctrl: true,
+            shift: true,
+            ..ControlHotkeyModifiers::default()
+        },
+    }
 }
 
 #[test]
@@ -54,19 +75,229 @@ fn captures_input_while_recording() {
 }
 
 #[test]
-fn suppresses_global_hotkey_chords_while_recording() {
-    for (vk_code, scan_code) in [(0x52, 0x13), (0x50, 0x19), (0x1B, 0x01)] {
+fn recognizes_default_playback_hotkey_from_keyboard_hook() {
+    let mut app = AppController::new();
+    app.set_recording(recording()).expect("load");
+
+    let action = app.control_hotkey_action(RawInputEvent::Key {
+        at_ms: 125,
+        vk_code: 0x7B,
+        scan_code: 0x58,
+        state: KeyState::Pressed,
+    });
+
+    assert_eq!(action, Some(ControlHotkeyAction::Playback));
+}
+
+#[test]
+fn recognizes_same_record_stop_hotkey_as_toggle() {
+    let mut app = AppController::new();
+
+    let action = app.control_hotkey_action(RawInputEvent::Key {
+        at_ms: 125,
+        vk_code: 0x77,
+        scan_code: 0x42,
+        state: KeyState::Pressed,
+    });
+    assert_eq!(action, Some(ControlHotkeyAction::Record));
+
+    app.start_recording_from_hotkey("test", 125, "2026-06-29T00:00:00Z")
+        .expect("start");
+    let action = app.control_hotkey_action(RawInputEvent::Key {
+        at_ms: 150,
+        vk_code: 0x77,
+        scan_code: 0x42,
+        state: KeyState::Pressed,
+    });
+
+    assert_eq!(action, Some(ControlHotkeyAction::Stop));
+}
+
+#[test]
+fn keeps_modifier_state_for_idle_hook_hotkeys() {
+    let mut app = AppController::new();
+    app.set_control_hotkeys(
+        vec![ctrl_shift_hotkey(0x52), hotkey(0x7B)],
+        ctrl_shift_hotkey(0x52),
+        hotkey(0x7B),
+        ctrl_shift_hotkey(0x52),
+    );
+
+    let ctrl = RawInputEvent::Key {
+        at_ms: 125,
+        vk_code: 0x11,
+        scan_code: 0x1D,
+        state: KeyState::Pressed,
+    };
+    let shift = RawInputEvent::Key {
+        at_ms: 126,
+        vk_code: 0x10,
+        scan_code: 0x2A,
+        state: KeyState::Pressed,
+    };
+    app.control_hotkey_action(ctrl);
+    app.capture_input(ctrl);
+    app.control_hotkey_action(shift);
+    app.capture_input(shift);
+
+    let action = app.control_hotkey_action(RawInputEvent::Key {
+        at_ms: 127,
+        vk_code: 0x52,
+        scan_code: 0x13,
+        state: KeyState::Pressed,
+    });
+
+    assert_eq!(action, Some(ControlHotkeyAction::Record));
+}
+
+#[test]
+fn records_modifier_releases_when_hook_calls_decision_and_filter() {
+    let mut app = AppController::new();
+
+    let decision = app.control_hotkey_decision(RawInputEvent::Key {
+        at_ms: 100,
+        vk_code: 0x77,
+        scan_code: 0x42,
+        state: KeyState::Pressed,
+    });
+    assert_eq!(
+        decision,
+        ControlHotkeyDecision {
+            suppress: true,
+            action: Some(ControlHotkeyAction::Record),
+        }
+    );
+
+    app.start_recording_from_hotkey("test", 100, "2026-06-29T00:00:00Z")
+        .expect("start");
+
+    let decision = app.control_hotkey_decision(RawInputEvent::Key {
+        at_ms: 101,
+        vk_code: 0x77,
+        scan_code: 0x42,
+        state: KeyState::Released,
+    });
+    assert!(decision.suppress);
+
+    for (offset, vk_code, scan_code, state) in [
+        (10, 0x10, 0x2A, KeyState::Pressed),
+        (11, 0x41, 0x1E, KeyState::Pressed),
+        (12, 0x41, 0x1E, KeyState::Released),
+        (13, 0x10, 0x2A, KeyState::Released),
+    ] {
+        let event = RawInputEvent::Key {
+            at_ms: 100 + offset,
+            vk_code,
+            scan_code,
+            state,
+        };
+        let decision = app.control_hotkey_decision(event);
+        assert!(!decision.suppress);
+        app.capture_input(event);
+    }
+
+    let saved = app.stop_recording(120).expect("stop");
+    assert_eq!(
+        saved.steps,
+        vec![
+            MacroStep::Key {
+                elapsed_ms: 10,
+                vk_code: 0x10,
+                scan_code: 0x2A,
+                state: KeyState::Pressed,
+            },
+            MacroStep::Key {
+                elapsed_ms: 11,
+                vk_code: 0x41,
+                scan_code: 0x1E,
+                state: KeyState::Pressed,
+            },
+            MacroStep::Key {
+                elapsed_ms: 12,
+                vk_code: 0x41,
+                scan_code: 0x1E,
+                state: KeyState::Released,
+            },
+            MacroStep::Key {
+                elapsed_ms: 13,
+                vk_code: 0x10,
+                scan_code: 0x2A,
+                state: KeyState::Released,
+            },
+        ]
+    );
+}
+
+#[test]
+fn ignores_hotkey_pressed_with_extra_modifiers() {
+    let mut app = AppController::new();
+    app.start_recording("test", 100, "2026-06-29T00:00:00Z")
+        .expect("start");
+
+    for (offset, vk_code, scan_code, state) in [
+        (10, 0x11, 0x1D, KeyState::Pressed),
+        (11, 0x77, 0x42, KeyState::Pressed),
+        (12, 0x77, 0x42, KeyState::Released),
+        (13, 0x11, 0x1D, KeyState::Released),
+    ] {
+        let event = RawInputEvent::Key {
+            at_ms: 100 + offset,
+            vk_code,
+            scan_code,
+            state,
+        };
+        let decision = app.control_hotkey_decision(event);
+        assert_eq!(decision.action, None);
+        assert!(!decision.suppress);
+        app.capture_input(event);
+    }
+
+    let saved = app.stop_recording(120).expect("stop");
+    assert_eq!(saved.steps.len(), 4);
+}
+
+#[test]
+fn swallows_playback_hotkey_while_recording_without_action() {
+    let mut app = AppController::new();
+    app.start_recording("test", 100, "2026-06-29T00:00:00Z")
+        .expect("start");
+
+    let decision = app.control_hotkey_decision(RawInputEvent::Key {
+        at_ms: 110,
+        vk_code: 0x7B,
+        scan_code: 0x58,
+        state: KeyState::Pressed,
+    });
+    assert_eq!(
+        decision,
+        ControlHotkeyDecision {
+            suppress: true,
+            action: None,
+        }
+    );
+
+    let decision = app.control_hotkey_decision(RawInputEvent::Key {
+        at_ms: 111,
+        vk_code: 0x7B,
+        scan_code: 0x58,
+        state: KeyState::Released,
+    });
+    assert!(decision.suppress);
+
+    let saved = app.stop_recording(120).expect("stop");
+    assert_eq!(saved.steps, Vec::new());
+}
+
+#[test]
+fn suppresses_default_control_hotkeys_while_recording() {
+    for (vk_code, scan_code) in [(0x77, 0x42), (0x7B, 0x58)] {
         let mut app = AppController::new();
         app.start_recording("test", 100, "2026-06-29T00:00:00Z")
             .expect("start");
 
         for (offset, vk_code, scan_code, state) in [
-            (10, 0x11, 0x1D, KeyState::Pressed),
-            (11, 0x12, 0x38, KeyState::Pressed),
-            (12, vk_code, scan_code, KeyState::Pressed),
-            (13, vk_code, scan_code, KeyState::Released),
-            (14, 0x12, 0x38, KeyState::Released),
-            (15, 0x11, 0x1D, KeyState::Released),
+            (10, vk_code, scan_code, KeyState::Pressed),
+            (11, vk_code, scan_code, KeyState::Released),
         ] {
             app.capture_input(RawInputEvent::Key {
                 at_ms: 100 + offset,
@@ -82,40 +313,101 @@ fn suppresses_global_hotkey_chords_while_recording() {
 }
 
 #[test]
-fn suppresses_all_control_hotkey_modifier_releases_while_recording() {
-    for (vk_code, scan_code) in [(0x52, 0x13), (0x50, 0x19), (0x1B, 0x01)] {
-        let mut app = AppController::new();
-        app.start_recording("test", 100, "2026-06-29T00:00:00Z")
-            .expect("start");
+fn suppresses_control_hotkey_modifier_releases_while_recording() {
+    let mut app = AppController::new();
+    app.set_control_hotkeys(
+        vec![ctrl_shift_hotkey(0x52)],
+        ctrl_shift_hotkey(0x52),
+        hotkey(0x7B),
+        ctrl_shift_hotkey(0x52),
+    );
+    app.start_recording("test", 100, "2026-06-29T00:00:00Z")
+        .expect("start");
 
-        for (offset, vk_code, scan_code, state) in [
-            (10, 0xA2, 0x1D, KeyState::Pressed),
-            (11, 0xA3, 0x1D, KeyState::Pressed),
-            (12, 0x12, 0x38, KeyState::Pressed),
-            (13, vk_code, scan_code, KeyState::Pressed),
-            (14, vk_code, scan_code, KeyState::Released),
-            (15, 0x12, 0x38, KeyState::Released),
-            (16, 0xA2, 0x1D, KeyState::Released),
-            (17, 0xA3, 0x1D, KeyState::Released),
-        ] {
-            app.capture_input(RawInputEvent::Key {
-                at_ms: 100 + offset,
-                vk_code,
-                scan_code,
-                state,
-            });
-        }
-
-        let saved = app.stop_recording(120).expect("stop");
-        assert_eq!(saved.steps, Vec::new());
+    for (offset, vk_code, scan_code, state) in [
+        (10, 0x11, 0x1D, KeyState::Pressed),
+        (11, 0x10, 0x2A, KeyState::Pressed),
+        (12, 0x52, 0x13, KeyState::Pressed),
+        (13, 0x52, 0x13, KeyState::Released),
+        (14, 0x10, 0x2A, KeyState::Released),
+        (15, 0x11, 0x1D, KeyState::Released),
+    ] {
+        app.capture_input(RawInputEvent::Key {
+            at_ms: 100 + offset,
+            vk_code,
+            scan_code,
+            state,
+        });
     }
+
+    let saved = app.stop_recording(120).expect("stop");
+    assert_eq!(saved.steps, Vec::new());
 }
 
 #[test]
 fn suppresses_record_hotkey_release_tail_when_started_from_idle_hotkey() {
     let mut app = AppController::new();
 
-    for (offset, vk_code, scan_code) in [(10, 0x11, 0x1D), (11, 0x12, 0x38), (12, 0x52, 0x13)] {
+    app.capture_input(RawInputEvent::Key {
+        at_ms: 110,
+        vk_code: 0x77,
+        scan_code: 0x42,
+        state: KeyState::Pressed,
+    });
+
+    app.start_recording_from_hotkey("test", 120, "2026-06-29T00:00:00Z")
+        .expect("start");
+
+    app.capture_input(RawInputEvent::Key {
+        at_ms: 121,
+        vk_code: 0x77,
+        scan_code: 0x42,
+        state: KeyState::Released,
+    });
+
+    let saved = app.stop_recording(130).expect("stop");
+    assert_eq!(saved.steps, Vec::new());
+}
+
+#[test]
+fn suppresses_custom_control_hotkey_chords_while_recording() {
+    let mut app = AppController::new();
+    app.set_control_hotkeys(
+        vec![hotkey(0x75), hotkey(0x7B)],
+        hotkey(0x75),
+        hotkey(0x7B),
+        hotkey(0x75),
+    );
+    app.start_recording("test", 100, "2026-06-29T00:00:00Z")
+        .expect("start");
+
+    for (offset, vk_code, scan_code, state) in [
+        (10, 0x75, 0x40, KeyState::Pressed),
+        (11, 0x75, 0x40, KeyState::Released),
+    ] {
+        app.capture_input(RawInputEvent::Key {
+            at_ms: 100 + offset,
+            vk_code,
+            scan_code,
+            state,
+        });
+    }
+
+    let saved = app.stop_recording(120).expect("stop");
+    assert_eq!(saved.steps, Vec::new());
+}
+
+#[test]
+fn suppresses_custom_record_hotkey_release_tail_when_started_from_idle_hotkey() {
+    let mut app = AppController::new();
+    app.set_control_hotkeys(
+        vec![ctrl_shift_hotkey(0x52), hotkey(0x7B)],
+        ctrl_shift_hotkey(0x52),
+        hotkey(0x7B),
+        ctrl_shift_hotkey(0x52),
+    );
+
+    for (offset, vk_code, scan_code) in [(10, 0x11, 0x1D), (11, 0x10, 0x2A), (12, 0x52, 0x13)] {
         app.capture_input(RawInputEvent::Key {
             at_ms: 100 + offset,
             vk_code,
@@ -127,7 +419,7 @@ fn suppresses_record_hotkey_release_tail_when_started_from_idle_hotkey() {
     app.start_recording_from_hotkey("test", 120, "2026-06-29T00:00:00Z")
         .expect("start");
 
-    for (offset, vk_code, scan_code) in [(1, 0x52, 0x13), (2, 0x12, 0x38), (3, 0x11, 0x1D)] {
+    for (offset, vk_code, scan_code) in [(1, 0x52, 0x13), (2, 0x10, 0x2A), (3, 0x11, 0x1D)] {
         app.capture_input(RawInputEvent::Key {
             at_ms: 120 + offset,
             vk_code,
@@ -240,6 +532,37 @@ fn loads_recording_and_starts_playback() {
 
     assert_eq!(app.mode(), AppMode::Playing);
     assert_eq!(run.actions.len(), 2);
+}
+
+#[test]
+fn starts_playback_with_current_settings() {
+    let mut app = AppController::new();
+    app.set_recording(Recording::new(
+        "loaded",
+        "2026-06-29T00:00:00Z",
+        vec![
+            MacroStep::Key {
+                elapsed_ms: 0,
+                vk_code: 0x41,
+                scan_code: 0x1E,
+                state: KeyState::Pressed,
+            },
+            MacroStep::Key {
+                elapsed_ms: 100,
+                vk_code: 0x41,
+                scan_code: 0x1E,
+                state: KeyState::Released,
+            },
+        ],
+    ))
+    .expect("load");
+    app.set_playback_settings(3, 2.0).expect("settings");
+
+    let run = app.start_playback_with_current_settings().expect("play");
+
+    assert_eq!(run.actions.len(), 6);
+    assert_eq!(run.actions[1].delay_ms, 50);
+    assert_eq!(app.mode(), AppMode::Playing);
 }
 
 #[test]

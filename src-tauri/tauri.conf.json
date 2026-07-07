@@ -15,7 +15,8 @@
         "title": "Remember",
         "width": 420,
         "height": 520,
-        "resizable": false
+        "resizable": false,
+        "decorations": false
       }
     ],
     "security": {

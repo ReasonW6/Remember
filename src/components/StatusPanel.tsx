@@ -13,7 +13,11 @@ export function StatusPanel({ state, error }: StatusPanelProps) {
         <h2 id="status-title">状态</h2>
         <span className={`mode-pill mode-${state.mode}`}>{displayMode(state.mode)}</span>
       </div>
-      {error ? <p className="status-message alert">{error}</p> : null}
+      {error ? (
+        <p className="status-message alert" role="alert">
+          {error}
+        </p>
+      ) : null}
       <dl className="status-list">
         <div>
           <dt>消息</dt>

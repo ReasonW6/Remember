@@ -4,6 +4,8 @@ use crate::model::{ButtonState, KeyState, MouseButton};
 use crate::player::StepExecutor;
 #[cfg(not(target_os = "windows"))]
 use std::sync::{Arc, Mutex};
+#[cfg(not(target_os = "windows"))]
+use tauri::AppHandle;
 
 pub const REMEMBER_INPUT_EXTRA_INFO: usize = 0x524d_4d42;
 
@@ -54,6 +56,7 @@ pub struct InputCaptureRuntime;
 #[cfg(not(target_os = "windows"))]
 pub fn start_capture(
     _shared: Arc<Mutex<AppController>>,
+    _app_handle: AppHandle,
     _main_window_hwnd: Option<usize>,
 ) -> Result<InputCaptureRuntime, String> {
     Err("Remember input capture is Windows-only".to_string())
@@ -62,7 +65,9 @@ pub fn start_capture(
 #[cfg(target_os = "windows")]
 mod capture {
     use crate::{
-        app_state::AppController,
+        app_state::{AppController, ControlHotkeyAction, ControlHotkeyDecision},
+        clock::now_ms,
+        commands,
         input::REMEMBER_INPUT_EXTRA_INFO,
         model::{ButtonState, KeyState, MouseButton},
         recorder::RawInputEvent,
@@ -73,8 +78,9 @@ mod capture {
             mpsc, Arc, Mutex,
         },
         thread::{self, JoinHandle},
-        time::{Duration, SystemTime, UNIX_EPOCH},
+        time::Duration,
     };
+    use tauri::AppHandle;
     use windows::Win32::{
         Foundation::{HINSTANCE, LPARAM, LRESULT, POINT, WPARAM},
         System::LibraryLoader::GetModuleHandleW,
@@ -90,10 +96,15 @@ mod capture {
 
     static CAPTURE_CONTROLLER: Mutex<Option<Arc<Mutex<AppController>>>> = Mutex::new(None);
     static MAIN_WINDOW_HWND: Mutex<Option<usize>> = Mutex::new(None);
+    // Low-level hook callbacks must return within the system hook timeout or
+    // Windows silently removes the hook, so hotkey actions (which can write to
+    // disk) are queued here and executed on a dedicated worker thread.
+    static HOTKEY_ACTION_TX: Mutex<Option<mpsc::Sender<ControlHotkeyAction>>> = Mutex::new(None);
 
     pub struct InputCaptureRuntime {
         stop: Arc<AtomicBool>,
         worker: Option<JoinHandle<()>>,
+        hotkey_worker: Option<JoinHandle<()>>,
     }
 
     impl Drop for InputCaptureRuntime {
@@ -104,6 +115,11 @@ mod capture {
                 let _ = worker.join();
             }
 
+            clear_hotkey_action_sender();
+            if let Some(hotkey_worker) = self.hotkey_worker.take() {
+                let _ = hotkey_worker.join();
+            }
+
             clear_capture_controller();
             clear_main_window_hwnd();
         }
@@ -111,10 +127,19 @@ mod capture {
 
     pub fn start_capture(
         shared: Arc<Mutex<AppController>>,
+        app_handle: AppHandle,
         main_window_hwnd: Option<usize>,
     ) -> Result<InputCaptureRuntime, String> {
-        set_capture_controller(shared)?;
+        set_capture_controller(shared.clone())?;
         set_main_window_hwnd(main_window_hwnd);
+
+        let (hotkey_tx, hotkey_rx) = mpsc::channel();
+        set_hotkey_action_sender(hotkey_tx);
+        let hotkey_worker = thread::spawn(move || {
+            while let Ok(action) = hotkey_rx.recv() {
+                commands::run_control_hotkey_action(app_handle.clone(), shared.clone(), action);
+            }
+        });
 
         let stop = Arc::new(AtomicBool::new(false));
         let stop_for_thread = stop.clone();
@@ -124,21 +149,26 @@ mod capture {
             run_capture_thread(stop_for_thread, installed_tx);
         });
 
+        let cleanup = |worker: JoinHandle<()>, hotkey_worker: JoinHandle<()>| {
+            let _ = worker.join();
+            clear_hotkey_action_sender();
+            let _ = hotkey_worker.join();
+            clear_capture_controller();
+            clear_main_window_hwnd();
+        };
+
         match installed_rx.recv() {
             Ok(Ok(())) => Ok(InputCaptureRuntime {
                 stop,
                 worker: Some(worker),
+                hotkey_worker: Some(hotkey_worker),
             }),
             Ok(Err(error)) => {
-                let _ = worker.join();
-                clear_capture_controller();
-                clear_main_window_hwnd();
+                cleanup(worker, hotkey_worker);
                 Err(error)
             }
             Err(_) => {
-                let _ = worker.join();
-                clear_capture_controller();
-                clear_main_window_hwnd();
+                cleanup(worker, hotkey_worker);
                 Err("input capture thread stopped before installing hooks".to_string())
             }
         }
@@ -176,6 +206,30 @@ mod capture {
 
     fn current_main_window_hwnd() -> Option<usize> {
         MAIN_WINDOW_HWND.lock().ok().and_then(|hwnd| *hwnd)
+    }
+
+    fn set_hotkey_action_sender(sender: mpsc::Sender<ControlHotkeyAction>) {
+        if let Ok(mut tx) = HOTKEY_ACTION_TX.lock() {
+            *tx = Some(sender);
+        }
+    }
+
+    fn clear_hotkey_action_sender() {
+        if let Ok(mut tx) = HOTKEY_ACTION_TX.lock() {
+            *tx = None;
+        }
+    }
+
+    fn dispatch_hotkey_action(action: ControlHotkeyAction) -> bool {
+        let sender = match HOTKEY_ACTION_TX.lock() {
+            Ok(tx) => tx.clone(),
+            Err(_) => None,
+        };
+
+        match sender {
+            Some(sender) => sender.send(action).is_ok(),
+            None => false,
+        }
     }
 
     fn run_capture_thread(stop: Arc<AtomicBool>, installed_tx: mpsc::Sender<Result<(), String>>) {
@@ -263,12 +317,66 @@ mod capture {
         l_param: LPARAM,
     ) -> LRESULT {
         if code == HC_ACTION as i32 {
-            if let Some(event) = key_event(w_param, l_param) {
+            let foreground_root_hwnd = foreground_root_window();
+            let main_window_hwnd = current_main_window_hwnd();
+
+            if same_root_window(foreground_root_hwnd, main_window_hwnd) {
+                reset_control_hotkey_state();
+            } else {
+                if let Some(event) = raw_key_event(w_param, l_param) {
+                    let decision = handle_control_hotkey(event);
+                    if let Some(action) = decision.action {
+                        dispatch_hotkey_action(action);
+                    }
+                    if decision.suppress {
+                        return LRESULT(1);
+                    }
+                }
+            }
+
+            if let Some(event) = key_event_from_foreground_root(
+                w_param,
+                l_param,
+                foreground_root_hwnd,
+                main_window_hwnd,
+            ) {
                 capture(event);
             }
         }
 
         CallNextHookEx(HHOOK::default(), code, w_param, l_param)
+    }
+
+    fn handle_control_hotkey(event: RawInputEvent) -> ControlHotkeyDecision {
+        let shared = match CAPTURE_CONTROLLER.lock() {
+            Ok(controller) => controller.clone(),
+            Err(_) => None,
+        };
+
+        let pass = ControlHotkeyDecision {
+            suppress: false,
+            action: None,
+        };
+        match shared {
+            Some(shared) => match shared.lock() {
+                Ok(mut controller) => controller.control_hotkey_decision(event),
+                Err(_) => pass,
+            },
+            None => pass,
+        }
+    }
+
+    fn reset_control_hotkey_state() {
+        let shared = match CAPTURE_CONTROLLER.lock() {
+            Ok(controller) => controller.clone(),
+            Err(_) => None,
+        };
+
+        if let Some(shared) = shared {
+            if let Ok(mut controller) = shared.lock() {
+                controller.reset_control_hotkey_state();
+            }
+        }
     }
 
     fn capture(event: RawInputEvent) {
@@ -379,6 +487,7 @@ mod capture {
         }
     }
 
+    #[cfg(test)]
     fn key_event(w_param: WPARAM, l_param: LPARAM) -> Option<RawInputEvent> {
         key_event_from_foreground_root(
             w_param,
@@ -394,11 +503,17 @@ mod capture {
         foreground_root_hwnd: Option<usize>,
         main_window_hwnd: Option<usize>,
     ) -> Option<RawInputEvent> {
-        let info = unsafe { (l_param.0 as *const KBDLLHOOKSTRUCT).as_ref()? };
-        if info.dwExtraInfo == REMEMBER_INPUT_EXTRA_INFO {
+        let event = raw_key_event(w_param, l_param)?;
+        if same_root_window(foreground_root_hwnd, main_window_hwnd) {
             return None;
         }
-        if same_root_window(foreground_root_hwnd, main_window_hwnd) {
+
+        Some(event)
+    }
+
+    fn raw_key_event(w_param: WPARAM, l_param: LPARAM) -> Option<RawInputEvent> {
+        let info = unsafe { (l_param.0 as *const KBDLLHOOKSTRUCT).as_ref()? };
+        if info.dwExtraInfo == REMEMBER_INPUT_EXTRA_INFO {
             return None;
         }
 
@@ -555,13 +670,6 @@ mod capture {
 
     fn signed_high_word(value: u32) -> i16 {
         high_word(value) as i16
-    }
-
-    fn now_ms() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64
     }
 }
 

@@ -25,17 +25,18 @@ export function Controls({
   const isRecording = state.mode === "recording";
   const isPlaying = state.mode === "playing";
   const isBusy = isRecording || isPlaying;
+  const RecordStopIcon = isBusy ? Square : Circle;
 
   return (
     <section className="panel controls-panel" aria-label="控制">
       <button
         className="action-button"
         type="button"
-        onClick={onRecord}
-        disabled={pendingCommand || isPlaying}
+        onClick={isBusy ? onStop : onRecord}
+        disabled={pendingCommand}
       >
-        <Circle size={16} aria-hidden="true" />
-        <span className="button-label">{isRecording ? "停止录制" : "录制"}</span>
+        <RecordStopIcon size={16} aria-hidden="true" />
+        <span className="button-label">{isBusy ? "停止" : "录制"}</span>
       </button>
       <button
         className="action-button"
@@ -45,15 +46,6 @@ export function Controls({
       >
         <Play size={16} aria-hidden="true" />
         <span className="button-label">播放</span>
-      </button>
-      <button
-        className="action-button"
-        type="button"
-        onClick={onStop}
-        disabled={pendingCommand || !isBusy}
-      >
-        <Square size={16} aria-hidden="true" />
-        <span className="button-label">停止</span>
       </button>
       <button
         className="action-button"

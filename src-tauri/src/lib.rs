@@ -1,4 +1,5 @@
 pub mod app_state;
+pub mod clock;
 pub mod commands;
 pub mod hotkeys;
 pub mod input;
@@ -28,15 +29,24 @@ pub fn run() {
             commands::get_state,
             commands::start_recording,
             commands::stop_recording,
+            commands::list_recordings,
+            commands::delete_recording,
             commands::open_recording,
             commands::save_current_recording,
+            commands::get_hotkeys,
+            commands::set_hotkeys,
             commands::start_playback,
+            commands::set_playback_settings,
             commands::stop_playback,
         ])
         .setup(move |app| {
             tray::setup(app.handle())
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
-            hotkeys::register(app.handle())
+            let hotkey_config = hotkeys::load_config(app.handle())
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
+            hotkeys::apply_to_controller(app.handle(), &hotkey_config)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
+            hotkeys::register(app.handle(), &hotkey_config, true)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
             #[cfg(target_os = "windows")]
             let main_window_hwnd = app
@@ -46,8 +56,12 @@ pub fn run() {
             #[cfg(not(target_os = "windows"))]
             let main_window_hwnd = None;
 
-            let capture_runtime = input::start_capture(capture_shared.clone(), main_window_hwnd)
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
+            let capture_runtime = input::start_capture(
+                capture_shared.clone(),
+                app.handle().clone(),
+                main_window_hwnd,
+            )
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
             if !app.manage(Mutex::new(capture_runtime)) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::Other,

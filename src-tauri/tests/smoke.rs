@@ -31,3 +31,36 @@ fn tauri_config_uses_uploaded_icon_assets() {
     );
     assert!(svg.len() > 1_000, "remember-icon.svg should be present");
 }
+
+#[test]
+fn main_window_uses_custom_titlebar() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let config = std::fs::read_to_string(format!("{manifest_dir}/tauri.conf.json"))
+        .expect("read tauri config");
+
+    assert!(
+        config.contains("\"decorations\": false"),
+        "main window should disable native decorations for the custom titlebar"
+    );
+}
+
+#[test]
+fn main_window_capability_allows_core_events_and_dialogs() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let capability = std::fs::read_to_string(format!("{manifest_dir}/capabilities/default.json"))
+        .expect("read default capability");
+
+    assert!(capability.contains("\"core:default\""));
+    assert!(capability.contains("\"dialog:default\""));
+}
+
+#[test]
+fn main_window_capability_allows_custom_titlebar_controls() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let capability = std::fs::read_to_string(format!("{manifest_dir}/capabilities/default.json"))
+        .expect("read default capability");
+
+    assert!(capability.contains("\"core:window:allow-start-dragging\""));
+    assert!(capability.contains("\"core:window:allow-minimize\""));
+    assert!(capability.contains("\"core:window:allow-close\""));
+}

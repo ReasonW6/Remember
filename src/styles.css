@@ -10,16 +10,51 @@
 
 * {
   box-sizing: border-box;
+  scrollbar-color: #aeb9c0 transparent;
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: #aeb9c0;
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: #7f8f99;
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+html,
+#root {
+  height: 100%;
 }
 
 body {
   margin: 0;
+  height: 100%;
   min-width: 280px;
-  background: #f5f6f7;
+  overflow: hidden;
+  background: #eef1f4;
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -28,9 +63,98 @@ button {
 }
 
 .app-shell {
-  width: min(720px, 100%);
-  margin: 0 auto;
-  padding: 18px;
+  display: grid;
+  width: 100%;
+  height: 100%;
+  grid-template-rows: 42px minmax(0, 1fr);
+  overflow: hidden;
+  background: #f5f6f7;
+  box-shadow: inset 0 0 0 1px #c9d1d8;
+}
+
+.window-titlebar {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  border-bottom: 1px solid #cfd6dd;
+  background: #eef2f5;
+  user-select: none;
+}
+
+.window-titlebar-drag {
+  display: flex;
+  min-width: 0;
+  height: 100%;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+}
+
+.window-titlebar-icon {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  border-radius: 5px;
+}
+
+.window-titlebar-text {
+  display: grid;
+  min-width: 0;
+  line-height: 1.1;
+}
+
+.window-titlebar-name {
+  min-width: 0;
+  color: #24282b;
+  font-size: 0.88rem;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.window-titlebar-subtitle {
+  min-width: 0;
+  color: #687078;
+  font-size: 0.72rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.window-titlebar-controls {
+  display: flex;
+  height: 100%;
+  align-items: stretch;
+}
+
+.window-control-button {
+  display: inline-flex;
+  width: 42px;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: transparent;
+  color: #3d444b;
+  cursor: pointer;
+}
+
+.window-control-button:hover {
+  background: #dde5eb;
+}
+
+.close-button:hover {
+  background: #c94534;
+  color: #ffffff;
+}
+
+.app-content {
+  min-height: 0;
+  overflow: auto;
+  scrollbar-gutter: stable;
+  padding: 14px 18px 18px;
 }
 
 .app-header {
@@ -74,7 +198,7 @@ button {
 
 .content-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(190px, 0.7fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
 }
 
@@ -137,6 +261,34 @@ button {
   flex: 0 0 auto;
 }
 
+.compact-button {
+  width: 100%;
+}
+
+.icon-button {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #bfc7cf;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #202124;
+  cursor: pointer;
+}
+
+.icon-button:hover:not(:disabled) {
+  background: #f0f2f4;
+}
+
+.icon-button:disabled {
+  color: #8b908b;
+  cursor: not-allowed;
+  background: #eceff1;
+}
+
 .button-label {
   min-width: 0;
   overflow-wrap: anywhere;
@@ -161,6 +313,16 @@ button {
   border: 1px solid #bfc7cf;
   border-radius: 6px;
   padding: 7px 8px;
+  background: #ffffff;
+  color: #202124;
+}
+
+select {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #bfc7cf;
+  border-radius: 6px;
+  padding: 6px 8px;
   background: #ffffff;
   color: #202124;
 }
@@ -215,6 +377,134 @@ button {
   margin: 0;
 }
 
+.recording-list {
+  display: grid;
+  gap: 6px;
+  max-height: 210px;
+  margin: 0;
+  padding: 0 2px 0 0;
+  overflow: auto;
+  scrollbar-gutter: stable;
+  list-style: none;
+}
+
+.recording-row {
+  position: relative;
+}
+
+.recording-item {
+  display: grid;
+  width: 100%;
+  min-height: 48px;
+  gap: 3px;
+  border: 1px solid #dce2e7;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #202124;
+  cursor: pointer;
+  padding: 7px 36px 7px 8px;
+  text-align: left;
+}
+
+.recording-item:hover:not(:disabled),
+.recording-item.selected {
+  border-color: #5f7f9b;
+  background: #eef5fa;
+}
+
+.recording-item:disabled {
+  color: #8b908b;
+  cursor: not-allowed;
+  background: #eceff1;
+}
+
+.recording-delete-button {
+  position: absolute;
+  top: 50%;
+  right: 7px;
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  transform: translateY(-50%);
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #7c878f;
+  cursor: pointer;
+  opacity: 0.58;
+}
+
+.recording-row:hover .recording-delete-button,
+.recording-row:focus-within .recording-delete-button {
+  opacity: 1;
+}
+
+.recording-delete-button:hover:not(:disabled),
+.recording-delete-button:focus-visible {
+  background: #f6e8e5;
+  color: #9a3412;
+}
+
+.recording-delete-button:disabled {
+  color: #9ca3a8;
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.recording-name {
+  min-width: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.recording-meta,
+.empty-text {
+  margin: 0;
+  color: #6a6f69;
+  font-size: 0.84rem;
+  overflow-wrap: anywhere;
+}
+
+.hotkey-form {
+  display: grid;
+  gap: 9px;
+}
+
+.hotkey-field {
+  display: grid;
+  grid-template-columns: minmax(42px, 0.36fr) minmax(64px, 0.7fr) minmax(0, 1fr);
+  gap: 6px;
+  align-items: center;
+  color: #4b4e4b;
+}
+
+.hotkey-capture-button {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #bfc7cf;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #202124;
+  cursor: pointer;
+  padding: 7px 8px;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.hotkey-capture-button:hover:not(:disabled),
+.hotkey-capture-button:focus-visible {
+  border-color: #5f7f9b;
+  background: #eef5fa;
+}
+
+.hotkey-capture-button:disabled {
+  color: #8b908b;
+  cursor: not-allowed;
+  background: #eceff1;
+}
+
 .status-list div,
 .hotkey-list div {
   display: grid;
@@ -246,7 +536,7 @@ kbd {
 }
 
 @media (max-width: 560px) {
-  .app-shell {
+  .app-content {
     padding: 12px;
   }
 
@@ -271,5 +561,9 @@ kbd {
 
   .controls-panel {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .hotkey-field {
+    grid-template-columns: 1fr;
   }
 }

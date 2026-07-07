@@ -7,3 +7,18 @@ export interface UiState {
   duration_ms: number;
   message: string;
 }
+
+export interface RecordingFile {
+  name: string;
+  path: string;
+  step_count: number;
+  duration_ms: number;
+  created_at: string;
+  updated_at_ms: number;
+}
+
+export interface HotkeyConfig {
+  record: string;
+  playback: string;
+  stop: string;
+}

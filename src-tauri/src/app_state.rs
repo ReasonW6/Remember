@@ -31,10 +31,45 @@ pub struct PlaybackRun {
     pub actions: Vec<PlaybackAction>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ControlHotkeyModifiers {
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub meta: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlHotkey {
+    pub vk_code: u16,
+    pub modifiers: ControlHotkeyModifiers,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlHotkeyAction {
+    Record,
+    Playback,
+    Stop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlHotkeyDecision {
+    pub suppress: bool,
+    pub action: Option<ControlHotkeyAction>,
+}
+
+impl ControlHotkeyDecision {
+    const PASS: Self = Self {
+        suppress: false,
+        action: None,
+    };
+}
+
 pub struct AppController {
     mode: AppMode,
     recorder: Recorder,
     control_hotkeys: ControlHotkeySuppressor,
+    playback_settings: PlaybackSettings,
     recording: Option<Recording>,
     stop_token: StopToken,
     next_playback_id: u64,
@@ -54,6 +89,10 @@ impl AppController {
             mode: AppMode::Idle,
             recorder: Recorder::new(50),
             control_hotkeys: ControlHotkeySuppressor::default(),
+            playback_settings: PlaybackSettings {
+                loop_count: 1,
+                speed_multiplier: 1.0,
+            },
             recording: None,
             stop_token: StopToken::default(),
             next_playback_id: 0,
@@ -120,7 +159,7 @@ impl AppController {
         self.recorder.start(name, started_at_ms, created_at)?;
         self.control_hotkeys.reset();
         if suppress_record_hotkey_release_tail {
-            self.control_hotkeys.suppress_release_tail(0x52);
+            self.control_hotkeys.suppress_record_hotkey_release_tail();
         }
         self.recording = None;
         self.mode = AppMode::Recording;
@@ -139,13 +178,24 @@ impl AppController {
 
     pub fn capture_input(&mut self, event: RawInputEvent) {
         if self.mode != AppMode::Recording {
-            self.control_hotkeys.reset();
             return;
         }
 
         for event in self.control_hotkeys.filter(event) {
             self.recorder.capture(event);
         }
+    }
+
+    pub fn control_hotkey_action(&mut self, event: RawInputEvent) -> Option<ControlHotkeyAction> {
+        self.control_hotkey_decision(event).action
+    }
+
+    pub fn control_hotkey_decision(&mut self, event: RawInputEvent) -> ControlHotkeyDecision {
+        self.control_hotkeys.decide(event, self.mode)
+    }
+
+    pub fn reset_control_hotkey_state(&mut self) {
+        self.control_hotkeys.reset();
     }
 
     pub fn set_recording(&mut self, recording: Recording) -> Result<(), String> {
@@ -197,6 +247,27 @@ impl AppController {
         loop_count: u32,
         speed_multiplier: f64,
     ) -> Result<PlaybackRun, String> {
+        let settings = PlaybackSettings::new(loop_count, speed_multiplier)?;
+        self.start_playback_with_settings(settings)
+    }
+
+    pub fn set_playback_settings(
+        &mut self,
+        loop_count: u32,
+        speed_multiplier: f64,
+    ) -> Result<(), String> {
+        self.playback_settings = PlaybackSettings::new(loop_count, speed_multiplier)?;
+        Ok(())
+    }
+
+    pub fn start_playback_with_current_settings(&mut self) -> Result<PlaybackRun, String> {
+        self.start_playback_with_settings(self.playback_settings)
+    }
+
+    fn start_playback_with_settings(
+        &mut self,
+        settings: PlaybackSettings,
+    ) -> Result<PlaybackRun, String> {
         match self.mode {
             AppMode::Idle => {}
             AppMode::Recording => return Err("cannot play while recording".to_string()),
@@ -206,7 +277,6 @@ impl AppController {
             .recording
             .as_ref()
             .ok_or_else(|| "no recording loaded".to_string())?;
-        let settings = PlaybackSettings::new(loop_count, speed_multiplier)?;
         self.stop_token = StopToken::default();
         self.next_playback_id += 1;
         let id = PlaybackRunId(self.next_playback_id);
@@ -243,31 +313,169 @@ impl AppController {
     pub fn stop_token(&self) -> StopToken {
         self.stop_token.clone()
     }
+
+    pub fn set_control_hotkeys(
+        &mut self,
+        hotkeys: Vec<ControlHotkey>,
+        record_hotkey: ControlHotkey,
+        playback_hotkey: ControlHotkey,
+        stop_hotkey: ControlHotkey,
+    ) {
+        self.control_hotkeys
+            .set_hotkeys(hotkeys, record_hotkey, playback_hotkey, stop_hotkey);
+    }
 }
 
-#[derive(Default)]
 struct ControlHotkeySuppressor {
     pending_modifiers: Vec<RawInputEvent>,
     active_modifiers: Vec<u16>,
+    // The keyboard hook calls decide() and filter() for the same event, so the
+    // action path tracks its own modifier state to avoid stealing releases
+    // from the recording filter.
+    action_active_modifiers: Vec<u16>,
+    action_suppressed_key: Option<u16>,
     suppressed_modifier_releases: Vec<u16>,
     suppress_unknown_modifier_release_tail: bool,
     suppressed_key: Option<u16>,
+    hotkeys: Vec<ControlHotkey>,
+    record_hotkey: ControlHotkey,
+    playback_hotkey: ControlHotkey,
+    stop_hotkey: ControlHotkey,
+}
+
+impl Default for ControlHotkeySuppressor {
+    fn default() -> Self {
+        let default_record = ControlHotkey {
+            vk_code: 0x77,
+            modifiers: ControlHotkeyModifiers::default(),
+        };
+        Self {
+            pending_modifiers: Vec::new(),
+            active_modifiers: Vec::new(),
+            action_active_modifiers: Vec::new(),
+            action_suppressed_key: None,
+            suppressed_modifier_releases: Vec::new(),
+            suppress_unknown_modifier_release_tail: false,
+            suppressed_key: None,
+            hotkeys: vec![
+                default_record,
+                ControlHotkey {
+                    vk_code: 0x7B,
+                    modifiers: ControlHotkeyModifiers::default(),
+                },
+            ],
+            record_hotkey: default_record,
+            playback_hotkey: ControlHotkey {
+                vk_code: 0x7B,
+                modifiers: ControlHotkeyModifiers::default(),
+            },
+            stop_hotkey: default_record,
+        }
+    }
 }
 
 impl ControlHotkeySuppressor {
+    fn set_hotkeys(
+        &mut self,
+        hotkeys: Vec<ControlHotkey>,
+        record_hotkey: ControlHotkey,
+        playback_hotkey: ControlHotkey,
+        stop_hotkey: ControlHotkey,
+    ) {
+        self.hotkeys = hotkeys;
+        self.record_hotkey = record_hotkey;
+        self.playback_hotkey = playback_hotkey;
+        self.stop_hotkey = stop_hotkey;
+        self.reset();
+    }
+
+    fn decide(&mut self, event: RawInputEvent, mode: AppMode) -> ControlHotkeyDecision {
+        let RawInputEvent::Key { vk_code, state, .. } = event else {
+            return ControlHotkeyDecision::PASS;
+        };
+
+        match state {
+            KeyState::Pressed if is_modifier(vk_code) => {
+                add_modifier(&mut self.action_active_modifiers, vk_code);
+                ControlHotkeyDecision::PASS
+            }
+            KeyState::Released if is_modifier(vk_code) => {
+                remove_first(&mut self.action_active_modifiers, vk_code);
+                ControlHotkeyDecision::PASS
+            }
+            KeyState::Pressed => {
+                if !self.is_action_hotkey(vk_code) {
+                    return ControlHotkeyDecision::PASS;
+                }
+                self.action_suppressed_key = Some(vk_code);
+                ControlHotkeyDecision {
+                    suppress: true,
+                    action: self.action_for_key(vk_code, mode),
+                }
+            }
+            KeyState::Released => {
+                if self.action_suppressed_key == Some(vk_code) {
+                    self.action_suppressed_key = None;
+                    return ControlHotkeyDecision {
+                        suppress: true,
+                        action: None,
+                    };
+                }
+                ControlHotkeyDecision::PASS
+            }
+        }
+    }
+
+    fn is_action_hotkey(&self, vk_code: u16) -> bool {
+        self.hotkeys
+            .iter()
+            .any(|hotkey| matches_hotkey(&self.action_active_modifiers, *hotkey, vk_code))
+    }
+
+    fn action_for_key(&self, vk_code: u16, mode: AppMode) -> Option<ControlHotkeyAction> {
+        if matches_hotkey(&self.action_active_modifiers, self.record_hotkey, vk_code) {
+            return match mode {
+                AppMode::Idle => Some(ControlHotkeyAction::Record),
+                AppMode::Recording | AppMode::Playing if self.record_hotkey == self.stop_hotkey => {
+                    Some(ControlHotkeyAction::Stop)
+                }
+                AppMode::Recording | AppMode::Playing => None,
+            };
+        }
+
+        if matches_hotkey(&self.action_active_modifiers, self.playback_hotkey, vk_code) {
+            return match mode {
+                AppMode::Idle => Some(ControlHotkeyAction::Playback),
+                AppMode::Recording | AppMode::Playing => None,
+            };
+        }
+
+        if matches_hotkey(&self.action_active_modifiers, self.stop_hotkey, vk_code) {
+            return match mode {
+                AppMode::Recording | AppMode::Playing => Some(ControlHotkeyAction::Stop),
+                AppMode::Idle => None,
+            };
+        }
+
+        None
+    }
+
     fn reset(&mut self) {
         self.pending_modifiers.clear();
         self.active_modifiers.clear();
+        self.action_active_modifiers.clear();
+        self.action_suppressed_key = None;
         self.suppressed_modifier_releases.clear();
         self.suppress_unknown_modifier_release_tail = false;
         self.suppressed_key = None;
     }
 
-    fn suppress_release_tail(&mut self, vk_code: u16) {
+    fn suppress_record_hotkey_release_tail(&mut self) {
         self.pending_modifiers.clear();
         self.active_modifiers.clear();
         self.suppressed_modifier_releases.clear();
-        self.suppressed_key = Some(vk_code);
+        self.suppressed_key = Some(self.record_hotkey.vk_code);
+        self.action_suppressed_key = Some(self.record_hotkey.vk_code);
         self.suppress_unknown_modifier_release_tail = true;
     }
 
@@ -289,7 +497,7 @@ impl ControlHotkeySuppressor {
             return Vec::new();
         }
 
-        if self.ctrl_down() && self.alt_down() && is_control_hotkey_key(vk_code) {
+        if self.is_control_hotkey(vk_code) {
             self.pending_modifiers.clear();
             self.suppressed_key = Some(vk_code);
             self.suppressed_modifier_releases = self.active_modifiers.clone();
@@ -326,9 +534,7 @@ impl ControlHotkeySuppressor {
     }
 
     fn add_active_modifier(&mut self, vk_code: u16) {
-        if !self.active_modifiers.contains(&vk_code) {
-            self.active_modifiers.push(vk_code);
-        }
+        add_modifier(&mut self.active_modifiers, vk_code);
     }
 
     fn remove_active_modifier(&mut self, vk_code: u16) -> bool {
@@ -339,14 +545,31 @@ impl ControlHotkeySuppressor {
         remove_first(&mut self.suppressed_modifier_releases, vk_code)
     }
 
-    fn ctrl_down(&self) -> bool {
-        self.active_modifiers
+    fn is_control_hotkey(&self, vk_code: u16) -> bool {
+        self.hotkeys
             .iter()
-            .any(|vk_code| is_ctrl(*vk_code))
+            .any(|hotkey| matches_hotkey(&self.active_modifiers, *hotkey, vk_code))
     }
+}
 
-    fn alt_down(&self) -> bool {
-        self.active_modifiers.iter().any(|vk_code| is_alt(*vk_code))
+fn matches_hotkey(active_modifiers: &[u16], hotkey: ControlHotkey, vk_code: u16) -> bool {
+    hotkey.vk_code == vk_code && modifiers_match(active_modifiers, hotkey.modifiers)
+}
+
+fn modifiers_match(active_modifiers: &[u16], modifiers: ControlHotkeyModifiers) -> bool {
+    modifiers.ctrl == modifier_down(active_modifiers, is_ctrl)
+        && modifiers.alt == modifier_down(active_modifiers, is_alt)
+        && modifiers.shift == modifier_down(active_modifiers, is_shift)
+        && modifiers.meta == modifier_down(active_modifiers, is_meta)
+}
+
+fn modifier_down(active_modifiers: &[u16], predicate: fn(u16) -> bool) -> bool {
+    active_modifiers.iter().any(|vk_code| predicate(*vk_code))
+}
+
+fn add_modifier(modifiers: &mut Vec<u16>, vk_code: u16) {
+    if !modifiers.contains(&vk_code) {
+        modifiers.push(vk_code);
     }
 }
 
@@ -360,7 +583,7 @@ fn remove_first(values: &mut Vec<u16>, value: u16) -> bool {
 }
 
 fn is_modifier(vk_code: u16) -> bool {
-    is_ctrl(vk_code) || is_alt(vk_code)
+    is_ctrl(vk_code) || is_alt(vk_code) || is_shift(vk_code) || is_meta(vk_code)
 }
 
 fn is_ctrl(vk_code: u16) -> bool {
@@ -371,6 +594,10 @@ fn is_alt(vk_code: u16) -> bool {
     matches!(vk_code, 0x12 | 0xA4 | 0xA5)
 }
 
-fn is_control_hotkey_key(vk_code: u16) -> bool {
-    matches!(vk_code, 0x52 | 0x50 | 0x1B)
+fn is_shift(vk_code: u16) -> bool {
+    matches!(vk_code, 0x10 | 0xA0 | 0xA1)
+}
+
+fn is_meta(vk_code: u16) -> bool {
+    matches!(vk_code, 0x5B | 0x5C)
 }
