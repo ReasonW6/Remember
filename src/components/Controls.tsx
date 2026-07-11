@@ -4,6 +4,7 @@ import type { UiState } from "../types";
 interface ControlsProps {
   state: UiState;
   hasRecording: boolean;
+  playbackValid: boolean;
   pendingCommand: boolean;
   onRecord: () => void;
   onPlay: () => void;
@@ -15,6 +16,7 @@ interface ControlsProps {
 export function Controls({
   state,
   hasRecording,
+  playbackValid,
   pendingCommand,
   onRecord,
   onPlay,
@@ -42,7 +44,7 @@ export function Controls({
         className="action-button"
         type="button"
         onClick={onPlay}
-        disabled={pendingCommand || !hasRecording || isBusy}
+        disabled={pendingCommand || !hasRecording || !playbackValid || isBusy}
       >
         <Play size={16} aria-hidden="true" />
         <span className="button-label">播放</span>

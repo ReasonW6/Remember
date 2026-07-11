@@ -6,6 +6,8 @@ export interface UiState {
   step_count: number;
   duration_ms: number;
   message: string;
+  revision: number;
+  message_is_error: boolean;
 }
 
 export interface RecordingFile {
@@ -15,6 +17,7 @@ export interface RecordingFile {
   duration_ms: number;
   created_at: string;
   updated_at_ms: number;
+  load_error: string | null;
 }
 
 export interface HotkeyConfig {

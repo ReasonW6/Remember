@@ -300,6 +300,28 @@ button {
   gap: 10px;
 }
 
+.loop-mode-fieldset {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 0 0 10px;
+  border: 0;
+  padding: 0;
+}
+
+.loop-mode-fieldset legend {
+  float: left;
+  margin-right: 12px;
+  color: #4b4e4b;
+}
+
+.loop-mode-fieldset label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+
 .field {
   display: grid;
   gap: 5px;
@@ -315,6 +337,14 @@ button {
   padding: 7px 8px;
   background: #ffffff;
   color: #202124;
+}
+
+.field input:disabled {
+  border-color: #c7ccd1;
+  background: #e3e6e9;
+  color: #8b908b;
+  cursor: not-allowed;
+  opacity: 1;
 }
 
 select {
@@ -402,7 +432,7 @@ select {
   background: #ffffff;
   color: #202124;
   cursor: pointer;
-  padding: 7px 36px 7px 8px;
+  padding: 7px 36px;
   text-align: left;
 }
 
@@ -418,10 +448,22 @@ select {
   background: #eceff1;
 }
 
+.recording-item.invalid:disabled {
+  color: #5f6368;
+  background: #fff8f6;
+}
+
+.recording-load-error {
+  color: #9a3412;
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.recording-rename-button,
 .recording-delete-button {
   position: absolute;
   top: 50%;
-  right: 7px;
+  z-index: 2;
   display: inline-flex;
   width: 24px;
   height: 24px;
@@ -436,9 +478,55 @@ select {
   opacity: 0.58;
 }
 
+.recording-rename-button {
+  left: 7px;
+}
+
+.recording-delete-button {
+  right: 7px;
+}
+
+.recording-delete-button::after {
+  position: absolute;
+  top: 50%;
+  right: calc(100% + 7px);
+  z-index: 4;
+  padding: 5px 7px;
+  transform: translate(3px, -50%);
+  border-radius: 5px;
+  background: #30363b;
+  color: #ffffff;
+  content: attr(data-tooltip);
+  font-size: 0.75rem;
+  font-weight: 400;
+  line-height: 1;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+  visibility: hidden;
+  white-space: nowrap;
+}
+
+.recording-delete-button:hover:not(:disabled)::after,
+.recording-delete-button:focus-visible::after {
+  transform: translate(0, -50%);
+  opacity: 1;
+  visibility: visible;
+}
+
+.recording-row:hover .recording-rename-button,
 .recording-row:hover .recording-delete-button,
+.recording-row:focus-within .recording-rename-button,
 .recording-row:focus-within .recording-delete-button {
   opacity: 1;
+}
+
+.recording-rename-button:hover:not(:disabled),
+.recording-rename-button:focus-visible {
+  background: #e8f1f7;
+  color: #456b88;
 }
 
 .recording-delete-button:hover:not(:disabled),
@@ -447,10 +535,57 @@ select {
   color: #9a3412;
 }
 
+.recording-rename-button:disabled,
 .recording-delete-button:disabled {
   color: #9ca3a8;
   cursor: not-allowed;
   opacity: 0.42;
+}
+
+.recording-rename-form {
+  display: grid;
+  min-height: 48px;
+  grid-template-columns: minmax(0, 1fr) 28px 28px;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid #7e9bb0;
+  border-radius: 7px;
+  padding: 6px 7px;
+  background: #eef5fa;
+}
+
+.recording-rename-input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #aebbc5;
+  border-radius: 5px;
+  padding: 6px 7px;
+  background: #ffffff;
+  color: #202124;
+}
+
+.recording-rename-action {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #5f6d76;
+  cursor: pointer;
+}
+
+.recording-rename-action:hover:not(:disabled),
+.recording-rename-action:focus-visible {
+  background: #dceaf3;
+  color: #355f7d;
+}
+
+.recording-rename-action:disabled {
+  color: #a4abb0;
+  cursor: not-allowed;
 }
 
 .recording-name {
@@ -503,6 +638,20 @@ select {
   color: #8b908b;
   cursor: not-allowed;
   background: #eceff1;
+}
+
+.capture-cancel-button {
+  justify-self: start;
+  border: 0;
+  background: transparent;
+  color: #5f6f7c;
+  cursor: pointer;
+  padding: 2px 0;
+  text-decoration: underline;
+}
+
+.hotkey-error {
+  margin-top: 0;
 }
 
 .status-list div,
@@ -565,5 +714,16 @@ kbd {
 
   .hotkey-field {
     grid-template-columns: 1fr;
+  }
+
+  .loop-mode-fieldset {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .loop-mode-fieldset legend {
+    float: none;
+    margin: 0 0 2px;
   }
 }

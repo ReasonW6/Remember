@@ -31,6 +31,7 @@ pub fn run() {
             commands::stop_recording,
             commands::list_recordings,
             commands::delete_recording,
+            commands::rename_recording,
             commands::open_recording,
             commands::save_current_recording,
             commands::get_hotkeys,
@@ -40,14 +41,12 @@ pub fn run() {
             commands::stop_playback,
         ])
         .setup(move |app| {
-            tray::setup(app.handle())
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
-            let hotkey_config = hotkeys::load_config(app.handle())
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
+            tray::setup(app.handle()).map_err(std::io::Error::other)?;
+            let hotkey_config =
+                hotkeys::load_config(app.handle()).map_err(std::io::Error::other)?;
             hotkeys::apply_to_controller(app.handle(), &hotkey_config)
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
-            hotkeys::register(app.handle(), &hotkey_config, true)
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
+                .map_err(std::io::Error::other)?;
+            hotkeys::register(app.handle(), &hotkey_config, true).map_err(std::io::Error::other)?;
             #[cfg(target_os = "windows")]
             let main_window_hwnd = app
                 .get_webview_window("main")
@@ -61,13 +60,9 @@ pub fn run() {
                 app.handle().clone(),
                 main_window_hwnd,
             )
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
+            .map_err(std::io::Error::other)?;
             if !app.manage(Mutex::new(capture_runtime)) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "input capture runtime already managed",
-                )
-                .into());
+                return Err(std::io::Error::other("input capture runtime already managed").into());
             }
             Ok(())
         })

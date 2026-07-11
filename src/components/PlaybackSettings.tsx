@@ -1,7 +1,9 @@
+import { useRef } from "react";
+
 interface PlaybackSettingsProps {
-  loopCount: number;
+  loopCount: number | null;
   speedMultiplier: number;
-  onLoopCountChange: (value: number) => void;
+  onLoopCountChange: (value: number | null) => void;
   onSpeedMultiplierChange: (value: number) => void;
 }
 
@@ -18,8 +20,16 @@ export function PlaybackSettings({
   onLoopCountChange,
   onSpeedMultiplierChange
 }: PlaybackSettingsProps) {
+  const finiteLoopCountRef = useRef(loopCount ?? 1);
+  const isInfinite = loopCount === null;
+  if (loopCount !== null) {
+    finiteLoopCountRef.current = loopCount;
+  }
+
   const loopValidationError =
-    !Number.isSafeInteger(loopCount) || loopCount < 1 ? loopCountError : "";
+    loopCount !== null && (!Number.isInteger(loopCount) || loopCount < 1)
+      ? loopCountError
+      : "";
   const speedValidationError =
     !Number.isFinite(speedMultiplier) || speedMultiplier <= 0 ? speedError : "";
   const validationMessage = loopValidationError || speedValidationError;
@@ -27,6 +37,27 @@ export function PlaybackSettings({
   return (
     <section className="panel settings-panel" aria-labelledby="playback-settings-title">
       <h2 id="playback-settings-title">回放设置</h2>
+      <fieldset className="loop-mode-fieldset">
+        <legend>循环模式</legend>
+        <label>
+          <input
+            type="radio"
+            name="loop-mode"
+            checked={!isInfinite}
+            onChange={() => onLoopCountChange(finiteLoopCountRef.current)}
+          />
+          有限循环
+        </label>
+        <label>
+          <input
+            type="radio"
+            name="loop-mode"
+            checked={isInfinite}
+            onChange={() => onLoopCountChange(null)}
+          />
+          无限循环
+        </label>
+      </fieldset>
       <div className="settings-grid">
         <label className="field">
           <span>循环次数</span>
@@ -34,8 +65,13 @@ export function PlaybackSettings({
             type="number"
             min="1"
             step="1"
-            value={displayNumber(loopCount)}
-            onChange={(event) => onLoopCountChange(event.currentTarget.valueAsNumber)}
+            value={displayNumber(isInfinite ? finiteLoopCountRef.current : loopCount)}
+            onChange={(event) => {
+              finiteLoopCountRef.current = event.currentTarget.valueAsNumber;
+              onLoopCountChange(event.currentTarget.valueAsNumber);
+            }}
+            disabled={isInfinite}
+            aria-invalid={Boolean(loopValidationError)}
           />
         </label>
         <label className="field">
@@ -46,6 +82,7 @@ export function PlaybackSettings({
             step="0.1"
             value={displayNumber(speedMultiplier)}
             onChange={(event) => onSpeedMultiplierChange(event.currentTarget.valueAsNumber)}
+            aria-invalid={Boolean(speedValidationError)}
           />
         </label>
       </div>

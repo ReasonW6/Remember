@@ -29,6 +29,13 @@ export function shortcutFromEvent(event: ShortcutEventLike) {
   return parts.join("+");
 }
 
+export function isAllowedGlobalShortcut(shortcut: string) {
+  if (shortcut.includes("+")) {
+    return true;
+  }
+  return /^F([1-9]|1[0-9]|2[0-4])$/.test(shortcut);
+}
+
 function keyLabel(key: string) {
   if (key.length === 1) {
     return key.toUpperCase();

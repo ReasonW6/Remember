@@ -13,6 +13,7 @@ fn recording() -> Recording {
             elapsed_ms: 1,
             vk_code: 0x41,
             scan_code: 0x1E,
+            extended: false,
             state: KeyState::Pressed,
         }],
     )
@@ -50,6 +51,59 @@ fn starts_and_stops_recording() {
 }
 
 #[test]
+fn stopped_recording_stays_pending_until_the_matching_recording_is_saved() {
+    let mut app = AppController::new();
+    app.start_recording("pending", 100, "2026-06-29T00:00:00Z")
+        .expect("start");
+    let recording = app.stop_recording(150).expect("stop");
+
+    assert_eq!(app.recording_pending_save(), Some(&recording));
+
+    let stale = Recording::new("stale", "2026-06-29T00:00:01Z", Vec::new());
+    app.mark_recording_saved(&stale);
+    assert_eq!(app.recording_pending_save(), Some(&recording));
+
+    app.mark_recording_saved(&recording);
+    assert!(app.recording_pending_save().is_none());
+}
+
+#[test]
+fn pending_recording_cannot_be_replaced_by_a_new_recording() {
+    let mut app = AppController::new();
+    app.start_recording("pending", 100, "2026-06-29T00:00:00Z")
+        .expect("start");
+    let recording = app.stop_recording(150).expect("stop");
+
+    let error = app
+        .start_recording("replacement", 200, "2026-06-29T00:00:01Z")
+        .expect_err("pending recording must be preserved");
+
+    assert!(error.contains("current recording has not been saved"));
+    assert_eq!(app.current_recording(), Some(&recording));
+    assert_eq!(app.recording_pending_save(), Some(&recording));
+}
+
+#[test]
+fn pending_recording_cannot_be_replaced_by_a_loaded_recording() {
+    let mut app = AppController::new();
+    app.start_recording("pending", 100, "2026-06-29T00:00:00Z")
+        .expect("start");
+    let recording = app.stop_recording(150).expect("stop");
+
+    let error = app
+        .set_recording(Recording::new(
+            "replacement",
+            "2026-06-29T00:00:01Z",
+            Vec::new(),
+        ))
+        .expect_err("pending recording must be preserved");
+
+    assert!(error.contains("current recording has not been saved"));
+    assert_eq!(app.current_recording(), Some(&recording));
+    assert_eq!(app.recording_pending_save(), Some(&recording));
+}
+
+#[test]
 fn captures_input_while_recording() {
     let mut app = AppController::new();
     app.start_recording("test", 100, "2026-06-29T00:00:00Z")
@@ -59,6 +113,7 @@ fn captures_input_while_recording() {
         at_ms: 125,
         vk_code: 0x41,
         scan_code: 0x1E,
+        extended: false,
         state: KeyState::Pressed,
     });
 
@@ -69,6 +124,7 @@ fn captures_input_while_recording() {
             elapsed_ms: 25,
             vk_code: 0x41,
             scan_code: 0x1E,
+            extended: false,
             state: KeyState::Pressed,
         }]
     );
@@ -83,6 +139,7 @@ fn recognizes_default_playback_hotkey_from_keyboard_hook() {
         at_ms: 125,
         vk_code: 0x7B,
         scan_code: 0x58,
+        extended: false,
         state: KeyState::Pressed,
     });
 
@@ -97,20 +154,72 @@ fn recognizes_same_record_stop_hotkey_as_toggle() {
         at_ms: 125,
         vk_code: 0x77,
         scan_code: 0x42,
+        extended: false,
         state: KeyState::Pressed,
     });
     assert_eq!(action, Some(ControlHotkeyAction::Record));
 
     app.start_recording_from_hotkey("test", 125, "2026-06-29T00:00:00Z")
         .expect("start");
+    let release = app.control_hotkey_action(RawInputEvent::Key {
+        at_ms: 149,
+        vk_code: 0x77,
+        scan_code: 0x42,
+        extended: false,
+        state: KeyState::Released,
+    });
+    assert_eq!(release, None);
     let action = app.control_hotkey_action(RawInputEvent::Key {
         at_ms: 150,
         vk_code: 0x77,
         scan_code: 0x42,
+        extended: false,
         state: KeyState::Pressed,
     });
 
     assert_eq!(action, Some(ControlHotkeyAction::Stop));
+}
+
+#[test]
+fn ignores_repeated_control_hotkey_press_until_release() {
+    let mut app = AppController::new();
+
+    let first = app.control_hotkey_decision(RawInputEvent::Key {
+        at_ms: 100,
+        vk_code: 0x77,
+        scan_code: 0x42,
+        extended: false,
+        state: KeyState::Pressed,
+    });
+    let repeated = app.control_hotkey_decision(RawInputEvent::Key {
+        at_ms: 101,
+        vk_code: 0x77,
+        scan_code: 0x42,
+        extended: false,
+        state: KeyState::Pressed,
+    });
+
+    assert_eq!(first.action, Some(ControlHotkeyAction::Record));
+    assert!(repeated.suppress);
+    assert_eq!(repeated.action, None);
+}
+
+#[test]
+fn playback_hotkey_stops_active_playback() {
+    let mut app = AppController::new();
+    app.set_recording(recording()).expect("load");
+    app.start_playback(1, 1.0).expect("play");
+
+    let decision = app.control_hotkey_decision(RawInputEvent::Key {
+        at_ms: 125,
+        vk_code: 0x7B,
+        scan_code: 0x58,
+        extended: false,
+        state: KeyState::Pressed,
+    });
+
+    assert!(decision.suppress);
+    assert_eq!(decision.action, Some(ControlHotkeyAction::Stop));
 }
 
 #[test]
@@ -127,12 +236,14 @@ fn keeps_modifier_state_for_idle_hook_hotkeys() {
         at_ms: 125,
         vk_code: 0x11,
         scan_code: 0x1D,
+        extended: false,
         state: KeyState::Pressed,
     };
     let shift = RawInputEvent::Key {
         at_ms: 126,
         vk_code: 0x10,
         scan_code: 0x2A,
+        extended: false,
         state: KeyState::Pressed,
     };
     app.control_hotkey_action(ctrl);
@@ -144,6 +255,7 @@ fn keeps_modifier_state_for_idle_hook_hotkeys() {
         at_ms: 127,
         vk_code: 0x52,
         scan_code: 0x13,
+        extended: false,
         state: KeyState::Pressed,
     });
 
@@ -158,6 +270,7 @@ fn records_modifier_releases_when_hook_calls_decision_and_filter() {
         at_ms: 100,
         vk_code: 0x77,
         scan_code: 0x42,
+        extended: false,
         state: KeyState::Pressed,
     });
     assert_eq!(
@@ -175,6 +288,7 @@ fn records_modifier_releases_when_hook_calls_decision_and_filter() {
         at_ms: 101,
         vk_code: 0x77,
         scan_code: 0x42,
+        extended: false,
         state: KeyState::Released,
     });
     assert!(decision.suppress);
@@ -189,6 +303,7 @@ fn records_modifier_releases_when_hook_calls_decision_and_filter() {
             at_ms: 100 + offset,
             vk_code,
             scan_code,
+            extended: false,
             state,
         };
         let decision = app.control_hotkey_decision(event);
@@ -204,24 +319,28 @@ fn records_modifier_releases_when_hook_calls_decision_and_filter() {
                 elapsed_ms: 10,
                 vk_code: 0x10,
                 scan_code: 0x2A,
+                extended: false,
                 state: KeyState::Pressed,
             },
             MacroStep::Key {
                 elapsed_ms: 11,
                 vk_code: 0x41,
                 scan_code: 0x1E,
+                extended: false,
                 state: KeyState::Pressed,
             },
             MacroStep::Key {
                 elapsed_ms: 12,
                 vk_code: 0x41,
                 scan_code: 0x1E,
+                extended: false,
                 state: KeyState::Released,
             },
             MacroStep::Key {
                 elapsed_ms: 13,
                 vk_code: 0x10,
                 scan_code: 0x2A,
+                extended: false,
                 state: KeyState::Released,
             },
         ]
@@ -244,6 +363,7 @@ fn ignores_hotkey_pressed_with_extra_modifiers() {
             at_ms: 100 + offset,
             vk_code,
             scan_code,
+            extended: false,
             state,
         };
         let decision = app.control_hotkey_decision(event);
@@ -266,6 +386,7 @@ fn swallows_playback_hotkey_while_recording_without_action() {
         at_ms: 110,
         vk_code: 0x7B,
         scan_code: 0x58,
+        extended: false,
         state: KeyState::Pressed,
     });
     assert_eq!(
@@ -280,6 +401,7 @@ fn swallows_playback_hotkey_while_recording_without_action() {
         at_ms: 111,
         vk_code: 0x7B,
         scan_code: 0x58,
+        extended: false,
         state: KeyState::Released,
     });
     assert!(decision.suppress);
@@ -303,6 +425,7 @@ fn suppresses_default_control_hotkeys_while_recording() {
                 at_ms: 100 + offset,
                 vk_code,
                 scan_code,
+                extended: false,
                 state,
             });
         }
@@ -336,6 +459,7 @@ fn suppresses_control_hotkey_modifier_releases_while_recording() {
             at_ms: 100 + offset,
             vk_code,
             scan_code,
+            extended: false,
             state,
         });
     }
@@ -352,6 +476,7 @@ fn suppresses_record_hotkey_release_tail_when_started_from_idle_hotkey() {
         at_ms: 110,
         vk_code: 0x77,
         scan_code: 0x42,
+        extended: false,
         state: KeyState::Pressed,
     });
 
@@ -362,6 +487,7 @@ fn suppresses_record_hotkey_release_tail_when_started_from_idle_hotkey() {
         at_ms: 121,
         vk_code: 0x77,
         scan_code: 0x42,
+        extended: false,
         state: KeyState::Released,
     });
 
@@ -389,6 +515,7 @@ fn suppresses_custom_control_hotkey_chords_while_recording() {
             at_ms: 100 + offset,
             vk_code,
             scan_code,
+            extended: false,
             state,
         });
     }
@@ -412,6 +539,7 @@ fn suppresses_custom_record_hotkey_release_tail_when_started_from_idle_hotkey() 
             at_ms: 100 + offset,
             vk_code,
             scan_code,
+            extended: false,
             state: KeyState::Pressed,
         });
     }
@@ -424,6 +552,7 @@ fn suppresses_custom_record_hotkey_release_tail_when_started_from_idle_hotkey() 
             at_ms: 120 + offset,
             vk_code,
             scan_code,
+            extended: false,
             state: KeyState::Released,
         });
     }
@@ -450,6 +579,7 @@ fn preserves_non_control_shortcuts_while_recording() {
             at_ms: 100 + offset,
             vk_code,
             scan_code,
+            extended: false,
             state,
         });
     }
@@ -462,36 +592,42 @@ fn preserves_non_control_shortcuts_while_recording() {
                 elapsed_ms: 10,
                 vk_code: 0x11,
                 scan_code: 0x1D,
+                extended: false,
                 state: KeyState::Pressed,
             },
             MacroStep::Key {
                 elapsed_ms: 11,
                 vk_code: 0x12,
                 scan_code: 0x38,
+                extended: false,
                 state: KeyState::Pressed,
             },
             MacroStep::Key {
                 elapsed_ms: 12,
                 vk_code: 0x41,
                 scan_code: 0x1E,
+                extended: false,
                 state: KeyState::Pressed,
             },
             MacroStep::Key {
                 elapsed_ms: 13,
                 vk_code: 0x41,
                 scan_code: 0x1E,
+                extended: false,
                 state: KeyState::Released,
             },
             MacroStep::Key {
                 elapsed_ms: 14,
                 vk_code: 0x12,
                 scan_code: 0x38,
+                extended: false,
                 state: KeyState::Released,
             },
             MacroStep::Key {
                 elapsed_ms: 15,
                 vk_code: 0x11,
                 scan_code: 0x1D,
+                extended: false,
                 state: KeyState::Released,
             },
         ]
@@ -506,6 +642,7 @@ fn ignores_captured_input_while_idle() {
         at_ms: 125,
         vk_code: 0x41,
         scan_code: 0x1E,
+        extended: false,
         state: KeyState::Pressed,
     });
 
@@ -531,7 +668,8 @@ fn loads_recording_and_starts_playback() {
     let run = app.start_playback(2, 1.0).expect("play");
 
     assert_eq!(app.mode(), AppMode::Playing);
-    assert_eq!(run.actions.len(), 2);
+    assert_eq!(run.recording.steps.len(), 1);
+    assert_eq!(run.settings.loop_count, Some(2));
 }
 
 #[test]
@@ -545,12 +683,14 @@ fn starts_playback_with_current_settings() {
                 elapsed_ms: 0,
                 vk_code: 0x41,
                 scan_code: 0x1E,
+                extended: false,
                 state: KeyState::Pressed,
             },
             MacroStep::Key {
                 elapsed_ms: 100,
                 vk_code: 0x41,
                 scan_code: 0x1E,
+                extended: false,
                 state: KeyState::Released,
             },
         ],
@@ -560,19 +700,26 @@ fn starts_playback_with_current_settings() {
 
     let run = app.start_playback_with_current_settings().expect("play");
 
-    assert_eq!(run.actions.len(), 6);
-    assert_eq!(run.actions[1].delay_ms, 50);
+    assert_eq!(run.recording.steps.len(), 2);
+    assert_eq!(run.settings.loop_count, Some(3));
+    assert_eq!(run.settings.speed_multiplier, 2.0);
     assert_eq!(app.mode(), AppMode::Playing);
 }
 
 #[test]
-fn stop_playback_returns_to_idle() {
+fn stop_playback_stays_playing_until_worker_finishes_cleanup() {
     let mut app = AppController::new();
     app.set_recording(recording()).expect("load");
-    app.start_playback(1, 1.0).expect("play");
+    let run = app.start_playback(1, 1.0).expect("play");
+    let token = app.stop_token();
 
     app.stop_playback();
 
+    assert!(token.is_stopped());
+    assert_eq!(app.mode(), AppMode::Playing);
+    assert_eq!(app.ui_state().message, "Stopping playback");
+
+    assert!(app.finish_playback_if_current(run.id, "Playback stopped", false));
     assert_eq!(app.mode(), AppMode::Idle);
 }
 
@@ -602,8 +749,8 @@ fn stop_active_stops_playback_and_requests_stop_token() {
 
     assert!(token.is_stopped());
     let state = app.ui_state();
-    assert_eq!(state.mode, AppMode::Idle);
-    assert_eq!(state.message, "Playback stopped");
+    assert_eq!(state.mode, AppMode::Playing);
+    assert_eq!(state.message, "Stopping playback");
 }
 
 #[test]
@@ -624,16 +771,17 @@ fn stale_playback_finish_cannot_mark_idle_over_new_playback() {
 
     let first = app.start_playback(1, 1.0).expect("first playback");
     app.stop_playback();
+    assert!(app.finish_playback_if_current(first.id, "Playback stopped", false));
     let second = app.start_playback(1, 1.0).expect("second playback");
 
-    let changed = app.finish_playback_if_current(first.id, "Playback finished");
+    let changed = app.finish_playback_if_current(first.id, "Playback finished", false);
 
     assert!(!changed);
     let state = app.ui_state();
     assert_eq!(state.mode, AppMode::Playing);
     assert_eq!(state.message, "Playing");
 
-    let changed = app.finish_playback_if_current(second.id, "Playback finished");
+    let changed = app.finish_playback_if_current(second.id, "Playback finished", false);
 
     assert!(changed);
     let state = app.ui_state();
@@ -648,10 +796,11 @@ fn stale_playback_finish_cannot_mark_idle_over_recording() {
 
     let playback = app.start_playback(1, 1.0).expect("playback");
     app.stop_playback();
+    assert!(app.finish_playback_if_current(playback.id, "Playback stopped", false));
     app.start_recording("active", 100, "2026-06-29T00:00:00Z")
         .expect("start recording");
 
-    let changed = app.finish_playback_if_current(playback.id, "Playback finished");
+    let changed = app.finish_playback_if_current(playback.id, "Playback finished", false);
 
     assert!(!changed);
     let state = app.ui_state();
@@ -675,7 +824,8 @@ fn rejects_playback_reentry_and_preserves_stop_token() {
 
     assert!(error.contains("cannot play while playing"));
     assert!(token.is_stopped());
-    assert_eq!(app.mode(), AppMode::Idle);
+    assert_eq!(app.mode(), AppMode::Playing);
+    assert_eq!(app.ui_state().message, "Stopping playback");
 }
 
 #[test]
@@ -788,7 +938,7 @@ fn ui_state_tracks_mode_message_and_recording_summary() {
     assert_eq!(state.duration_ms, 50);
     assert_eq!(state.message, "Recording stopped");
 
-    app.start_playback(1, 1.0).expect("play");
+    let run = app.start_playback(1, 1.0).expect("play");
     let state = app.ui_state();
     assert_eq!(state.mode, AppMode::Playing);
     assert_eq!(state.recording_name.as_deref(), Some("active"));
@@ -796,7 +946,32 @@ fn ui_state_tracks_mode_message_and_recording_summary() {
 
     app.stop_playback();
     let state = app.ui_state();
-    assert_eq!(state.mode, AppMode::Idle);
+    assert_eq!(state.mode, AppMode::Playing);
     assert_eq!(state.recording_name.as_deref(), Some("active"));
+    assert_eq!(state.message, "Stopping playback");
+
+    assert!(app.finish_playback_if_current(run.id, "Playback stopped", false));
+    let state = app.ui_state();
+    assert_eq!(state.mode, AppMode::Idle);
     assert_eq!(state.message, "Playback stopped");
+}
+
+#[test]
+fn ui_state_revision_increases_and_marks_playback_errors() {
+    let mut app = AppController::new();
+    let initial = app.ui_state();
+    app.set_recording(recording()).expect("load");
+    let loaded = app.ui_state();
+    let run = app.start_playback(1, 1.0).expect("play");
+    let playing = app.ui_state();
+
+    assert!(loaded.revision > initial.revision);
+    assert!(playing.revision > loaded.revision);
+    assert!(!playing.message_is_error);
+
+    assert!(app.finish_playback_if_current(run.id, "executor failed", true));
+    let failed = app.ui_state();
+    assert!(failed.revision > playing.revision);
+    assert!(failed.message_is_error);
+    assert_eq!(failed.message, "executor failed");
 }

@@ -4,10 +4,13 @@
   "description": "Main window permissions for Remember.",
   "windows": ["main"],
   "permissions": [
-    "core:default",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
     "core:window:allow-start-dragging",
     "core:window:allow-minimize",
     "core:window:allow-close",
-    "dialog:default"
+    "dialog:allow-open",
+    "dialog:allow-save",
+    "dialog:allow-ask"
   ]
 }

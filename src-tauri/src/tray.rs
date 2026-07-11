@@ -1,3 +1,4 @@
+use crate::commands;
 use tauri::{
     menu::MenuBuilder,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -16,7 +17,14 @@ pub fn setup(app: &AppHandle) -> Result<(), String> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id() {
             id if id == "show" => show_main_window(app),
-            id if id == "quit" => app.exit(0),
+            id if id == "quit" => {
+                if let Err(error) = commands::prepare_for_exit(app) {
+                    eprintln!("Remember could not exit safely: {error}");
+                    show_main_window(app);
+                    return;
+                }
+                app.exit(0);
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {

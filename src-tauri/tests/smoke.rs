@@ -45,22 +45,58 @@ fn main_window_uses_custom_titlebar() {
 }
 
 #[test]
-fn main_window_capability_allows_core_events_and_dialogs() {
+fn production_webview_uses_a_restrictive_csp() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let capability = std::fs::read_to_string(format!("{manifest_dir}/capabilities/default.json"))
-        .expect("read default capability");
+    let config = std::fs::read_to_string(format!("{manifest_dir}/tauri.conf.json"))
+        .expect("read tauri config");
+    let config: serde_json::Value = serde_json::from_str(&config).expect("parse tauri config");
+    let csp = config["app"]["security"]["csp"]
+        .as_str()
+        .expect("CSP should be configured as a string");
+    let dev_csp = config["app"]["security"]["devCsp"]
+        .as_str()
+        .expect("development CSP should be configured as a string");
 
-    assert!(capability.contains("\"core:default\""));
-    assert!(capability.contains("\"dialog:default\""));
+    assert!(csp.contains("default-src 'self'"));
+    assert!(csp.contains("connect-src ipc: http://ipc.localhost"));
+    assert!(csp.contains("object-src 'none'"));
+    assert!(csp.contains("frame-ancestors 'none'"));
+    assert!(csp.contains("form-action 'none'"));
+    assert!(!csp.contains("localhost:1420"));
+    assert!(!csp.contains("asset:"));
+    assert!(!csp.contains("'unsafe-inline'"));
+    assert!(!csp.contains("'unsafe-eval'"));
+
+    assert!(dev_csp.contains("http://localhost:1420"));
+    assert!(dev_csp.contains("ws://localhost:1420"));
+    assert!(dev_csp.contains("style-src 'self' 'unsafe-inline'"));
 }
 
 #[test]
-fn main_window_capability_allows_custom_titlebar_controls() {
+fn main_window_capability_uses_only_required_events_windows_and_dialogs() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let capability = std::fs::read_to_string(format!("{manifest_dir}/capabilities/default.json"))
         .expect("read default capability");
+    let capability: serde_json::Value =
+        serde_json::from_str(&capability).expect("parse default capability");
+    let permissions = capability["permissions"]
+        .as_array()
+        .expect("permissions should be an array");
+    let has = |permission: &str| permissions.iter().any(|value| value == permission);
 
-    assert!(capability.contains("\"core:window:allow-start-dragging\""));
-    assert!(capability.contains("\"core:window:allow-minimize\""));
-    assert!(capability.contains("\"core:window:allow-close\""));
+    assert!(!has("core:default"));
+    assert!(!has("dialog:default"));
+    for required in [
+        "core:event:allow-listen",
+        "core:event:allow-unlisten",
+        "core:window:allow-start-dragging",
+        "core:window:allow-minimize",
+        "core:window:allow-close",
+        "dialog:allow-open",
+        "dialog:allow-save",
+        "dialog:allow-ask",
+    ] {
+        assert!(has(required), "missing {required}");
+    }
+    assert_eq!(permissions.len(), 8);
 }

@@ -81,11 +81,18 @@ pub fn load_config(app: &AppHandle) -> Result<HotkeyConfig, String> {
     }
 
     let raw = fs::read_to_string(&path).map_err(|error| error.to_string())?;
-    match serde_json::from_str::<HotkeyConfig>(&raw) {
-        Ok(config) => normalize_config(&config),
+    Ok(config_from_json_or_default(&raw))
+}
+
+fn config_from_json_or_default(raw: &str) -> HotkeyConfig {
+    let loaded = serde_json::from_str::<HotkeyConfig>(raw)
+        .map_err(|error| error.to_string())
+        .and_then(|config| normalize_config(&config));
+    match loaded {
+        Ok(config) => config,
         Err(error) => {
             eprintln!("Remember hotkey config ignored: {error}");
-            Ok(HotkeyConfig::default())
+            HotkeyConfig::default()
         }
     }
 }
@@ -123,7 +130,7 @@ pub fn register(
         let _ = app;
         let _ = allow_conflicts;
         let _ = config;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -278,7 +285,40 @@ fn canonical_shortcut(shortcut: &str) -> Result<String, String> {
     if is_modifier_vk(vk_code) && parsed.mods.is_empty() {
         return Err("hotkey key cannot be only a modifier".to_string());
     }
+    if parsed.mods.is_empty() && !is_function_key(parsed.key) {
+        return Err("unmodified hotkey must be F1-F24".to_string());
+    }
     Ok(display_shortcut(parsed))
+}
+
+fn is_function_key(code: Code) -> bool {
+    matches!(
+        code,
+        Code::F1
+            | Code::F2
+            | Code::F3
+            | Code::F4
+            | Code::F5
+            | Code::F6
+            | Code::F7
+            | Code::F8
+            | Code::F9
+            | Code::F10
+            | Code::F11
+            | Code::F12
+            | Code::F13
+            | Code::F14
+            | Code::F15
+            | Code::F16
+            | Code::F17
+            | Code::F18
+            | Code::F19
+            | Code::F20
+            | Code::F21
+            | Code::F22
+            | Code::F23
+            | Code::F24
+    )
 }
 
 fn control_hotkey_from_shortcut(shortcut: &str) -> Result<ControlHotkey, String> {
@@ -541,7 +581,7 @@ mod tests {
         let error = normalize_config(&HotkeyConfig {
             record: "F6".to_string(),
             playback: "F6".to_string(),
-            stop: "Esc".to_string(),
+            stop: "F8".to_string(),
         })
         .expect_err("duplicate keys");
 
@@ -549,9 +589,33 @@ mod tests {
     }
 
     #[test]
+    fn rejects_unsafe_unmodified_hotkeys() {
+        let error = normalize_config(&HotkeyConfig {
+            record: "A".to_string(),
+            playback: "F12".to_string(),
+            stop: "F8".to_string(),
+        })
+        .expect_err("unmodified letter hotkey");
+
+        assert!(error.contains("unmodified hotkey must be F1-F24"));
+    }
+
+    #[test]
+    fn allows_unmodified_function_key_hotkeys() {
+        assert!(normalize_config(&HotkeyConfig::default()).is_ok());
+    }
+
+    #[test]
+    fn unsafe_persisted_hotkeys_fall_back_to_defaults() {
+        let config = config_from_json_or_default(r#"{"record":"A","playback":"F12","stop":"F8"}"#);
+
+        assert_eq!(config, HotkeyConfig::default());
+    }
+
+    #[test]
     fn maps_supported_hotkeys_to_windows_vk_codes() {
-        assert_eq!(vk_code_for_key("R"), Ok(0x52));
-        assert_eq!(vk_code_for_key("0"), Ok(0x30));
+        assert_eq!(vk_code_for_key("Ctrl+R"), Ok(0x52));
+        assert_eq!(vk_code_for_key("Ctrl+0"), Ok(0x30));
         assert_eq!(vk_code_for_key("F8"), Ok(0x77));
         assert_eq!(vk_code_for_key("Ctrl+Shift+R"), Ok(0x52));
     }

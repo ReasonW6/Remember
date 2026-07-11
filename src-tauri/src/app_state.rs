@@ -1,6 +1,6 @@
 use crate::{
     model::{KeyState, Recording},
-    player::{build_playback_plan, PlaybackAction, PlaybackSettings, StopToken},
+    player::{PlaybackSettings, StopToken},
     recorder::{RawInputEvent, Recorder},
 };
 use serde::Serialize;
@@ -20,6 +20,8 @@ pub struct UiState {
     pub step_count: usize,
     pub duration_ms: u64,
     pub message: String,
+    pub message_is_error: bool,
+    pub revision: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +30,8 @@ pub struct PlaybackRunId(u64);
 #[derive(Debug, Clone)]
 pub struct PlaybackRun {
     pub id: PlaybackRunId,
-    pub actions: Vec<PlaybackAction>,
+    pub recording: Recording,
+    pub settings: PlaybackSettings,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -71,10 +74,13 @@ pub struct AppController {
     control_hotkeys: ControlHotkeySuppressor,
     playback_settings: PlaybackSettings,
     recording: Option<Recording>,
+    recording_needs_save: bool,
     stop_token: StopToken,
     next_playback_id: u64,
     active_playback_id: Option<PlaybackRunId>,
     message: String,
+    message_is_error: bool,
+    revision: u64,
 }
 
 impl Default for AppController {
@@ -87,17 +93,20 @@ impl AppController {
     pub fn new() -> Self {
         Self {
             mode: AppMode::Idle,
-            recorder: Recorder::new(50),
+            recorder: Recorder::new(16),
             control_hotkeys: ControlHotkeySuppressor::default(),
             playback_settings: PlaybackSettings {
-                loop_count: 1,
+                loop_count: Some(1),
                 speed_multiplier: 1.0,
             },
             recording: None,
+            recording_needs_save: false,
             stop_token: StopToken::default(),
             next_playback_id: 0,
             active_playback_id: None,
             message: "Idle".to_string(),
+            message_is_error: false,
+            revision: 0,
         }
     }
 
@@ -123,6 +132,8 @@ impl AppController {
                 .map(|recording| recording.duration_ms)
                 .unwrap_or(0),
             message: self.message.clone(),
+            message_is_error: self.message_is_error,
+            revision: self.revision,
         }
     }
 
@@ -156,14 +167,18 @@ impl AppController {
             AppMode::Recording => return Err("cannot record while recording".to_string()),
             AppMode::Playing => return Err("cannot record while playing".to_string()),
         }
+        self.ensure_recording_saved_before_replace()?;
         self.recorder.start(name, started_at_ms, created_at)?;
         self.control_hotkeys.reset();
         if suppress_record_hotkey_release_tail {
             self.control_hotkeys.suppress_record_hotkey_release_tail();
         }
         self.recording = None;
+        self.recording_needs_save = false;
         self.mode = AppMode::Recording;
         self.message = "Recording".to_string();
+        self.message_is_error = false;
+        self.bump_revision();
         Ok(())
     }
 
@@ -171,8 +186,11 @@ impl AppController {
         let recording = self.recorder.stop(stopped_at_ms)?;
         self.control_hotkeys.reset();
         self.recording = Some(recording.clone());
+        self.recording_needs_save = true;
         self.mode = AppMode::Idle;
         self.message = "Recording stopped".to_string();
+        self.message_is_error = false;
+        self.bump_revision();
         Ok(recording)
     }
 
@@ -204,15 +222,33 @@ impl AppController {
             AppMode::Recording => return Err("cannot load recording while recording".to_string()),
             AppMode::Playing => return Err("cannot load recording while playing".to_string()),
         }
+        self.ensure_recording_saved_before_replace()?;
         recording.validate()?;
         self.recording = Some(recording);
+        self.recording_needs_save = false;
         self.mode = AppMode::Idle;
         self.message = "Recording loaded".to_string();
+        self.message_is_error = false;
+        self.bump_revision();
         Ok(())
     }
 
     pub fn current_recording(&self) -> Option<&Recording> {
         self.recording.as_ref()
+    }
+
+    pub fn recording_pending_save(&self) -> Option<&Recording> {
+        if self.recording_needs_save {
+            self.recording.as_ref()
+        } else {
+            None
+        }
+    }
+
+    pub fn mark_recording_saved(&mut self, recording: &Recording) {
+        if self.recording.as_ref() == Some(recording) {
+            self.recording_needs_save = false;
+        }
     }
 
     pub fn saveable_recording(&self) -> Result<Recording, String> {
@@ -225,12 +261,15 @@ impl AppController {
         self.mode = AppMode::Idle;
         self.active_playback_id = None;
         self.message = message.into();
+        self.message_is_error = false;
+        self.bump_revision();
     }
 
     pub fn finish_playback_if_current(
         &mut self,
         id: PlaybackRunId,
         message: impl Into<String>,
+        message_is_error: bool,
     ) -> bool {
         if self.mode != AppMode::Playing || self.active_playback_id != Some(id) {
             return false;
@@ -239,24 +278,26 @@ impl AppController {
         self.mode = AppMode::Idle;
         self.active_playback_id = None;
         self.message = message.into();
+        self.message_is_error = message_is_error;
+        self.bump_revision();
         true
     }
 
     pub fn start_playback(
         &mut self,
-        loop_count: u32,
+        loop_count: impl Into<Option<u32>>,
         speed_multiplier: f64,
     ) -> Result<PlaybackRun, String> {
-        let settings = PlaybackSettings::new(loop_count, speed_multiplier)?;
+        let settings = PlaybackSettings::new(loop_count.into(), speed_multiplier)?;
         self.start_playback_with_settings(settings)
     }
 
     pub fn set_playback_settings(
         &mut self,
-        loop_count: u32,
+        loop_count: impl Into<Option<u32>>,
         speed_multiplier: f64,
     ) -> Result<(), String> {
-        self.playback_settings = PlaybackSettings::new(loop_count, speed_multiplier)?;
+        self.playback_settings = PlaybackSettings::new(loop_count.into(), speed_multiplier)?;
         Ok(())
     }
 
@@ -277,15 +318,19 @@ impl AppController {
             .recording
             .as_ref()
             .ok_or_else(|| "no recording loaded".to_string())?;
+        let recording = recording.clone();
         self.stop_token = StopToken::default();
         self.next_playback_id += 1;
         let id = PlaybackRunId(self.next_playback_id);
         self.active_playback_id = Some(id);
         self.mode = AppMode::Playing;
         self.message = "Playing".to_string();
+        self.message_is_error = false;
+        self.bump_revision();
         Ok(PlaybackRun {
             id,
-            actions: build_playback_plan(recording, settings),
+            recording,
+            settings,
         })
     }
 
@@ -293,10 +338,13 @@ impl AppController {
         if self.mode != AppMode::Playing {
             return;
         }
+        if self.stop_token.is_stopped() {
+            return;
+        }
         self.stop_token.request_stop();
-        self.mode = AppMode::Idle;
-        self.active_playback_id = None;
-        self.message = "Playback stopped".to_string();
+        self.message = "Stopping playback".to_string();
+        self.message_is_error = false;
+        self.bump_revision();
     }
 
     pub fn stop_active(&mut self, stopped_at_ms: u64) -> Result<(), String> {
@@ -324,6 +372,18 @@ impl AppController {
         self.control_hotkeys
             .set_hotkeys(hotkeys, record_hotkey, playback_hotkey, stop_hotkey);
     }
+
+    fn bump_revision(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    fn ensure_recording_saved_before_replace(&self) -> Result<(), String> {
+        if self.recording_needs_save {
+            Err("current recording has not been saved; save it before replacing it".to_string())
+        } else {
+            Ok(())
+        }
+    }
 }
 
 struct ControlHotkeySuppressor {
@@ -333,7 +393,7 @@ struct ControlHotkeySuppressor {
     // action path tracks its own modifier state to avoid stealing releases
     // from the recording filter.
     action_active_modifiers: Vec<u16>,
-    action_suppressed_key: Option<u16>,
+    action_suppressed_keys: Vec<u16>,
     suppressed_modifier_releases: Vec<u16>,
     suppress_unknown_modifier_release_tail: bool,
     suppressed_key: Option<u16>,
@@ -353,7 +413,7 @@ impl Default for ControlHotkeySuppressor {
             pending_modifiers: Vec::new(),
             active_modifiers: Vec::new(),
             action_active_modifiers: Vec::new(),
-            action_suppressed_key: None,
+            action_suppressed_keys: Vec::new(),
             suppressed_modifier_releases: Vec::new(),
             suppress_unknown_modifier_release_tail: false,
             suppressed_key: None,
@@ -404,18 +464,23 @@ impl ControlHotkeySuppressor {
                 ControlHotkeyDecision::PASS
             }
             KeyState::Pressed => {
+                if self.action_suppressed_keys.contains(&vk_code) {
+                    return ControlHotkeyDecision {
+                        suppress: true,
+                        action: None,
+                    };
+                }
                 if !self.is_action_hotkey(vk_code) {
                     return ControlHotkeyDecision::PASS;
                 }
-                self.action_suppressed_key = Some(vk_code);
+                self.action_suppressed_keys.push(vk_code);
                 ControlHotkeyDecision {
                     suppress: true,
                     action: self.action_for_key(vk_code, mode),
                 }
             }
             KeyState::Released => {
-                if self.action_suppressed_key == Some(vk_code) {
-                    self.action_suppressed_key = None;
+                if remove_first(&mut self.action_suppressed_keys, vk_code) {
                     return ControlHotkeyDecision {
                         suppress: true,
                         action: None,
@@ -446,7 +511,8 @@ impl ControlHotkeySuppressor {
         if matches_hotkey(&self.action_active_modifiers, self.playback_hotkey, vk_code) {
             return match mode {
                 AppMode::Idle => Some(ControlHotkeyAction::Playback),
-                AppMode::Recording | AppMode::Playing => None,
+                AppMode::Playing => Some(ControlHotkeyAction::Stop),
+                AppMode::Recording => None,
             };
         }
 
@@ -464,7 +530,7 @@ impl ControlHotkeySuppressor {
         self.pending_modifiers.clear();
         self.active_modifiers.clear();
         self.action_active_modifiers.clear();
-        self.action_suppressed_key = None;
+        self.action_suppressed_keys.clear();
         self.suppressed_modifier_releases.clear();
         self.suppress_unknown_modifier_release_tail = false;
         self.suppressed_key = None;
@@ -475,7 +541,7 @@ impl ControlHotkeySuppressor {
         self.active_modifiers.clear();
         self.suppressed_modifier_releases.clear();
         self.suppressed_key = Some(self.record_hotkey.vk_code);
-        self.action_suppressed_key = Some(self.record_hotkey.vk_code);
+        self.action_suppressed_keys.push(self.record_hotkey.vk_code);
         self.suppress_unknown_modifier_release_tail = true;
     }
 

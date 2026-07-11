@@ -10,13 +10,13 @@ const STOP_SLEEP_CHUNK: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlaybackSettings {
-    pub loop_count: u32,
+    pub loop_count: Option<u32>,
     pub speed_multiplier: f64,
 }
 
 impl PlaybackSettings {
-    pub fn new(loop_count: u32, speed_multiplier: f64) -> Result<Self, String> {
-        if loop_count == 0 {
+    pub fn new(loop_count: Option<u32>, speed_multiplier: f64) -> Result<Self, String> {
+        if loop_count == Some(0) {
             return Err("loop count must be at least 1".to_string());
         }
         if !speed_multiplier.is_finite() || speed_multiplier <= 0.0 {
@@ -50,7 +50,15 @@ pub trait StepExecutor {
 
     fn mouse_wheel(&self, x: i32, y: i32, delta: i32) -> Result<(), String>;
 
-    fn key(&self, vk_code: u16, scan_code: u16, state: KeyState) -> Result<(), String>;
+    fn key(
+        &self,
+        vk_code: u16,
+        scan_code: u16,
+        extended: bool,
+        state: KeyState,
+    ) -> Result<(), String>;
+
+    fn release_mouse_button(&self, button: MouseButton) -> Result<(), String>;
 }
 
 #[derive(Clone, Default)]
@@ -70,6 +78,63 @@ impl StopToken {
 
 pub fn scaled_delay_ms(delay_ms: u64, speed_multiplier: f64) -> u64 {
     ((delay_ms as f64) / speed_multiplier).round().max(0.0) as u64
+}
+
+pub fn play_recording<E: StepExecutor + ?Sized>(
+    recording: &Recording,
+    settings: PlaybackSettings,
+    executor: &E,
+    stop_token: &StopToken,
+) -> Result<(), String> {
+    recording.validate()?;
+
+    if recording.steps.is_empty() && recording.duration_ms == 0 {
+        return match settings.loop_count {
+            Some(_) => Ok(()),
+            None => {
+                while !stop_token.is_stopped() {
+                    thread::sleep(STOP_SLEEP_CHUNK);
+                }
+                Err("playback stopped".to_string())
+            }
+        };
+    }
+
+    let mut pressed_inputs = PressedInputs::default();
+    let mut completed_loops = 0_u32;
+
+    loop {
+        if settings
+            .loop_count
+            .is_some_and(|loop_count| completed_loops >= loop_count)
+        {
+            return pressed_inputs.release_all(executor);
+        }
+        if stop_token.is_stopped() {
+            return cleanup_and_return(
+                &mut pressed_inputs,
+                executor,
+                "playback stopped".to_string(),
+            );
+        }
+
+        let loop_started = Instant::now();
+        for step in &recording.steps {
+            let target_ms = scaled_delay_ms(step.elapsed_ms(), settings.speed_multiplier);
+            if let Err(error) = sleep_until(loop_started, target_ms, stop_token) {
+                return cleanup_and_return(&mut pressed_inputs, executor, error);
+            }
+            if let Err(error) = execute_step(step, executor, &mut pressed_inputs) {
+                return cleanup_and_return(&mut pressed_inputs, executor, error);
+            }
+        }
+
+        let duration_ms = scaled_delay_ms(recording.duration_ms, settings.speed_multiplier);
+        if let Err(error) = sleep_until(loop_started, duration_ms, stop_token) {
+            return cleanup_and_return(&mut pressed_inputs, executor, error);
+        }
+        completed_loops = completed_loops.saturating_add(1);
+    }
 }
 
 pub fn play_actions<E: StepExecutor + ?Sized>(
@@ -135,6 +200,22 @@ fn sleep_with_stop(delay_ms: u64, stop_token: &StopToken) -> Result<(), String> 
     }
 }
 
+fn sleep_until(started: Instant, target_ms: u64, stop_token: &StopToken) -> Result<(), String> {
+    let target = Duration::from_millis(target_ms);
+    loop {
+        if stop_token.is_stopped() {
+            return Err("playback stopped".to_string());
+        }
+
+        let elapsed = started.elapsed();
+        if elapsed >= target {
+            return Ok(());
+        }
+
+        thread::sleep(target.saturating_sub(elapsed).min(STOP_SLEEP_CHUNK));
+    }
+}
+
 fn execute_step<E: StepExecutor + ?Sized>(
     step: &MacroStep,
     executor: &E,
@@ -160,13 +241,14 @@ fn execute_step<E: StepExecutor + ?Sized>(
         MacroStep::Key {
             vk_code,
             scan_code,
+            extended,
             state,
             ..
         } => {
-            executor.key(*vk_code, *scan_code, *state)?;
+            executor.key(*vk_code, *scan_code, *extended, *state)?;
             match state {
-                KeyState::Pressed => pressed_inputs.add_key(*vk_code, *scan_code),
-                KeyState::Released => pressed_inputs.remove_key(*vk_code, *scan_code),
+                KeyState::Pressed => pressed_inputs.add_key(*vk_code, *scan_code, *extended),
+                KeyState::Released => pressed_inputs.remove_key(*vk_code, *scan_code, *extended),
             }
             Ok(())
         }
@@ -179,43 +261,38 @@ fn cleanup_and_return<E: StepExecutor + ?Sized>(
     executor: &E,
     err: String,
 ) -> Result<(), String> {
-    let _ = pressed_inputs.release_all(executor);
-    Err(err)
+    match pressed_inputs.release_all(executor) {
+        Ok(()) => Err(err),
+        Err(cleanup_error) => Err(format!("{err}; input cleanup failed: {cleanup_error}")),
+    }
 }
 
 #[derive(Default)]
 struct PressedInputs {
-    keys: Vec<(u16, u16)>,
-    mouse_buttons: Vec<PressedMouseButton>,
+    keys: Vec<(u16, u16, bool)>,
+    mouse_buttons: Vec<MouseButton>,
 }
 
 impl PressedInputs {
-    fn add_key(&mut self, vk_code: u16, scan_code: u16) {
-        if !self.keys.iter().any(|key| *key == (vk_code, scan_code)) {
-            self.keys.push((vk_code, scan_code));
+    fn add_key(&mut self, vk_code: u16, scan_code: u16, extended: bool) {
+        if !self.keys.contains(&(vk_code, scan_code, extended)) {
+            self.keys.push((vk_code, scan_code, extended));
         }
     }
 
-    fn remove_key(&mut self, vk_code: u16, scan_code: u16) {
+    fn remove_key(&mut self, vk_code: u16, scan_code: u16, extended: bool) {
         if let Some(index) = self
             .keys
             .iter()
-            .position(|key| *key == (vk_code, scan_code))
+            .position(|key| *key == (vk_code, scan_code, extended))
         {
             self.keys.remove(index);
         }
     }
 
-    fn add_mouse_button(&mut self, button: MouseButton, x: i32, y: i32) {
-        if let Some(pressed_button) = self
-            .mouse_buttons
-            .iter_mut()
-            .find(|pressed_button| pressed_button.button == button)
-        {
-            pressed_button.x = x;
-            pressed_button.y = y;
-        } else {
-            self.mouse_buttons.push(PressedMouseButton { button, x, y });
+    fn add_mouse_button(&mut self, button: MouseButton, _x: i32, _y: i32) {
+        if !self.mouse_buttons.contains(&button) {
+            self.mouse_buttons.push(button);
         }
     }
 
@@ -223,7 +300,7 @@ impl PressedInputs {
         if let Some(index) = self
             .mouse_buttons
             .iter()
-            .position(|pressed_button| pressed_button.button == button)
+            .position(|pressed_button| *pressed_button == button)
         {
             self.mouse_buttons.remove(index);
         }
@@ -232,51 +309,18 @@ impl PressedInputs {
     fn release_all<E: StepExecutor + ?Sized>(&mut self, executor: &E) -> Result<(), String> {
         let mut first_error = None;
 
-        for (vk_code, scan_code) in self.keys.drain(..).rev() {
-            if let Err(error) = executor.key(vk_code, scan_code, KeyState::Released) {
+        for (vk_code, scan_code, extended) in self.keys.drain(..).rev() {
+            if let Err(error) = executor.key(vk_code, scan_code, extended, KeyState::Released) {
                 first_error.get_or_insert(error);
             }
         }
 
-        for pressed_button in self.mouse_buttons.drain(..).rev() {
-            if let Err(error) = executor.mouse_button(
-                pressed_button.x,
-                pressed_button.y,
-                pressed_button.button,
-                ButtonState::Released,
-            ) {
+        for button in self.mouse_buttons.drain(..).rev() {
+            if let Err(error) = executor.release_mouse_button(button) {
                 first_error.get_or_insert(error);
             }
         }
 
         first_error.map_or(Ok(()), Err)
     }
-}
-
-struct PressedMouseButton {
-    button: MouseButton,
-    x: i32,
-    y: i32,
-}
-
-pub fn build_playback_plan(
-    recording: &Recording,
-    settings: PlaybackSettings,
-) -> Vec<PlaybackAction> {
-    let mut actions = Vec::new();
-    for loop_index in 0..settings.loop_count {
-        let mut previous_elapsed = 0;
-        for (step_index, step) in recording.steps.iter().cloned().enumerate() {
-            let elapsed = step.elapsed_ms();
-            let raw_delay = elapsed.saturating_sub(previous_elapsed);
-            previous_elapsed = elapsed;
-            actions.push(PlaybackAction {
-                loop_index,
-                step_index,
-                delay_ms: scaled_delay_ms(raw_delay, settings.speed_multiplier),
-                step,
-            });
-        }
-    }
-    actions
 }

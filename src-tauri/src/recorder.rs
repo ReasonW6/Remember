@@ -24,6 +24,7 @@ pub enum RawInputEvent {
         at_ms: u64,
         vk_code: u16,
         scan_code: u16,
+        extended: bool,
         state: KeyState,
     },
 }
@@ -106,6 +107,7 @@ impl Recorder {
                 at_ms,
                 vk_code,
                 scan_code,
+                extended,
                 state,
             } => {
                 let elapsed_ms = active.elapsed_ms(at_ms);
@@ -116,6 +118,7 @@ impl Recorder {
                     elapsed_ms,
                     vk_code,
                     scan_code,
+                    extended,
                     state,
                 });
             }

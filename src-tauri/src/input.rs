@@ -41,8 +41,18 @@ impl StepExecutor for SystemInputExecutor {
         platform::mouse_wheel(x, y, delta)
     }
 
-    fn key(&self, vk_code: u16, scan_code: u16, state: KeyState) -> Result<(), String> {
-        platform::key(vk_code, scan_code, state)
+    fn key(
+        &self,
+        vk_code: u16,
+        scan_code: u16,
+        extended: bool,
+        state: KeyState,
+    ) -> Result<(), String> {
+        platform::key(vk_code, scan_code, extended, state)
+    }
+
+    fn release_mouse_button(&self, button: MouseButton) -> Result<(), String> {
+        platform::release_mouse_button(button)
     }
 }
 
@@ -87,10 +97,11 @@ mod capture {
         UI::WindowsAndMessaging::{
             CallNextHookEx, DispatchMessageW, GetAncestor, GetForegroundWindow, PeekMessageW,
             SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WindowFromPoint, GA_ROOT,
-            HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, MSG, MSLLHOOKSTRUCT, PM_REMOVE, WH_KEYBOARD_LL,
-            WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-            WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
-            WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
+            HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, MSG, MSLLHOOKSTRUCT, PM_REMOVE,
+            WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
+            WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
+            WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1,
+            XBUTTON2,
         },
     };
 
@@ -205,7 +216,7 @@ mod capture {
     }
 
     fn current_main_window_hwnd() -> Option<usize> {
-        MAIN_WINDOW_HWND.lock().ok().and_then(|hwnd| *hwnd)
+        MAIN_WINDOW_HWND.try_lock().ok().and_then(|hwnd| *hwnd)
     }
 
     fn set_hotkey_action_sender(sender: mpsc::Sender<ControlHotkeyAction>) {
@@ -221,7 +232,7 @@ mod capture {
     }
 
     fn dispatch_hotkey_action(action: ControlHotkeyAction) -> bool {
-        let sender = match HOTKEY_ACTION_TX.lock() {
+        let sender = match HOTKEY_ACTION_TX.try_lock() {
             Ok(tx) => tx.clone(),
             Err(_) => None,
         };
@@ -348,7 +359,7 @@ mod capture {
     }
 
     fn handle_control_hotkey(event: RawInputEvent) -> ControlHotkeyDecision {
-        let shared = match CAPTURE_CONTROLLER.lock() {
+        let shared = match CAPTURE_CONTROLLER.try_lock() {
             Ok(controller) => controller.clone(),
             Err(_) => None,
         };
@@ -358,7 +369,7 @@ mod capture {
             action: None,
         };
         match shared {
-            Some(shared) => match shared.lock() {
+            Some(shared) => match shared.try_lock() {
                 Ok(mut controller) => controller.control_hotkey_decision(event),
                 Err(_) => pass,
             },
@@ -367,26 +378,26 @@ mod capture {
     }
 
     fn reset_control_hotkey_state() {
-        let shared = match CAPTURE_CONTROLLER.lock() {
+        let shared = match CAPTURE_CONTROLLER.try_lock() {
             Ok(controller) => controller.clone(),
             Err(_) => None,
         };
 
         if let Some(shared) = shared {
-            if let Ok(mut controller) = shared.lock() {
+            if let Ok(mut controller) = shared.try_lock() {
                 controller.reset_control_hotkey_state();
             }
         }
     }
 
     fn capture(event: RawInputEvent) {
-        let shared = match CAPTURE_CONTROLLER.lock() {
+        let shared = match CAPTURE_CONTROLLER.try_lock() {
             Ok(controller) => controller.clone(),
             Err(_) => None,
         };
 
         if let Some(shared) = shared {
-            if let Ok(mut controller) = shared.lock() {
+            if let Ok(mut controller) = shared.try_lock() {
                 controller.capture_input(event);
             }
         }
@@ -527,6 +538,7 @@ mod capture {
             at_ms: now_ms(),
             vk_code: info.vkCode.try_into().ok()?,
             scan_code: info.scanCode.try_into().ok()?,
+            extended: info.flags.contains(LLKHF_EXTENDED),
             state,
         })
     }
@@ -564,6 +576,14 @@ mod capture {
             (Some(event_root_hwnd), Some(main_window_hwnd))
                 if event_root_hwnd != 0 && event_root_hwnd == main_window_hwnd
         )
+    }
+
+    fn high_word(value: u32) -> u16 {
+        ((value >> 16) & 0xffff) as u16
+    }
+
+    fn signed_high_word(value: u32) -> i16 {
+        high_word(value) as i16
     }
 
     #[cfg(test)]
@@ -649,6 +669,7 @@ mod capture {
                 Some(RawInputEvent::Key {
                     vk_code: 0x41,
                     scan_code: 0x1E,
+                    extended: false,
                     state: KeyState::Pressed,
                     ..
                 })
@@ -663,14 +684,6 @@ mod capture {
             assert!(!same_root_window(None, Some(0x55)));
         }
     }
-
-    fn high_word(value: u32) -> u16 {
-        ((value >> 16) & 0xffff) as u16
-    }
-
-    fn signed_high_word(value: u32) -> i16 {
-        high_word(value) as i16
-    }
 }
 
 #[cfg(target_os = "windows")]
@@ -682,9 +695,10 @@ mod platform {
     use std::mem::size_of;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-        KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
-        MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
-        MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
+        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEEVENTF_LEFTDOWN,
+        MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN,
+        MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT,
+        MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
     };
     use windows::Win32::UI::WindowsAndMessaging::{SetCursorPos, XBUTTON1, XBUTTON2};
 
@@ -708,17 +722,32 @@ mod platform {
         send_mouse_input(MOUSEEVENTF_WHEEL, delta as u32)
     }
 
-    pub fn key(vk_code: u16, scan_code: u16, state: KeyState) -> Result<(), String> {
+    pub fn key(
+        vk_code: u16,
+        scan_code: u16,
+        extended: bool,
+        state: KeyState,
+    ) -> Result<(), String> {
         let mut flags = KEYBD_EVENT_FLAGS(0);
         if state == KeyState::Released {
             flags |= KEYEVENTF_KEYUP;
+        }
+        if scan_code != 0 {
+            flags |= KEYEVENTF_SCANCODE;
+        }
+        if extended {
+            flags |= KEYEVENTF_EXTENDEDKEY;
         }
 
         let input = INPUT {
             r#type: INPUT_KEYBOARD,
             Anonymous: INPUT_0 {
                 ki: KEYBDINPUT {
-                    wVk: VIRTUAL_KEY(vk_code),
+                    wVk: if scan_code == 0 {
+                        VIRTUAL_KEY(vk_code)
+                    } else {
+                        VIRTUAL_KEY(0)
+                    },
                     wScan: scan_code,
                     dwFlags: flags,
                     time: 0,
@@ -728,6 +757,11 @@ mod platform {
         };
 
         send_input(input)
+    }
+
+    pub fn release_mouse_button(button: MouseButton) -> Result<(), String> {
+        let (flags, mouse_data) = mouse_button_input(button, ButtonState::Released);
+        send_mouse_input(flags, mouse_data)
     }
 
     fn mouse_button_input(button: MouseButton, state: ButtonState) -> (MOUSE_EVENT_FLAGS, u32) {
@@ -796,7 +830,16 @@ mod platform {
         Err(WINDOWS_ONLY_MESSAGE.to_string())
     }
 
-    pub fn key(_vk_code: u16, _scan_code: u16, _state: KeyState) -> Result<(), String> {
+    pub fn key(
+        _vk_code: u16,
+        _scan_code: u16,
+        _extended: bool,
+        _state: KeyState,
+    ) -> Result<(), String> {
+        Err(WINDOWS_ONLY_MESSAGE.to_string())
+    }
+
+    pub fn release_mouse_button(_button: MouseButton) -> Result<(), String> {
         Err(WINDOWS_ONLY_MESSAGE.to_string())
     }
 }

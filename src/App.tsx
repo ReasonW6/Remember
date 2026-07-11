@@ -10,14 +10,16 @@ import * as rememberApi from "./lib/rememberApi";
 import { playFeedbackTone } from "./lib/sounds";
 import { displayErrorMessage, displayMessage, displayMode } from "./localization";
 import "./styles.css";
-import type { HotkeyConfig, RecordingFile, UiState } from "./types";
+import type { AppMode, HotkeyConfig, RecordingFile, UiState } from "./types";
 
 const idleState: UiState = {
   mode: "idle",
   recording_name: null,
   step_count: 0,
   duration_ms: 0,
-  message: "Idle"
+  message: "Idle",
+  revision: 0,
+  message_is_error: false
 };
 
 const defaultHotkeys: HotkeyConfig = {
@@ -31,20 +33,21 @@ const speedError = "速度必须是大于 0 的有效数字。";
 
 export function App() {
   const [state, setState] = useState<UiState>(idleState);
-  const [loopCount, setLoopCount] = useState(1);
+  const [loopCount, setLoopCount] = useState<number | null>(1);
   const [speedMultiplier, setSpeedMultiplier] = useState(1);
-  const [error, setError] = useState("");
+  const [actionError, setActionError] = useState("");
+  const [initializationErrors, setInitializationErrors] = useState<string[]>([]);
   const [recordings, setRecordings] = useState<RecordingFile[]>([]);
   const [selectedRecordingPath, setSelectedRecordingPath] = useState<string | null>(null);
   const [hotkeys, setHotkeys] = useState(defaultHotkeys);
   const [pendingCommand, setPendingCommand] = useState(false);
   const pendingCommandRef = useRef(false);
+  const latestRevisionRef = useRef(idleState.revision);
   const previousModeRef = useRef(idleState.mode);
-  const hasSoundBaselineRef = useRef(false);
   const hasRecording = state.step_count > 0;
   const isBusy = state.mode === "recording" || state.mode === "playing";
   const validationError = useMemo(() => {
-    if (!Number.isSafeInteger(loopCount) || loopCount < 1) {
+    if (loopCount !== null && (!Number.isInteger(loopCount) || loopCount < 1)) {
       return loopCountError;
     }
     if (!Number.isFinite(speedMultiplier) || speedMultiplier <= 0) {
@@ -55,18 +58,19 @@ export function App() {
 
   useEffect(() => {
     let disposed = false;
-    let unsubscribe: (() => void) | undefined;
+    let unsubscribeState: (() => void) | undefined;
+    let unsubscribeRecordings: (() => void) | undefined;
 
     rememberApi
       .getState()
       .then((nextState) => {
         if (!disposed) {
-          setState(nextState);
+          applyUiState(nextState);
         }
       })
       .catch((loadError: unknown) => {
         if (!disposed) {
-          setError(displayErrorMessage(loadError));
+          addInitializationError(loadError);
         }
       });
 
@@ -79,7 +83,7 @@ export function App() {
       })
       .catch((loadError: unknown) => {
         if (!disposed) {
-          setError(displayErrorMessage(loadError));
+          addInitializationError(loadError);
         }
       });
 
@@ -92,29 +96,55 @@ export function App() {
       })
       .catch((loadError: unknown) => {
         if (!disposed) {
-          setError(displayErrorMessage(loadError));
+          addInitializationError(loadError);
         }
       });
 
     rememberApi
       .subscribeToState((nextState) => {
-        setState(nextState);
+        if (!disposed) {
+          applyUiState(nextState);
+        }
       })
       .then((nextUnsubscribe) => {
-        unsubscribe = nextUnsubscribe;
+        unsubscribeState = nextUnsubscribe;
         if (disposed) {
-          unsubscribe();
+          unsubscribeState();
         }
       })
       .catch((subscribeError: unknown) => {
         if (!disposed) {
-          setError(displayErrorMessage(subscribeError));
+          addInitializationError(subscribeError);
+        }
+      });
+
+    rememberApi
+      .subscribeToRecordingsChanged(() => {
+        if (disposed) {
+          return;
+        }
+        void refreshRecordings().catch((refreshError: unknown) => {
+          if (!disposed) {
+            setActionError(displayErrorMessage(refreshError));
+          }
+        });
+      })
+      .then((nextUnsubscribe) => {
+        unsubscribeRecordings = nextUnsubscribe;
+        if (disposed) {
+          unsubscribeRecordings();
+        }
+      })
+      .catch((subscribeError: unknown) => {
+        if (!disposed) {
+          addInitializationError(subscribeError);
         }
       });
 
     return () => {
       disposed = true;
-      unsubscribe?.();
+      unsubscribeState?.();
+      unsubscribeRecordings?.();
     };
   }, []);
 
@@ -128,7 +158,7 @@ export function App() {
       .setPlaybackSettings(loopCount, speedMultiplier)
       .catch((settingsError: unknown) => {
         if (!disposed) {
-          setError(displayErrorMessage(settingsError));
+          setActionError(displayErrorMessage(settingsError));
         }
       });
 
@@ -138,29 +168,47 @@ export function App() {
   }, [loopCount, speedMultiplier, validationError]);
 
   useEffect(() => {
-    if (!hasSoundBaselineRef.current) {
-      hasSoundBaselineRef.current = true;
-      previousModeRef.current = state.mode;
-      return;
-    }
-
-    const previousMode = previousModeRef.current;
-    if (previousMode === state.mode) {
-      return;
-    }
-
     if (state.mode === "recording") {
+      setSelectedRecordingPath(null);
+    }
+  }, [state.mode]);
+
+  function addInitializationError(error: unknown) {
+    const message = displayErrorMessage(error);
+    setInitializationErrors((current) =>
+      current.includes(message) ? current : [...current, message]
+    );
+  }
+
+  function announceModeTransition(nextMode: AppMode) {
+    const previousMode = previousModeRef.current;
+    if (previousMode === nextMode) {
+      return;
+    }
+
+    if (nextMode === "recording") {
       playFeedbackTone("recording_start");
     } else if (previousMode === "recording") {
       playFeedbackTone("recording_stop");
-    } else if (state.mode === "playing") {
+    } else if (nextMode === "playing") {
       playFeedbackTone("playback_start");
     } else if (previousMode === "playing") {
       playFeedbackTone("playback_stop");
     }
 
-    previousModeRef.current = state.mode;
-  }, [state.mode]);
+    previousModeRef.current = nextMode;
+  }
+
+  function applyUiState(nextState: UiState) {
+    if (nextState.revision < latestRevisionRef.current) {
+      return false;
+    }
+
+    latestRevisionRef.current = nextState.revision;
+    announceModeTransition(nextState.mode);
+    setState(nextState);
+    return true;
+  }
 
   async function applyCommand(action: () => Promise<void>) {
     if (pendingCommandRef.current) {
@@ -171,10 +219,10 @@ export function App() {
     setPendingCommand(true);
 
     try {
-      setError("");
+      setActionError("");
       await action();
     } catch (actionError) {
-      setError(displayErrorMessage(actionError));
+      setActionError(displayErrorMessage(actionError));
     } finally {
       pendingCommandRef.current = false;
       setPendingCommand(false);
@@ -183,7 +231,7 @@ export function App() {
 
   function applyState(action: () => Promise<UiState>) {
     return applyCommand(async () => {
-      setState(await action());
+      applyUiState(await action());
     });
   }
 
@@ -194,7 +242,7 @@ export function App() {
   function handleRecord() {
     if (state.mode === "recording") {
       void applyCommand(async () => {
-        setState(await rememberApi.stopRecording());
+        applyUiState(await rememberApi.stopRecording());
         await refreshRecordings();
       });
       return;
@@ -213,7 +261,7 @@ export function App() {
   function handleStop() {
     if (state.mode === "recording") {
       void applyCommand(async () => {
-        setState(await rememberApi.stopRecording());
+        applyUiState(await rememberApi.stopRecording());
         await refreshRecordings();
       });
       return;
@@ -229,8 +277,7 @@ export function App() {
   function handleOpen() {
     void applyCommand(async () => {
       const loadedState = await rememberApi.openRecording();
-      if (loadedState) {
-        setState(loadedState);
+      if (loadedState && applyUiState(loadedState)) {
         setSelectedRecordingPath(null);
       }
     });
@@ -239,8 +286,9 @@ export function App() {
   function handleSelectRecording(path: string) {
     void applyCommand(async () => {
       const loadedState = await rememberApi.loadRecording(path);
-      setState(loadedState);
-      setSelectedRecordingPath(path);
+      if (applyUiState(loadedState)) {
+        setSelectedRecordingPath(path);
+      }
     });
   }
 
@@ -254,11 +302,28 @@ export function App() {
     });
   }
 
-  function handleDeleteRecording(path: string) {
+  function handleDeleteRecording(recording: RecordingFile, force: boolean) {
     void applyCommand(async () => {
-      await rememberApi.deleteRecording(path);
-      if (selectedRecordingPath === path) {
+      if (!force && !(await rememberApi.confirmDeleteRecording(recording.name))) {
+        return;
+      }
+
+      await rememberApi.deleteRecording(recording.path);
+      if (selectedRecordingPath === recording.path) {
         setSelectedRecordingPath(null);
+      }
+      await refreshRecordings();
+    });
+  }
+
+  function handleRenameRecording(recording: RecordingFile, newName: string) {
+    void applyCommand(async () => {
+      const renamedPath = await rememberApi.renameRecording(recording.path, newName);
+      if (selectedRecordingPath === recording.path) {
+        const loadedState = await rememberApi.loadRecording(renamedPath);
+        if (applyUiState(loadedState)) {
+          setSelectedRecordingPath(renamedPath);
+        }
       }
       await refreshRecordings();
     });
@@ -266,7 +331,7 @@ export function App() {
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.repeat || isHotkeyCaptureTarget(event.target)) {
+      if (event.repeat || event.isComposing || shouldIgnoreAppHotkey(event)) {
         return;
       }
 
@@ -286,9 +351,14 @@ export function App() {
         return;
       }
 
-      if (shortcut === hotkeys.playback && state.mode === "idle" && hasRecording) {
-        event.preventDefault();
-        handlePlay();
+      if (shortcut === hotkeys.playback) {
+        if (state.mode === "playing") {
+          event.preventDefault();
+          handleStop();
+        } else if (state.mode === "idle" && hasRecording && !validationError) {
+          event.preventDefault();
+          handlePlay();
+        }
         return;
       }
 
@@ -302,7 +372,10 @@ export function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [hasRecording, hotkeys, state.mode, loopCount, speedMultiplier, validationError]);
 
-  const displayedError = error;
+  const displayedError = [...initializationErrors, actionError].filter(Boolean).join(" ");
+  const displayedStateMessage = state.message_is_error
+    ? displayErrorMessage(state.message)
+    : displayMessage(state.message);
 
   return (
     <main className="app-shell">
@@ -316,13 +389,14 @@ export function App() {
               <p>模式：{displayMode(state.mode)}</p>
             </div>
           </div>
-          <p className="mode-summary">{displayMessage(state.message)}</p>
+          <p className="mode-summary">{displayedStateMessage}</p>
         </header>
         <div className="content-grid">
           <div className="main-stack">
             <Controls
               state={state}
               hasRecording={hasRecording}
+              playbackValid={!validationError}
               pendingCommand={pendingCommand}
               onRecord={handleRecord}
               onPlay={handlePlay}
@@ -336,6 +410,7 @@ export function App() {
               disabled={pendingCommand || isBusy}
               onSelect={handleSelectRecording}
               onDelete={handleDeleteRecording}
+              onRename={handleRenameRecording}
               onRefresh={handleRefreshRecordings}
             />
             <PlaybackSettings
@@ -357,6 +432,16 @@ export function App() {
   );
 }
 
-function isHotkeyCaptureTarget(target: EventTarget | null) {
-  return target instanceof Element && target.closest(".hotkey-capture-button") !== null;
+function shouldIgnoreAppHotkey(event: KeyboardEvent) {
+  const target = event.target;
+  if (!(target instanceof Element)) {
+    return false;
+  }
+
+  if (target.closest(".hotkey-capture-button")) {
+    return true;
+  }
+
+  const editableTarget = target.closest("input, textarea, select, [contenteditable='true']");
+  return editableTarget !== null && !/^F([1-9]|1[0-9]|2[0-4])$/.test(event.key);
 }

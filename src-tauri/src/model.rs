@@ -51,6 +51,8 @@ pub enum MacroStep {
         elapsed_ms: u64,
         vk_code: u16,
         scan_code: u16,
+        #[serde(default)]
+        extended: bool,
         state: KeyState,
     },
     Wait {

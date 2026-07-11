@@ -8,14 +8,19 @@ import {
   saveCurrentRecording,
   setHotkeys,
   deleteRecording,
-  setPlaybackSettings
+  renameRecording,
+  setPlaybackSettings,
+  startPlayback,
+  confirmDeleteRecording,
+  subscribeToRecordingsChanged
 } from "./rememberApi";
 
 const tauriMocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   listen: vi.fn(),
   open: vi.fn(),
-  save: vi.fn()
+  save: vi.fn(),
+  ask: vi.fn()
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -28,7 +33,8 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: tauriMocks.open,
-  save: tauriMocks.save
+  save: tauriMocks.save,
+  ask: tauriMocks.ask
 }));
 
 const loadedState: UiState = {
@@ -36,7 +42,9 @@ const loadedState: UiState = {
   recording_name: "loaded.remember.json",
   step_count: 3,
   duration_ms: 1200,
-  message: "Loaded recording"
+  message: "Loaded recording",
+  revision: 1,
+  message_is_error: false
 };
 
 describe("rememberApi", () => {
@@ -102,6 +110,19 @@ describe("rememberApi", () => {
     expect(tauriMocks.invoke).toHaveBeenCalledWith("delete_recording", { path });
   });
 
+  it("renames a saved recording", async () => {
+    const path = "C:\\Recordings\\selected.remember.json";
+    const renamedPath = "C:\\Recordings\\weekly-report.remember.json";
+    tauriMocks.invoke.mockResolvedValue(renamedPath);
+
+    await expect(renameRecording(path, "weekly report")).resolves.toBe(renamedPath);
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("rename_recording", {
+      path,
+      newName: "weekly report"
+    });
+  });
+
   it("saves playback settings for hotkey playback", async () => {
     tauriMocks.invoke.mockResolvedValue(undefined);
 
@@ -111,6 +132,50 @@ describe("rememberApi", () => {
       loopCount: 3,
       speedMultiplier: 2
     });
+  });
+
+  it("uses null loop counts for infinite playback", async () => {
+    tauriMocks.invoke.mockResolvedValue(undefined);
+
+    await expect(setPlaybackSettings(null, 2)).resolves.toBeUndefined();
+    await expect(startPlayback(null, 2)).resolves.toBeUndefined();
+
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(1, "set_playback_settings", {
+      loopCount: null,
+      speedMultiplier: 2
+    });
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(2, "start_playback", {
+      loopCount: null,
+      speedMultiplier: 2
+    });
+  });
+
+  it("asks before permanently deleting a recording", async () => {
+    tauriMocks.ask.mockResolvedValue(true);
+
+    await expect(confirmDeleteRecording("demo-auto")).resolves.toBe(true);
+
+    expect(tauriMocks.ask).toHaveBeenCalledWith(
+      "确定要永久删除录制“demo-auto”吗？",
+      expect.objectContaining({ title: "删除录制", kind: "warning" })
+    );
+  });
+
+  it("subscribes to recording library changes", async () => {
+    const callback = vi.fn();
+    const unlisten = vi.fn();
+    tauriMocks.listen.mockImplementation(async (_eventName, handler) => {
+      handler({ payload: null });
+      return unlisten;
+    });
+
+    await expect(subscribeToRecordingsChanged(callback)).resolves.toBe(unlisten);
+
+    expect(tauriMocks.listen).toHaveBeenCalledWith(
+      "remember://recordings-changed",
+      expect.any(Function)
+    );
+    expect(callback).toHaveBeenCalledTimes(1);
   });
 
   it("returns without invoking Rust when save dialog is cancelled", async () => {

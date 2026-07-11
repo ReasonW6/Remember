@@ -12,12 +12,14 @@ fn records_key_press_and_release() {
         at_ms: 1_010,
         vk_code: 0x41,
         scan_code: 0x1E,
+        extended: false,
         state: KeyState::Pressed,
     });
     recorder.capture(RawInputEvent::Key {
         at_ms: 1_040,
         vk_code: 0x41,
         scan_code: 0x1E,
+        extended: false,
         state: KeyState::Released,
     });
 
@@ -135,12 +137,14 @@ fn ignores_out_of_order_events_and_preserves_valid_recording() {
         at_ms: 1_050,
         vk_code: 0x41,
         scan_code: 0x1E,
+        extended: false,
         state: KeyState::Pressed,
     });
     recorder.capture(RawInputEvent::Key {
         at_ms: 1_040,
         vk_code: 0x41,
         scan_code: 0x1E,
+        extended: false,
         state: KeyState::Released,
     });
     recorder.capture(RawInputEvent::MouseMove {
@@ -191,6 +195,7 @@ fn stop_duration_is_at_least_final_step_elapsed() {
         at_ms: 1_060,
         vk_code: 0x41,
         scan_code: 0x1E,
+        extended: false,
         state: KeyState::Pressed,
     });
 

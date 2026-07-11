@@ -1,7 +1,7 @@
 use remember_lib::model::{ButtonState, KeyState, MacroStep, MouseButton, Recording};
 use remember_lib::player::{
-    build_playback_plan, play_actions, scaled_delay_ms, PlaybackAction, PlaybackSettings,
-    StepExecutor, StopToken,
+    play_actions, play_recording, scaled_delay_ms, PlaybackAction, PlaybackSettings, StepExecutor,
+    StopToken,
 };
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -16,12 +16,14 @@ fn recording() -> Recording {
                 elapsed_ms: 100,
                 vk_code: 0x41,
                 scan_code: 0x1E,
+                extended: false,
                 state: KeyState::Pressed,
             },
             MacroStep::Key {
                 elapsed_ms: 250,
                 vk_code: 0x41,
                 scan_code: 0x1E,
+                extended: false,
                 state: KeyState::Released,
             },
         ],
@@ -30,9 +32,10 @@ fn recording() -> Recording {
 
 #[test]
 fn validates_loop_count_and_speed() {
-    assert!(PlaybackSettings::new(1, 1.0).is_ok());
-    assert!(PlaybackSettings::new(0, 1.0).is_err());
-    assert!(PlaybackSettings::new(1, 0.0).is_err());
+    assert!(PlaybackSettings::new(Some(1), 1.0).is_ok());
+    assert!(PlaybackSettings::new(None, 1.0).is_ok());
+    assert!(PlaybackSettings::new(Some(0), 1.0).is_err());
+    assert!(PlaybackSettings::new(Some(1), 0.0).is_err());
 }
 
 #[test]
@@ -40,19 +43,6 @@ fn scales_delay_by_speed_multiplier() {
     assert_eq!(scaled_delay_ms(200, 1.0), 200);
     assert_eq!(scaled_delay_ms(200, 2.0), 100);
     assert_eq!(scaled_delay_ms(200, 0.5), 400);
-}
-
-#[test]
-fn builds_looped_playback_plan_with_step_deltas() {
-    let settings = PlaybackSettings::new(2, 2.0).expect("settings");
-    let plan = build_playback_plan(&recording(), settings);
-
-    assert_eq!(plan.len(), 4);
-    assert_eq!(plan[0].loop_index, 0);
-    assert_eq!(plan[0].step_index, 0);
-    assert_eq!(plan[0].delay_ms, 50);
-    assert_eq!(plan[1].delay_ms, 75);
-    assert_eq!(plan[2].loop_index, 1);
 }
 
 #[test]
@@ -117,24 +107,98 @@ impl StepExecutor for FakeExecutor {
         self.record_call(format!("wheel:{x}:{y}:{delta}"))
     }
 
-    fn key(&self, vk_code: u16, scan_code: u16, state: KeyState) -> Result<(), String> {
-        self.record_call(format!("key:{vk_code}:{scan_code}:{state:?}"))
+    fn key(
+        &self,
+        vk_code: u16,
+        scan_code: u16,
+        extended: bool,
+        state: KeyState,
+    ) -> Result<(), String> {
+        self.record_call(format!("key:{vk_code}:{scan_code}:{extended}:{state:?}"))
     }
+
+    fn release_mouse_button(&self, button: MouseButton) -> Result<(), String> {
+        self.record_call(format!("release-button:{button:?}"))
+    }
+}
+
+#[test]
+fn finite_playback_does_not_expand_large_loop_counts() {
+    let fake = FakeExecutor::default();
+    let recording = Recording::new("empty", "2026-06-29T00:00:00Z", Vec::new());
+    let settings = PlaybackSettings::new(Some(u32::MAX), 1.0).expect("settings");
+
+    play_recording(&recording, settings, &fake, &StopToken::default()).expect("play");
+
+    assert!(fake.calls.lock().unwrap().is_empty());
+}
+
+#[test]
+fn infinite_playback_runs_until_stopped() {
+    let fake = FakeExecutor::default();
+    let calls = fake.calls.clone();
+    let recording = Recording::new(
+        "infinite",
+        "2026-06-29T00:00:00Z",
+        vec![MacroStep::MouseMove {
+            elapsed_ms: 10,
+            x: 1,
+            y: 2,
+        }],
+    );
+    let token = StopToken::default();
+    let play_token = token.clone();
+
+    let handle = thread::spawn(move || {
+        play_recording(
+            &recording,
+            PlaybackSettings::new(None, 1.0).expect("settings"),
+            &fake,
+            &play_token,
+        )
+    });
+    thread::sleep(Duration::from_millis(45));
+    token.request_stop();
+
+    assert_eq!(handle.join().unwrap(), Err("playback stopped".to_string()));
+    assert!(calls.lock().unwrap().len() >= 2);
+}
+
+#[test]
+fn looped_playback_preserves_recorded_trailing_duration() {
+    let fake = FakeExecutor::default();
+    let recording = Recording {
+        version: 1,
+        name: "tail".to_string(),
+        created_at: "2026-06-29T00:00:00Z".to_string(),
+        duration_ms: 40,
+        steps: vec![MacroStep::Wait { elapsed_ms: 0 }],
+    };
+    let settings = PlaybackSettings::new(Some(2), 1.0).expect("settings");
+    let started = Instant::now();
+
+    play_recording(&recording, settings, &fake, &StopToken::default()).expect("play");
+
+    assert!(started.elapsed() >= Duration::from_millis(70));
 }
 
 #[test]
 fn play_actions_dispatches_steps_to_executor() {
     let fake = FakeExecutor::default();
     let calls = fake.calls.clone();
-    let settings = PlaybackSettings::new(1, 1000.0).expect("settings");
-    let plan = build_playback_plan(&recording(), settings);
     let token = StopToken::default();
 
-    play_actions(&plan, &fake, &token).expect("play");
+    play_recording(
+        &recording(),
+        PlaybackSettings::new(Some(1), 1000.0).expect("settings"),
+        &fake,
+        &token,
+    )
+    .expect("play");
 
     assert_eq!(
         calls.lock().unwrap().as_slice(),
-        ["key:65:30:Pressed", "key:65:30:Released"]
+        ["key:65:30:false:Pressed", "key:65:30:false:Released"]
     );
 }
 
@@ -181,6 +245,7 @@ fn executor_error_after_key_press_releases_key_before_returning_error() {
                 elapsed_ms: 0,
                 vk_code: 0x41,
                 scan_code: 0x1E,
+                extended: false,
                 state: KeyState::Pressed,
             },
         },
@@ -201,7 +266,11 @@ fn executor_error_after_key_press_releases_key_before_returning_error() {
     assert_eq!(result, Err("executor failed".to_string()));
     assert_eq!(
         calls.lock().unwrap().as_slice(),
-        ["key:65:30:Pressed", "move:10:20", "key:65:30:Released"]
+        [
+            "key:65:30:false:Pressed",
+            "move:10:20",
+            "key:65:30:false:Released"
+        ]
     );
 }
 
@@ -218,6 +287,7 @@ fn normal_completion_releases_tracked_key_presses() {
             elapsed_ms: 0,
             vk_code: 0x41,
             scan_code: 0x1E,
+            extended: true,
             state: KeyState::Pressed,
         },
     }];
@@ -226,7 +296,7 @@ fn normal_completion_releases_tracked_key_presses() {
 
     assert_eq!(
         calls.lock().unwrap().as_slice(),
-        ["key:65:30:Pressed", "key:65:30:Released"]
+        ["key:65:30:true:Pressed", "key:65:30:true:Released"]
     );
 }
 
@@ -243,6 +313,7 @@ fn normal_completion_returns_synthetic_release_error() {
             elapsed_ms: 0,
             vk_code: 0x41,
             scan_code: 0x1E,
+            extended: false,
             state: KeyState::Pressed,
         },
     }];
@@ -252,7 +323,7 @@ fn normal_completion_returns_synthetic_release_error() {
     assert_eq!(result, Err("executor failed".to_string()));
     assert_eq!(
         calls.lock().unwrap().as_slice(),
-        ["key:65:30:Pressed", "key:65:30:Released"]
+        ["key:65:30:false:Pressed", "key:65:30:false:Released"]
     );
 }
 
@@ -278,12 +349,12 @@ fn normal_completion_releases_tracked_mouse_presses() {
 
     assert_eq!(
         calls.lock().unwrap().as_slice(),
-        ["button:42:84:Left:Pressed", "button:42:84:Left:Released"]
+        ["button:42:84:Left:Pressed", "release-button:Left"]
     );
 }
 
 #[test]
-fn stop_after_mouse_button_press_releases_button_at_press_coordinates() {
+fn stop_after_mouse_button_press_releases_without_moving_cursor() {
     let fake = FakeExecutor::default();
     let calls = fake.calls.clone();
     let token = StopToken::default();
@@ -318,6 +389,6 @@ fn stop_after_mouse_button_press_releases_button_at_press_coordinates() {
     assert_eq!(result, Err("playback stopped".to_string()));
     assert_eq!(
         calls.lock().unwrap().as_slice(),
-        ["button:42:84:Left:Pressed", "button:42:84:Left:Released"]
+        ["button:42:84:Left:Pressed", "release-button:Left"]
     );
 }

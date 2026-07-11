@@ -3,29 +3,81 @@ use crate::{
     clock::now_ms,
     hotkeys::{self, HotkeyConfig},
     input::SystemInputExecutor,
-    player::play_actions,
+    player::play_recording,
     storage::{self, RecordingFile},
 };
 use chrono::Utc;
 use std::{
-    path::PathBuf,
+    fs,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 
 pub type SharedApp = Arc<Mutex<AppController>>;
+const RECORDINGS_CHANGED_EVENT: &str = "remember://recordings-changed";
 
 fn emit_state(app: &AppHandle, state: UiState) -> Result<(), String> {
     app.emit("remember://state", state)
         .map_err(|error| error.to_string())
 }
 
-fn recording_library_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_data_dir()
-        .map(|dir| dir.join("recordings"))
+fn emit_recordings_changed(app: &AppHandle) -> Result<(), String> {
+    app.emit(RECORDINGS_CHANGED_EVENT, ())
         .map_err(|error| error.to_string())
+}
+
+fn recording_library_dir(_app: &AppHandle) -> Result<PathBuf, String> {
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let directory = recording_library_dir_for_executable(&executable)?;
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    Ok(directory)
+}
+
+fn recording_library_dir_for_executable(executable: &Path) -> Result<PathBuf, String> {
+    executable
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(|parent| parent.join("recordings"))
+        .ok_or_else(|| "cannot determine executable directory".to_string())
+}
+
+fn mark_recording_saved(
+    state: &SharedApp,
+    recording: &crate::model::Recording,
+) -> Result<(), String> {
+    let mut controller = state
+        .lock()
+        .map_err(|_| "state lock poisoned".to_string())?;
+    controller.mark_recording_saved(recording);
+    Ok(())
+}
+
+fn save_recording_to_library_shared(
+    app: &AppHandle,
+    state: &SharedApp,
+    recording: &crate::model::Recording,
+) -> Result<(), String> {
+    let library_dir = recording_library_dir(app)?;
+    storage::save_recording_to_library(&library_dir, recording)
+        .map_err(|error| error.to_string())?;
+    mark_recording_saved(state, recording)?;
+    emit_recordings_changed(app)
+}
+
+fn save_pending_recording_shared(app: &AppHandle, state: &SharedApp) -> Result<(), String> {
+    let recording = {
+        let controller = state
+            .lock()
+            .map_err(|_| "state lock poisoned".to_string())?;
+        controller.recording_pending_save().cloned()
+    };
+    match recording {
+        Some(recording) => save_recording_to_library_shared(app, state, &recording),
+        None => Ok(()),
+    }
 }
 
 #[tauri::command]
@@ -93,9 +145,7 @@ pub(crate) fn stop_recording_shared(app: AppHandle, state: SharedApp) -> Result<
         (recording, controller.ui_state())
     };
     emit_state(&app, ui_state.clone())?;
-    let library_dir = recording_library_dir(&app)?;
-    storage::save_recording_to_library(&library_dir, &recording)
-        .map_err(|error| error.to_string())?;
+    save_recording_to_library_shared(&app, &state, &recording)?;
     Ok(ui_state)
 }
 
@@ -108,7 +158,18 @@ pub fn list_recordings(app: AppHandle) -> Result<Vec<RecordingFile>, String> {
 #[tauri::command]
 pub fn delete_recording(app: AppHandle, path: PathBuf) -> Result<(), String> {
     let library_dir = recording_library_dir(&app)?;
-    storage::delete_recording_from_library(&library_dir, &path).map_err(|error| error.to_string())
+    storage::delete_recording_from_library(&library_dir, &path)
+        .map_err(|error| error.to_string())?;
+    emit_recordings_changed(&app)
+}
+
+#[tauri::command]
+pub fn rename_recording(app: AppHandle, path: PathBuf, new_name: String) -> Result<String, String> {
+    let library_dir = recording_library_dir(&app)?;
+    let renamed_path = storage::rename_recording_in_library(&library_dir, &path, &new_name)
+        .map_err(|error| error.to_string())?;
+    emit_recordings_changed(&app)?;
+    Ok(renamed_path.to_string_lossy().to_string())
 }
 
 #[tauri::command]
@@ -137,7 +198,8 @@ pub fn save_current_recording(state: State<'_, SharedApp>, path: PathBuf) -> Res
             .map_err(|_| "state lock poisoned".to_string())?;
         controller.saveable_recording()?
     };
-    storage::save_recording(&path, &recording).map_err(|error| error.to_string())
+    storage::save_recording(&path, &recording).map_err(|error| error.to_string())?;
+    mark_recording_saved(state.inner(), &recording)
 }
 
 #[tauri::command]
@@ -191,7 +253,7 @@ pub fn set_hotkeys(
 pub fn start_playback(
     app: AppHandle,
     state: State<'_, SharedApp>,
-    loop_count: u32,
+    loop_count: Option<u32>,
     speed_multiplier: f64,
 ) -> Result<UiState, String> {
     start_playback_shared(app, state.inner().clone(), loop_count, speed_multiplier)
@@ -200,7 +262,7 @@ pub fn start_playback(
 #[tauri::command]
 pub fn set_playback_settings(
     state: State<'_, SharedApp>,
-    loop_count: u32,
+    loop_count: Option<u32>,
     speed_multiplier: f64,
 ) -> Result<(), String> {
     let mut controller = state
@@ -212,7 +274,7 @@ pub fn set_playback_settings(
 pub(crate) fn start_playback_shared(
     app: AppHandle,
     state: SharedApp,
-    loop_count: u32,
+    loop_count: Option<u32>,
     speed_multiplier: f64,
 ) -> Result<UiState, String> {
     start_playback_impl(app, state, |controller| {
@@ -247,15 +309,18 @@ where
     let state_for_thread = state.clone();
     thread::spawn(move || {
         let executor = SystemInputExecutor;
-        let result = play_actions(&run.actions, &executor, &stop_token);
+        let result = play_recording(&run.recording, run.settings, &executor, &stop_token);
         let next_state = {
             match state_for_thread.lock() {
                 Ok(mut controller) => {
-                    let message = match result {
-                        Ok(()) => "Playback finished".to_string(),
-                        Err(error) => error,
+                    let (message, message_is_error) = match result {
+                        Ok(()) => ("Playback finished".to_string(), false),
+                        Err(error) if error == "playback stopped" => {
+                            ("Playback stopped".to_string(), false)
+                        }
+                        Err(error) => (error, true),
                     };
-                    if controller.finish_playback_if_current(run.id, message) {
+                    if controller.finish_playback_if_current(run.id, message, message_is_error) {
                         Some(controller.ui_state())
                     } else {
                         None
@@ -312,6 +377,51 @@ pub(crate) fn stop_active_shared(app: AppHandle, state: SharedApp) -> Result<UiS
     Ok(ui_state)
 }
 
+pub(crate) fn prepare_for_exit(app: &AppHandle) -> Result<(), String> {
+    let Some(state) = app.try_state::<SharedApp>() else {
+        return Ok(());
+    };
+    let state = state.inner().clone();
+    let mode = state
+        .lock()
+        .map_err(|_| "state lock poisoned".to_string())?
+        .mode();
+
+    match mode {
+        AppMode::Recording => {
+            stop_recording_shared(app.clone(), state.clone())?;
+        }
+        AppMode::Playing => {
+            let ui_state = {
+                let mut controller = state
+                    .lock()
+                    .map_err(|_| "state lock poisoned".to_string())?;
+                controller.stop_playback();
+                controller.ui_state()
+            };
+            emit_state(app, ui_state)?;
+
+            let deadline = Instant::now() + Duration::from_secs(1);
+            loop {
+                let mode = state
+                    .lock()
+                    .map_err(|_| "state lock poisoned".to_string())?
+                    .mode();
+                if mode != AppMode::Playing {
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    return Err("playback cleanup did not finish before exit".to_string());
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        AppMode::Idle => {}
+    }
+
+    save_pending_recording_shared(app, &state)
+}
+
 pub(crate) fn run_control_hotkey_action(
     app: AppHandle,
     state: SharedApp,
@@ -324,5 +434,21 @@ pub(crate) fn run_control_hotkey_action(
     };
     if let Err(error) = result {
         eprintln!("Remember control hotkey failed: {error}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::recording_library_dir_for_executable;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn recording_library_is_next_to_the_executable() {
+        let executable = Path::new("portable").join("remember.exe");
+
+        let directory =
+            recording_library_dir_for_executable(&executable).expect("recording directory");
+
+        assert_eq!(directory, PathBuf::from("portable").join("recordings"));
     }
 }
