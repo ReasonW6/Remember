@@ -128,15 +128,17 @@ npm run tauri build
 src-tauri\target\release
 ```
 
-仓库中的 Windows CI 会运行前端测试、npm 审计、Rust 测试、Clippy 和 RustSec 审计，构建便携版 `remember.exe`，并生成 SHA-256 校验文件。CI 产物明确是未签名的候选版本；SHA-256 只能检测文件是否变化，不能证明发布者身份。
+仓库中的 Windows CI 会运行前端测试、npm 审计、Rust 测试、Clippy 和 RustSec 审计，构建便携版 `remember.exe`，并生成 SHA-256 校验文件。GitHub Release 可同时提供优化版 `remember.exe` 和用于诊断的 `remember-debug.exe`。
 
-面向公众发布前，必须使用真实、受信任的 Authenticode 证书对 `remember.exe` 签名并加时间戳，再验证签名状态：
+当前发布的可执行文件未使用 Authenticode 证书签名。Windows 可能显示“未知发布者”或 SmartScreen 提示；下载后可使用发行页提供的 SHA-256 校验文件确认文件完整性，但 SHA-256 不能证明发布者身份。
+
+如果将来配置了真实、受信任的 Authenticode 证书，应对可执行文件签名并加时间戳，再验证签名状态：
 
 ```powershell
 Get-AuthenticodeSignature .\remember.exe
 ```
 
-不要把自签名证书或仅有 SHA-256 的文件描述为正式签名版本。
+发行页必须明确说明文件是否签名，不把自签名证书或仅有 SHA-256 校验文件描述为正式签名版本。
 
 ## 当前限制
 
