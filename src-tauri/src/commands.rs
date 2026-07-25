@@ -113,6 +113,7 @@ fn start_recording_impl(
     state: SharedApp,
     from_hotkey: bool,
 ) -> Result<UiState, String> {
+    let capture_pause = crate::input::pause_capture_events()?;
     let started_at_ms = now_ms();
     let ui_state = {
         let mut controller = state
@@ -127,6 +128,7 @@ fn start_recording_impl(
         }
         controller.ui_state()
     };
+    drop(capture_pause);
     emit_state(&app, ui_state.clone())?;
     Ok(ui_state)
 }
@@ -137,6 +139,7 @@ pub fn stop_recording(app: AppHandle, state: State<'_, SharedApp>) -> Result<UiS
 }
 
 pub(crate) fn stop_recording_shared(app: AppHandle, state: SharedApp) -> Result<UiState, String> {
+    let capture_pause = crate::input::pause_capture_events()?;
     let (recording, ui_state) = {
         let mut controller = state
             .lock()
@@ -144,6 +147,7 @@ pub(crate) fn stop_recording_shared(app: AppHandle, state: SharedApp) -> Result<
         let recording = controller.stop_recording(now_ms())?;
         (recording, controller.ui_state())
     };
+    drop(capture_pause);
     emit_state(&app, ui_state.clone())?;
     save_recording_to_library_shared(&app, &state, &recording)?;
     Ok(ui_state)

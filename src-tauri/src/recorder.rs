@@ -59,6 +59,7 @@ impl Recorder {
             start_ms,
             steps: Vec::new(),
             last_mouse_move_elapsed_ms: None,
+            pressed_mouse_buttons: Vec::new(),
         });
         Ok(())
     }
@@ -82,6 +83,18 @@ impl Recorder {
                 let elapsed_ms = active.elapsed_ms(at_ms);
                 if active.is_stale_elapsed(elapsed_ms) {
                     return;
+                }
+                match state {
+                    ButtonState::Pressed => {
+                        if !active.pressed_mouse_buttons.contains(&button) {
+                            active.pressed_mouse_buttons.push(button);
+                        }
+                    }
+                    ButtonState::Released => {
+                        active
+                            .pressed_mouse_buttons
+                            .retain(|pressed| *pressed != button);
+                    }
                 }
                 active.steps.push(MacroStep::MouseButton {
                     elapsed_ms,
@@ -155,6 +168,7 @@ struct ActiveRecording {
     start_ms: u64,
     steps: Vec<MacroStep>,
     last_mouse_move_elapsed_ms: Option<u64>,
+    pressed_mouse_buttons: Vec<MouseButton>,
 }
 
 impl ActiveRecording {
@@ -178,10 +192,11 @@ impl ActiveRecording {
             return;
         }
 
-        let should_sample = self
-            .last_mouse_move_elapsed_ms
-            .map(|last| elapsed_ms.saturating_sub(last) >= move_sample_interval_ms)
-            .unwrap_or(true);
+        let should_sample = !self.pressed_mouse_buttons.is_empty()
+            || self
+                .last_mouse_move_elapsed_ms
+                .map(|last| elapsed_ms.saturating_sub(last) >= move_sample_interval_ms)
+                .unwrap_or(true);
 
         if should_sample {
             self.steps.push(MacroStep::MouseMove { elapsed_ms, x, y });

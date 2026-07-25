@@ -57,7 +57,7 @@ impl StepExecutor for SystemInputExecutor {
 }
 
 #[cfg(target_os = "windows")]
-pub use capture::{start_capture, InputCaptureRuntime};
+pub use capture::{pause_capture_events, start_capture, CapturePauseGuard, InputCaptureRuntime};
 
 #[cfg(not(target_os = "windows"))]
 #[derive(Debug, Default)]
@@ -72,10 +72,20 @@ pub fn start_capture(
     Err("Remember input capture is Windows-only".to_string())
 }
 
+#[cfg(not(target_os = "windows"))]
+pub struct CapturePauseGuard;
+
+#[cfg(not(target_os = "windows"))]
+pub fn pause_capture_events() -> Result<CapturePauseGuard, String> {
+    Ok(CapturePauseGuard)
+}
+
 #[cfg(target_os = "windows")]
 mod capture {
     use crate::{
-        app_state::{AppController, ControlHotkeyAction, ControlHotkeyDecision},
+        app_state::{
+            AppController, ControlHotkeyAction, ControlHotkeyDecision, ControlHotkeyRuntime,
+        },
         clock::now_ms,
         commands,
         input::REMEMBER_INPUT_EXTRA_INFO,
@@ -83,44 +93,65 @@ mod capture {
         recorder::RawInputEvent,
     };
     use std::{
-        sync::{
-            atomic::{AtomicBool, Ordering},
-            mpsc, Arc, Mutex,
-        },
+        sync::{mpsc, Arc, Mutex},
         thread::{self, JoinHandle},
-        time::Duration,
     };
     use tauri::AppHandle;
     use windows::Win32::{
         Foundation::{HINSTANCE, LPARAM, LRESULT, POINT, WPARAM},
-        System::LibraryLoader::GetModuleHandleW,
+        System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
         UI::WindowsAndMessaging::{
-            CallNextHookEx, DispatchMessageW, GetAncestor, GetForegroundWindow, PeekMessageW,
-            SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WindowFromPoint, GA_ROOT,
-            HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, MSG, MSLLHOOKSTRUCT, PM_REMOVE,
-            WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
-            WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
-            WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1,
-            XBUTTON2,
+            CallNextHookEx, DispatchMessageW, GetAncestor, GetForegroundWindow, GetMessageW,
+            PeekMessageW, PostThreadMessageW, SetWindowsHookExW, TranslateMessage,
+            UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT,
+            LLKHF_EXTENDED, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, WH_KEYBOARD_LL, WH_MOUSE_LL,
+            WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+            WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
+            WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
         },
     };
 
-    static CAPTURE_CONTROLLER: Mutex<Option<Arc<Mutex<AppController>>>> = Mutex::new(None);
+    static CONTROL_HOTKEY_RUNTIME: Mutex<Option<ControlHotkeyRuntime>> = Mutex::new(None);
     static MAIN_WINDOW_HWND: Mutex<Option<usize>> = Mutex::new(None);
     // Low-level hook callbacks must return within the system hook timeout or
     // Windows silently removes the hook, so hotkey actions (which can write to
     // disk) are queued here and executed on a dedicated worker thread.
     static HOTKEY_ACTION_TX: Mutex<Option<mpsc::Sender<ControlHotkeyAction>>> = Mutex::new(None);
+    static CAPTURE_EVENT_TX: Mutex<Option<mpsc::Sender<CaptureWorkerMessage>>> = Mutex::new(None);
+
+    enum CaptureWorkerMessage {
+        Input(RawInputEvent),
+        ResetHotkeyFilter,
+        Pause {
+            reached: mpsc::SyncSender<()>,
+            resume: mpsc::Receiver<()>,
+        },
+    }
+
+    pub struct CapturePauseGuard {
+        resume: Option<mpsc::Sender<()>>,
+    }
+
+    impl Drop for CapturePauseGuard {
+        fn drop(&mut self) {
+            if let Some(resume) = self.resume.take() {
+                let _ = resume.send(());
+            }
+        }
+    }
 
     pub struct InputCaptureRuntime {
-        stop: Arc<AtomicBool>,
+        hook_thread_id: u32,
         worker: Option<JoinHandle<()>>,
         hotkey_worker: Option<JoinHandle<()>>,
+        capture_worker: Option<JoinHandle<()>>,
     }
 
     impl Drop for InputCaptureRuntime {
         fn drop(&mut self) {
-            self.stop.store(true, Ordering::SeqCst);
+            unsafe {
+                let _ = PostThreadMessageW(self.hook_thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
+            }
 
             if let Some(worker) = self.worker.take() {
                 let _ = worker.join();
@@ -131,7 +162,12 @@ mod capture {
                 let _ = hotkey_worker.join();
             }
 
-            clear_capture_controller();
+            clear_capture_event_sender();
+            if let Some(capture_worker) = self.capture_worker.take() {
+                let _ = capture_worker.join();
+            }
+
+            clear_control_hotkey_runtime();
             clear_main_window_hwnd();
         }
     }
@@ -141,8 +177,23 @@ mod capture {
         app_handle: AppHandle,
         main_window_hwnd: Option<usize>,
     ) -> Result<InputCaptureRuntime, String> {
-        set_capture_controller(shared.clone())?;
+        let control_hotkey_runtime = shared
+            .lock()
+            .map_err(|_| "state lock poisoned".to_string())?
+            .control_hotkey_runtime();
+        set_control_hotkey_runtime(control_hotkey_runtime)?;
         set_main_window_hwnd(main_window_hwnd);
+
+        let (capture_tx, capture_rx) = mpsc::channel();
+        if let Err(error) = set_capture_event_sender(capture_tx) {
+            clear_control_hotkey_runtime();
+            clear_main_window_hwnd();
+            return Err(error);
+        }
+        let capture_shared = shared.clone();
+        let capture_worker = thread::spawn(move || {
+            run_capture_worker(capture_shared, capture_rx);
+        });
 
         let (hotkey_tx, hotkey_rx) = mpsc::channel();
         set_hotkey_action_sender(hotkey_tx);
@@ -152,54 +203,57 @@ mod capture {
             }
         });
 
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_for_thread = stop.clone();
         let (installed_tx, installed_rx) = mpsc::channel();
 
         let worker = thread::spawn(move || {
-            run_capture_thread(stop_for_thread, installed_tx);
+            run_capture_thread(installed_tx);
         });
 
-        let cleanup = |worker: JoinHandle<()>, hotkey_worker: JoinHandle<()>| {
+        let cleanup = |worker: JoinHandle<()>,
+                       hotkey_worker: JoinHandle<()>,
+                       capture_worker: JoinHandle<()>| {
             let _ = worker.join();
             clear_hotkey_action_sender();
             let _ = hotkey_worker.join();
-            clear_capture_controller();
+            clear_capture_event_sender();
+            let _ = capture_worker.join();
+            clear_control_hotkey_runtime();
             clear_main_window_hwnd();
         };
 
         match installed_rx.recv() {
-            Ok(Ok(())) => Ok(InputCaptureRuntime {
-                stop,
+            Ok(Ok(hook_thread_id)) => Ok(InputCaptureRuntime {
+                hook_thread_id,
                 worker: Some(worker),
                 hotkey_worker: Some(hotkey_worker),
+                capture_worker: Some(capture_worker),
             }),
             Ok(Err(error)) => {
-                cleanup(worker, hotkey_worker);
+                cleanup(worker, hotkey_worker, capture_worker);
                 Err(error)
             }
             Err(_) => {
-                cleanup(worker, hotkey_worker);
+                cleanup(worker, hotkey_worker, capture_worker);
                 Err("input capture thread stopped before installing hooks".to_string())
             }
         }
     }
 
-    fn set_capture_controller(shared: Arc<Mutex<AppController>>) -> Result<(), String> {
-        let mut controller = CAPTURE_CONTROLLER
+    fn set_control_hotkey_runtime(runtime: ControlHotkeyRuntime) -> Result<(), String> {
+        let mut control_hotkeys = CONTROL_HOTKEY_RUNTIME
             .lock()
-            .map_err(|_| "input capture lock poisoned".to_string())?;
-        if controller.is_some() {
-            return Err("input capture already started".to_string());
+            .map_err(|_| "control hotkey runtime lock poisoned".to_string())?;
+        if control_hotkeys.is_some() {
+            return Err("control hotkey runtime already started".to_string());
         }
 
-        *controller = Some(shared);
+        *control_hotkeys = Some(runtime);
         Ok(())
     }
 
-    fn clear_capture_controller() {
-        if let Ok(mut controller) = CAPTURE_CONTROLLER.lock() {
-            *controller = None;
+    fn clear_control_hotkey_runtime() {
+        if let Ok(mut control_hotkeys) = CONTROL_HOTKEY_RUNTIME.lock() {
+            *control_hotkeys = None;
         }
     }
 
@@ -217,6 +271,88 @@ mod capture {
 
     fn current_main_window_hwnd() -> Option<usize> {
         MAIN_WINDOW_HWND.try_lock().ok().and_then(|hwnd| *hwnd)
+    }
+
+    fn set_capture_event_sender(sender: mpsc::Sender<CaptureWorkerMessage>) -> Result<(), String> {
+        let mut tx = CAPTURE_EVENT_TX
+            .lock()
+            .map_err(|_| "capture event queue lock poisoned".to_string())?;
+        if tx.is_some() {
+            return Err("input capture event queue already started".to_string());
+        }
+
+        *tx = Some(sender);
+        Ok(())
+    }
+
+    fn clear_capture_event_sender() {
+        if let Ok(mut tx) = CAPTURE_EVENT_TX.lock() {
+            *tx = None;
+        }
+    }
+
+    fn dispatch_capture_event(event: RawInputEvent) -> bool {
+        dispatch_capture_message(CaptureWorkerMessage::Input(event))
+    }
+
+    fn dispatch_capture_message(message: CaptureWorkerMessage) -> bool {
+        match CAPTURE_EVENT_TX.lock() {
+            Ok(tx) => tx
+                .as_ref()
+                .is_some_and(|sender| sender.send(message).is_ok()),
+            Err(_) => false,
+        }
+    }
+
+    pub fn pause_capture_events() -> Result<CapturePauseGuard, String> {
+        let (reached_tx, reached_rx) = mpsc::sync_channel(0);
+        let (resume_tx, resume_rx) = mpsc::channel();
+        {
+            let tx = CAPTURE_EVENT_TX
+                .lock()
+                .map_err(|_| "capture event queue lock poisoned".to_string())?;
+            let Some(sender) = tx.as_ref() else {
+                return Ok(CapturePauseGuard { resume: None });
+            };
+            sender
+                .send(CaptureWorkerMessage::Pause {
+                    reached: reached_tx,
+                    resume: resume_rx,
+                })
+                .map_err(|_| "input capture event queue stopped".to_string())?;
+        }
+
+        reached_rx
+            .recv()
+            .map_err(|_| "input capture event queue stopped before pause".to_string())?;
+        Ok(CapturePauseGuard {
+            resume: Some(resume_tx),
+        })
+    }
+
+    fn run_capture_worker(
+        shared: Arc<Mutex<AppController>>,
+        receiver: mpsc::Receiver<CaptureWorkerMessage>,
+    ) {
+        while let Ok(message) = receiver.recv() {
+            match message {
+                CaptureWorkerMessage::Input(event) => {
+                    if let Ok(mut controller) = shared.lock() {
+                        controller.capture_input(event);
+                    }
+                }
+                CaptureWorkerMessage::ResetHotkeyFilter => {
+                    if let Ok(mut controller) = shared.lock() {
+                        controller.reset_recording_hotkey_filter();
+                    }
+                }
+                CaptureWorkerMessage::Pause { reached, resume } => {
+                    if reached.send(()).is_ok() {
+                        let _ = resume.recv();
+                    }
+                }
+            }
+        }
     }
 
     fn set_hotkey_action_sender(sender: mpsc::Sender<ControlHotkeyAction>) {
@@ -243,10 +379,16 @@ mod capture {
         }
     }
 
-    fn run_capture_thread(stop: Arc<AtomicBool>, installed_tx: mpsc::Sender<Result<(), String>>) {
+    fn run_capture_thread(installed_tx: mpsc::Sender<Result<u32, String>>) {
+        let mut message = MSG::default();
+        unsafe {
+            let _ = PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE);
+        }
+
         let hooks = match HookHandles::install() {
             Ok(hooks) => {
-                let _ = installed_tx.send(Ok(()));
+                let thread_id = unsafe { GetCurrentThreadId() };
+                let _ = installed_tx.send(Ok(thread_id));
                 hooks
             }
             Err(error) => {
@@ -255,16 +397,15 @@ mod capture {
             }
         };
 
-        let mut message = MSG::default();
-        while !stop.load(Ordering::SeqCst) {
-            unsafe {
-                while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+        loop {
+            let result = unsafe { GetMessageW(&mut message, None, 0, 0) }.0;
+            match result {
+                -1 | 0 => break,
+                _ => unsafe {
                     let _ = TranslateMessage(&message);
                     DispatchMessageW(&message);
-                }
+                },
             }
-
-            thread::sleep(Duration::from_millis(10));
         }
 
         hooks.unhook();
@@ -359,48 +500,30 @@ mod capture {
     }
 
     fn handle_control_hotkey(event: RawInputEvent) -> ControlHotkeyDecision {
-        let shared = match CAPTURE_CONTROLLER.try_lock() {
-            Ok(controller) => controller.clone(),
-            Err(_) => None,
-        };
-
-        let pass = ControlHotkeyDecision {
-            suppress: false,
-            action: None,
-        };
-        match shared {
-            Some(shared) => match shared.try_lock() {
-                Ok(mut controller) => controller.control_hotkey_decision(event),
-                Err(_) => pass,
-            },
-            None => pass,
-        }
+        CONTROL_HOTKEY_RUNTIME
+            .lock()
+            .ok()
+            .and_then(|runtime| runtime.clone())
+            .map(|runtime| runtime.decide(event))
+            .unwrap_or(ControlHotkeyDecision {
+                suppress: false,
+                action: None,
+            })
     }
 
     fn reset_control_hotkey_state() {
-        let shared = match CAPTURE_CONTROLLER.try_lock() {
-            Ok(controller) => controller.clone(),
-            Err(_) => None,
-        };
-
-        if let Some(shared) = shared {
-            if let Ok(mut controller) = shared.try_lock() {
-                controller.reset_control_hotkey_state();
-            }
+        if let Some(runtime) = CONTROL_HOTKEY_RUNTIME
+            .lock()
+            .ok()
+            .and_then(|runtime| runtime.clone())
+        {
+            runtime.reset_action();
         }
+        let _ = dispatch_capture_message(CaptureWorkerMessage::ResetHotkeyFilter);
     }
 
     fn capture(event: RawInputEvent) {
-        let shared = match CAPTURE_CONTROLLER.try_lock() {
-            Ok(controller) => controller.clone(),
-            Err(_) => None,
-        };
-
-        if let Some(shared) = shared {
-            if let Ok(mut controller) = shared.try_lock() {
-                controller.capture_input(event);
-            }
-        }
+        let _ = dispatch_capture_event(event);
     }
 
     fn mouse_event(w_param: WPARAM, l_param: LPARAM) -> Option<RawInputEvent> {
@@ -589,7 +712,25 @@ mod capture {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::model::MacroStep;
+        use std::sync::mpsc::TryRecvError;
+        use std::time::Duration;
         use windows::Win32::Foundation::POINT;
+
+        fn pause_capture_worker(sender: &mpsc::Sender<CaptureWorkerMessage>) -> CapturePauseGuard {
+            let (reached_tx, reached_rx) = mpsc::sync_channel(0);
+            let (resume_tx, resume_rx) = mpsc::channel();
+            sender
+                .send(CaptureWorkerMessage::Pause {
+                    reached: reached_tx,
+                    resume: resume_rx,
+                })
+                .unwrap();
+            reached_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            CapturePauseGuard {
+                resume: Some(resume_tx),
+            }
+        }
 
         #[test]
         fn mouse_event_ignores_remember_playback_sentinel() {
@@ -683,6 +824,196 @@ mod capture {
             assert!(!same_root_window(Some(0x55), None));
             assert!(!same_root_window(None, Some(0x55)));
         }
+
+        #[test]
+        fn capture_worker_queues_events_and_hotkeys_stay_responsive_while_controller_is_busy() {
+            let shared = Arc::new(Mutex::new(AppController::new()));
+            let control_hotkeys = {
+                let mut controller = shared.lock().unwrap();
+                controller
+                    .start_recording("queued", 1_000, "2026-07-25T00:00:00Z")
+                    .unwrap();
+                controller.control_hotkey_runtime()
+            };
+
+            let (tx, rx) = mpsc::channel();
+            let worker_shared = shared.clone();
+            let worker = thread::spawn(move || run_capture_worker(worker_shared, rx));
+
+            let controller_guard = shared.lock().unwrap();
+            let hotkey_decision = control_hotkeys.decide(RawInputEvent::Key {
+                at_ms: 1_009,
+                vk_code: 0x77,
+                scan_code: 0x42,
+                extended: false,
+                state: KeyState::Pressed,
+            });
+            assert_eq!(
+                hotkey_decision,
+                ControlHotkeyDecision {
+                    suppress: true,
+                    action: Some(ControlHotkeyAction::Stop),
+                }
+            );
+
+            for event in [
+                RawInputEvent::MouseButton {
+                    at_ms: 1_010,
+                    x: 10,
+                    y: 10,
+                    button: MouseButton::Left,
+                    state: ButtonState::Pressed,
+                },
+                RawInputEvent::MouseMove {
+                    at_ms: 1_011,
+                    x: 11,
+                    y: 12,
+                },
+                RawInputEvent::MouseMove {
+                    at_ms: 1_012,
+                    x: 12,
+                    y: 14,
+                },
+                RawInputEvent::MouseButton {
+                    at_ms: 1_013,
+                    x: 12,
+                    y: 14,
+                    button: MouseButton::Left,
+                    state: ButtonState::Released,
+                },
+            ] {
+                tx.send(CaptureWorkerMessage::Input(event)).unwrap();
+            }
+            let (reached_tx, reached_rx) = mpsc::sync_channel(0);
+            let (resume_tx, resume_rx) = mpsc::channel();
+            tx.send(CaptureWorkerMessage::Pause {
+                reached: reached_tx,
+                resume: resume_rx,
+            })
+            .unwrap();
+            assert_eq!(reached_rx.try_recv(), Err(TryRecvError::Empty));
+
+            drop(controller_guard);
+            reached_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            resume_tx.send(()).unwrap();
+            drop(tx);
+            worker.join().unwrap();
+
+            let recording = shared.lock().unwrap().stop_recording(1_020).unwrap();
+            assert!(matches!(
+                recording.steps.as_slice(),
+                [
+                    MacroStep::MouseButton {
+                        button: MouseButton::Left,
+                        state: ButtonState::Pressed,
+                        ..
+                    },
+                    MacroStep::MouseMove { x: 11, y: 12, .. },
+                    MacroStep::MouseMove { x: 12, y: 14, .. },
+                    MacroStep::MouseButton {
+                        button: MouseButton::Left,
+                        state: ButtonState::Released,
+                        ..
+                    }
+                ]
+            ));
+        }
+
+        #[test]
+        fn capture_pause_applies_later_events_on_the_new_side_of_mode_transitions() {
+            let shared = Arc::new(Mutex::new(AppController::new()));
+            let (tx, rx) = mpsc::channel();
+            let worker_shared = shared.clone();
+            let worker = thread::spawn(move || run_capture_worker(worker_shared, rx));
+
+            let start_pause = pause_capture_worker(&tx);
+            tx.send(CaptureWorkerMessage::Input(RawInputEvent::MouseButton {
+                at_ms: 1_010,
+                x: 10,
+                y: 10,
+                button: MouseButton::Left,
+                state: ButtonState::Pressed,
+            }))
+            .unwrap();
+            shared
+                .lock()
+                .unwrap()
+                .start_recording("boundary", 1_000, "2026-07-25T00:00:00Z")
+                .unwrap();
+            drop(start_pause);
+
+            let stop_pause = pause_capture_worker(&tx);
+            tx.send(CaptureWorkerMessage::Input(RawInputEvent::MouseButton {
+                at_ms: 1_020,
+                x: 20,
+                y: 20,
+                button: MouseButton::Left,
+                state: ButtonState::Released,
+            }))
+            .unwrap();
+            let recording = shared.lock().unwrap().stop_recording(1_015).unwrap();
+            drop(stop_pause);
+
+            drop(pause_capture_worker(&tx));
+            drop(tx);
+            worker.join().unwrap();
+
+            assert!(matches!(
+                recording.steps.as_slice(),
+                [MacroStep::MouseButton {
+                    elapsed_ms: 10,
+                    x: 10,
+                    y: 10,
+                    button: MouseButton::Left,
+                    state: ButtonState::Pressed,
+                }]
+            ));
+        }
+
+        #[test]
+        fn queued_hotkey_filter_reset_clears_earlier_modifier_state_in_order() {
+            let shared = Arc::new(Mutex::new(AppController::new()));
+            shared
+                .lock()
+                .unwrap()
+                .start_recording("reset", 1_000, "2026-07-25T00:00:00Z")
+                .unwrap();
+            let (tx, rx) = mpsc::channel();
+            let worker_shared = shared.clone();
+            let worker = thread::spawn(move || run_capture_worker(worker_shared, rx));
+
+            tx.send(CaptureWorkerMessage::Input(RawInputEvent::Key {
+                at_ms: 1_010,
+                vk_code: 0xA2,
+                scan_code: 0x1D,
+                extended: false,
+                state: KeyState::Pressed,
+            }))
+            .unwrap();
+            tx.send(CaptureWorkerMessage::ResetHotkeyFilter).unwrap();
+            tx.send(CaptureWorkerMessage::Input(RawInputEvent::Key {
+                at_ms: 1_020,
+                vk_code: 0x41,
+                scan_code: 0x1E,
+                extended: false,
+                state: KeyState::Pressed,
+            }))
+            .unwrap();
+            drop(pause_capture_worker(&tx));
+            drop(tx);
+            worker.join().unwrap();
+
+            let recording = shared.lock().unwrap().stop_recording(1_030).unwrap();
+            assert!(matches!(
+                recording.steps.as_slice(),
+                [MacroStep::Key {
+                    elapsed_ms: 20,
+                    vk_code: 0x41,
+                    state: KeyState::Pressed,
+                    ..
+                }]
+            ));
+        }
     }
 }
 
@@ -695,15 +1026,19 @@ mod platform {
     use std::mem::size_of;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEEVENTF_LEFTDOWN,
-        MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN,
-        MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT,
+        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEEVENTF_ABSOLUTE,
+        MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
+        MOUSEEVENTF_MOVE, MOUSEEVENTF_MOVE_NOCOALESCE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+        MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT,
         MOUSE_EVENT_FLAGS, VIRTUAL_KEY,
     };
-    use windows::Win32::UI::WindowsAndMessaging::{SetCursorPos, XBUTTON1, XBUTTON2};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+        SM_YVIRTUALSCREEN, XBUTTON1, XBUTTON2,
+    };
 
     pub fn mouse_move(x: i32, y: i32) -> Result<(), String> {
-        unsafe { SetCursorPos(x, y) }.map_err(|error| format!("SetCursorPos failed: {error}"))
+        send_positioned_mouse_input(x, y, MOUSE_EVENT_FLAGS(0), 0)
     }
 
     pub fn mouse_button(
@@ -712,14 +1047,12 @@ mod platform {
         button: MouseButton,
         state: ButtonState,
     ) -> Result<(), String> {
-        mouse_move(x, y)?;
         let (flags, mouse_data) = mouse_button_input(button, state);
-        send_mouse_input(flags, mouse_data)
+        send_positioned_mouse_input(x, y, flags, mouse_data)
     }
 
     pub fn mouse_wheel(x: i32, y: i32, delta: i32) -> Result<(), String> {
-        mouse_move(x, y)?;
-        send_mouse_input(MOUSEEVENTF_WHEEL, delta as u32)
+        send_positioned_mouse_input(x, y, MOUSEEVENTF_WHEEL, delta as u32)
     }
 
     pub fn key(
@@ -780,21 +1113,78 @@ mod platform {
     }
 
     fn send_mouse_input(flags: MOUSE_EVENT_FLAGS, mouse_data: u32) -> Result<(), String> {
-        let input = INPUT {
-            r#type: INPUT_MOUSE,
-            Anonymous: INPUT_0 {
-                mi: MOUSEINPUT {
-                    dx: 0,
-                    dy: 0,
-                    mouseData: mouse_data,
-                    dwFlags: flags,
-                    time: 0,
-                    dwExtraInfo: REMEMBER_INPUT_EXTRA_INFO,
-                },
-            },
-        };
+        let input = mouse_input(MOUSEINPUT {
+            dx: 0,
+            dy: 0,
+            mouseData: mouse_data,
+            dwFlags: flags,
+            time: 0,
+            dwExtraInfo: REMEMBER_INPUT_EXTRA_INFO,
+        });
 
         send_input(input)
+    }
+
+    fn send_positioned_mouse_input(
+        x: i32,
+        y: i32,
+        event_flags: MOUSE_EVENT_FLAGS,
+        mouse_data: u32,
+    ) -> Result<(), String> {
+        let bounds = virtual_desktop_bounds()?;
+        let input = positioned_mouse_input(x, y, bounds, event_flags, mouse_data);
+        send_input(mouse_input(input))
+    }
+
+    fn virtual_desktop_bounds() -> Result<(i32, i32, i32, i32), String> {
+        let left = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
+        let top = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
+        let width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
+        let height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
+        if width <= 0 || height <= 0 {
+            return Err("GetSystemMetrics virtual desktop failed".to_string());
+        }
+
+        Ok((left, top, width, height))
+    }
+
+    fn positioned_mouse_input(
+        x: i32,
+        y: i32,
+        bounds: (i32, i32, i32, i32),
+        event_flags: MOUSE_EVENT_FLAGS,
+        mouse_data: u32,
+    ) -> MOUSEINPUT {
+        let (left, top, width, height) = bounds;
+        MOUSEINPUT {
+            dx: normalize_absolute_coordinate(x, left, width),
+            dy: normalize_absolute_coordinate(y, top, height),
+            mouseData: mouse_data,
+            dwFlags: MOUSEEVENTF_MOVE
+                | MOUSEEVENTF_ABSOLUTE
+                | MOUSEEVENTF_VIRTUALDESK
+                | MOUSEEVENTF_MOVE_NOCOALESCE
+                | event_flags,
+            time: 0,
+            dwExtraInfo: REMEMBER_INPUT_EXTRA_INFO,
+        }
+    }
+
+    fn normalize_absolute_coordinate(coordinate: i32, origin: i32, extent: i32) -> i32 {
+        if extent <= 1 {
+            return 0;
+        }
+
+        let last_offset = i64::from(extent) - 1;
+        let offset = (i64::from(coordinate) - i64::from(origin)).clamp(0, last_offset);
+        ((offset * i64::from(u16::MAX)) / last_offset) as i32
+    }
+
+    fn mouse_input(input: MOUSEINPUT) -> INPUT {
+        INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 { mi: input },
+        }
     }
 
     fn send_input(input: INPUT) -> Result<(), String> {
@@ -803,6 +1193,78 @@ mod platform {
             Ok(())
         } else {
             Err("SendInput failed".to_string())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn normalizes_negative_virtual_desktop_edges() {
+            assert_eq!(normalize_absolute_coordinate(-1_920, -1_920, 4_480), 0);
+            assert_eq!(
+                normalize_absolute_coordinate(2_559, -1_920, 4_480),
+                i32::from(u16::MAX)
+            );
+        }
+
+        #[test]
+        fn clamps_coordinates_outside_the_virtual_desktop() {
+            assert_eq!(normalize_absolute_coordinate(-101, -100, 200), 0);
+            assert_eq!(
+                normalize_absolute_coordinate(100, -100, 200),
+                i32::from(u16::MAX)
+            );
+        }
+
+        #[test]
+        fn handles_empty_and_single_pixel_extents() {
+            assert_eq!(normalize_absolute_coordinate(500, 100, -1), 0);
+            assert_eq!(normalize_absolute_coordinate(500, 100, 0), 0);
+            assert_eq!(normalize_absolute_coordinate(500, 100, 1), 0);
+        }
+
+        #[test]
+        fn normalizes_extreme_i32_coordinates_without_overflow() {
+            assert_eq!(
+                normalize_absolute_coordinate(i32::MIN, i32::MIN, i32::MAX),
+                0
+            );
+            assert_eq!(
+                normalize_absolute_coordinate(i32::MAX, i32::MIN, i32::MAX),
+                i32::from(u16::MAX)
+            );
+        }
+
+        #[test]
+        fn positioned_button_input_includes_absolute_virtual_desktop_flags_and_sentinel() {
+            let input =
+                positioned_mouse_input(320, 240, (0, 0, 1_920, 1_080), MOUSEEVENTF_LEFTDOWN, 0);
+
+            assert_eq!(
+                input.dwFlags,
+                MOUSEEVENTF_MOVE
+                    | MOUSEEVENTF_ABSOLUTE
+                    | MOUSEEVENTF_VIRTUALDESK
+                    | MOUSEEVENTF_MOVE_NOCOALESCE
+                    | MOUSEEVENTF_LEFTDOWN
+            );
+            assert_eq!(input.dwExtraInfo, REMEMBER_INPUT_EXTRA_INFO);
+        }
+
+        #[test]
+        fn positioned_wheel_input_keeps_mouse_data() {
+            let input = positioned_mouse_input(
+                320,
+                240,
+                (0, 0, 1_920, 1_080),
+                MOUSEEVENTF_WHEEL,
+                (-120_i32) as u32,
+            );
+
+            assert_eq!(input.mouseData, (-120_i32) as u32);
+            assert!(input.dwFlags.contains(MOUSEEVENTF_WHEEL));
         }
     }
 }

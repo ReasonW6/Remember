@@ -92,6 +92,74 @@ fn samples_mouse_moves_at_configured_interval() {
 }
 
 #[test]
+fn records_every_move_while_any_mouse_button_is_pressed_then_resumes_sampling() {
+    for button in [
+        MouseButton::Left,
+        MouseButton::Right,
+        MouseButton::Middle,
+        MouseButton::X1,
+        MouseButton::X2,
+    ] {
+        let mut recorder = Recorder::new(50);
+        recorder
+            .start("drag", 1_000, "2026-06-29T00:00:00Z")
+            .expect("start");
+
+        recorder.capture(RawInputEvent::MouseButton {
+            at_ms: 1_010,
+            x: 10,
+            y: 10,
+            button,
+            state: ButtonState::Pressed,
+        });
+        recorder.capture(RawInputEvent::MouseMove {
+            at_ms: 1_011,
+            x: 11,
+            y: 11,
+        });
+        recorder.capture(RawInputEvent::MouseMove {
+            at_ms: 1_012,
+            x: 12,
+            y: 12,
+        });
+        recorder.capture(RawInputEvent::MouseButton {
+            at_ms: 1_013,
+            x: 13,
+            y: 13,
+            button,
+            state: ButtonState::Released,
+        });
+        recorder.capture(RawInputEvent::MouseMove {
+            at_ms: 1_020,
+            x: 20,
+            y: 20,
+        });
+        recorder.capture(RawInputEvent::MouseMove {
+            at_ms: 1_062,
+            x: 62,
+            y: 62,
+        });
+
+        let recording = recorder.stop(1_070).expect("stop");
+        recording.validate().expect("recording validates");
+
+        let moves = recording
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                MacroStep::MouseMove { elapsed_ms, x, y } => Some((*elapsed_ms, *x, *y)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            moves,
+            vec![(11, 11, 11), (12, 12, 12), (62, 62, 62)],
+            "button {button:?}"
+        );
+    }
+}
+
+#[test]
 fn preserves_click_position_even_after_recent_move() {
     let mut recorder = Recorder::new(50);
     recorder

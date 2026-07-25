@@ -4,6 +4,7 @@ use crate::{
     recorder::{RawInputEvent, Recorder},
 };
 use serde::Serialize;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -68,10 +69,97 @@ impl ControlHotkeyDecision {
     };
 }
 
-pub struct AppController {
+#[derive(Clone)]
+pub(crate) struct ControlHotkeyRuntime {
+    // The Windows hook may wait on this lock, so code under it must stay
+    // bounded and must never acquire the AppController lock.
+    state: Arc<Mutex<ControlHotkeyRuntimeState>>,
+}
+
+struct ControlHotkeyRuntimeState {
     mode: AppMode,
+    suppressor: ControlHotkeySuppressor,
+}
+
+impl Default for ControlHotkeyRuntime {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ControlHotkeyRuntimeState {
+                mode: AppMode::Idle,
+                suppressor: ControlHotkeySuppressor::default(),
+            })),
+        }
+    }
+}
+
+impl ControlHotkeyRuntime {
+    fn lock(&self) -> MutexGuard<'_, ControlHotkeyRuntimeState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn mode(&self) -> AppMode {
+        self.lock().mode
+    }
+
+    fn set_mode(&self, mode: AppMode) {
+        self.lock().mode = mode;
+    }
+
+    fn enter_recording(&self, suppress_record_hotkey_release_tail: bool) {
+        let mut state = self.lock();
+        state.suppressor.reset();
+        if suppress_record_hotkey_release_tail {
+            state.suppressor.suppress_record_hotkey_release_tail();
+        }
+        state.mode = AppMode::Recording;
+    }
+
+    fn finish_recording(&self) {
+        let mut state = self.lock();
+        state.suppressor.reset();
+        state.mode = AppMode::Idle;
+    }
+
+    pub(crate) fn decide(&self, event: RawInputEvent) -> ControlHotkeyDecision {
+        let mut state = self.lock();
+        let mode = state.mode;
+        state.suppressor.decide(event, mode)
+    }
+
+    pub(crate) fn reset(&self) {
+        self.lock().suppressor.reset();
+    }
+
+    pub(crate) fn reset_action(&self) {
+        self.lock().suppressor.reset_action();
+    }
+
+    fn reset_filter(&self) {
+        self.lock().suppressor.reset_filter();
+    }
+
+    fn filter(&self, event: RawInputEvent) -> Vec<RawInputEvent> {
+        self.lock().suppressor.filter(event)
+    }
+
+    fn set_hotkeys(
+        &self,
+        hotkeys: Vec<ControlHotkey>,
+        record_hotkey: ControlHotkey,
+        playback_hotkey: ControlHotkey,
+        stop_hotkey: ControlHotkey,
+    ) {
+        self.lock()
+            .suppressor
+            .set_hotkeys(hotkeys, record_hotkey, playback_hotkey, stop_hotkey);
+    }
+}
+
+pub struct AppController {
     recorder: Recorder,
-    control_hotkeys: ControlHotkeySuppressor,
+    control_hotkeys: ControlHotkeyRuntime,
     playback_settings: PlaybackSettings,
     recording: Option<Recording>,
     recording_needs_save: bool,
@@ -92,9 +180,8 @@ impl Default for AppController {
 impl AppController {
     pub fn new() -> Self {
         Self {
-            mode: AppMode::Idle,
             recorder: Recorder::new(16),
-            control_hotkeys: ControlHotkeySuppressor::default(),
+            control_hotkeys: ControlHotkeyRuntime::default(),
             playback_settings: PlaybackSettings {
                 loop_count: Some(1),
                 speed_multiplier: 1.0,
@@ -111,12 +198,12 @@ impl AppController {
     }
 
     pub fn mode(&self) -> AppMode {
-        self.mode
+        self.control_hotkeys.mode()
     }
 
     pub fn ui_state(&self) -> UiState {
         UiState {
-            mode: self.mode,
+            mode: self.mode(),
             recording_name: self
                 .recording
                 .as_ref()
@@ -162,20 +249,17 @@ impl AppController {
         created_at: impl Into<String>,
         suppress_record_hotkey_release_tail: bool,
     ) -> Result<(), String> {
-        match self.mode {
+        match self.mode() {
             AppMode::Idle => {}
             AppMode::Recording => return Err("cannot record while recording".to_string()),
             AppMode::Playing => return Err("cannot record while playing".to_string()),
         }
         self.ensure_recording_saved_before_replace()?;
         self.recorder.start(name, started_at_ms, created_at)?;
-        self.control_hotkeys.reset();
-        if suppress_record_hotkey_release_tail {
-            self.control_hotkeys.suppress_record_hotkey_release_tail();
-        }
         self.recording = None;
         self.recording_needs_save = false;
-        self.mode = AppMode::Recording;
+        self.control_hotkeys
+            .enter_recording(suppress_record_hotkey_release_tail);
         self.message = "Recording".to_string();
         self.message_is_error = false;
         self.bump_revision();
@@ -184,10 +268,9 @@ impl AppController {
 
     pub fn stop_recording(&mut self, stopped_at_ms: u64) -> Result<Recording, String> {
         let recording = self.recorder.stop(stopped_at_ms)?;
-        self.control_hotkeys.reset();
         self.recording = Some(recording.clone());
         self.recording_needs_save = true;
-        self.mode = AppMode::Idle;
+        self.control_hotkeys.finish_recording();
         self.message = "Recording stopped".to_string();
         self.message_is_error = false;
         self.bump_revision();
@@ -195,7 +278,7 @@ impl AppController {
     }
 
     pub fn capture_input(&mut self, event: RawInputEvent) {
-        if self.mode != AppMode::Recording {
+        if self.mode() != AppMode::Recording {
             return;
         }
 
@@ -208,16 +291,24 @@ impl AppController {
         self.control_hotkey_decision(event).action
     }
 
+    pub(crate) fn control_hotkey_runtime(&self) -> ControlHotkeyRuntime {
+        self.control_hotkeys.clone()
+    }
+
     pub fn control_hotkey_decision(&mut self, event: RawInputEvent) -> ControlHotkeyDecision {
-        self.control_hotkeys.decide(event, self.mode)
+        self.control_hotkeys.decide(event)
     }
 
     pub fn reset_control_hotkey_state(&mut self) {
         self.control_hotkeys.reset();
     }
 
+    pub(crate) fn reset_recording_hotkey_filter(&mut self) {
+        self.control_hotkeys.reset_filter();
+    }
+
     pub fn set_recording(&mut self, recording: Recording) -> Result<(), String> {
-        match self.mode {
+        match self.mode() {
             AppMode::Idle => {}
             AppMode::Recording => return Err("cannot load recording while recording".to_string()),
             AppMode::Playing => return Err("cannot load recording while playing".to_string()),
@@ -226,7 +317,7 @@ impl AppController {
         recording.validate()?;
         self.recording = Some(recording);
         self.recording_needs_save = false;
-        self.mode = AppMode::Idle;
+        self.control_hotkeys.set_mode(AppMode::Idle);
         self.message = "Recording loaded".to_string();
         self.message_is_error = false;
         self.bump_revision();
@@ -258,7 +349,7 @@ impl AppController {
     }
 
     pub fn mark_idle(&mut self, message: impl Into<String>) {
-        self.mode = AppMode::Idle;
+        self.control_hotkeys.set_mode(AppMode::Idle);
         self.active_playback_id = None;
         self.message = message.into();
         self.message_is_error = false;
@@ -271,11 +362,11 @@ impl AppController {
         message: impl Into<String>,
         message_is_error: bool,
     ) -> bool {
-        if self.mode != AppMode::Playing || self.active_playback_id != Some(id) {
+        if self.mode() != AppMode::Playing || self.active_playback_id != Some(id) {
             return false;
         }
 
-        self.mode = AppMode::Idle;
+        self.control_hotkeys.set_mode(AppMode::Idle);
         self.active_playback_id = None;
         self.message = message.into();
         self.message_is_error = message_is_error;
@@ -309,7 +400,7 @@ impl AppController {
         &mut self,
         settings: PlaybackSettings,
     ) -> Result<PlaybackRun, String> {
-        match self.mode {
+        match self.mode() {
             AppMode::Idle => {}
             AppMode::Recording => return Err("cannot play while recording".to_string()),
             AppMode::Playing => return Err("cannot play while playing".to_string()),
@@ -323,7 +414,7 @@ impl AppController {
         self.next_playback_id += 1;
         let id = PlaybackRunId(self.next_playback_id);
         self.active_playback_id = Some(id);
-        self.mode = AppMode::Playing;
+        self.control_hotkeys.set_mode(AppMode::Playing);
         self.message = "Playing".to_string();
         self.message_is_error = false;
         self.bump_revision();
@@ -335,7 +426,7 @@ impl AppController {
     }
 
     pub fn stop_playback(&mut self) {
-        if self.mode != AppMode::Playing {
+        if self.mode() != AppMode::Playing {
             return;
         }
         if self.stop_token.is_stopped() {
@@ -348,7 +439,7 @@ impl AppController {
     }
 
     pub fn stop_active(&mut self, stopped_at_ms: u64) -> Result<(), String> {
-        match self.mode {
+        match self.mode() {
             AppMode::Recording => {
                 self.stop_recording(stopped_at_ms)?;
             }
@@ -527,10 +618,18 @@ impl ControlHotkeySuppressor {
     }
 
     fn reset(&mut self) {
-        self.pending_modifiers.clear();
-        self.active_modifiers.clear();
+        self.reset_filter();
+        self.reset_action();
+    }
+
+    fn reset_action(&mut self) {
         self.action_active_modifiers.clear();
         self.action_suppressed_keys.clear();
+    }
+
+    fn reset_filter(&mut self) {
+        self.pending_modifiers.clear();
+        self.active_modifiers.clear();
         self.suppressed_modifier_releases.clear();
         self.suppress_unknown_modifier_release_tail = false;
         self.suppressed_key = None;
