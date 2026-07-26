@@ -1,7 +1,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ask, open, save } from "@tauri-apps/plugin-dialog";
-import type { HotkeyConfig, RecordingFile, UiState } from "../types";
+import type {
+  AdvancedSettingsConfig,
+  HotkeyConfig,
+  PrivilegeState,
+  RecordingFile,
+  UiState
+} from "../types";
 
 export function getState() {
   return invoke<UiState>("get_state");
@@ -82,6 +88,26 @@ export function setHotkeys(config: HotkeyConfig) {
   return invoke<HotkeyConfig>("set_hotkeys", { config });
 }
 
+export function getAdvancedSettings() {
+  return invoke<AdvancedSettingsConfig>("get_advanced_settings");
+}
+
+export function setAdvancedSettings(settings: AdvancedSettingsConfig) {
+  return invoke<AdvancedSettingsConfig>("set_advanced_settings", { settings });
+}
+
+export function showAdvancedSettings() {
+  return invoke<void>("show_advanced_settings");
+}
+
+export function getPrivilegeState() {
+  return invoke<PrivilegeState>("get_privilege_state");
+}
+
+export function restartAsAdministrator() {
+  return invoke<void>("restart_as_administrator");
+}
+
 export function confirmDeleteRecording(name: string) {
   return ask(`确定要永久删除录制“${name}”吗？`, {
     title: "删除录制",
@@ -98,5 +124,19 @@ export async function subscribeToState(onState: (state: UiState) => void) {
 export async function subscribeToRecordingsChanged(onChanged: () => void) {
   return listen("remember://recordings-changed", () => {
     onChanged();
+  });
+}
+
+export async function subscribeToHotkeysChanged(onChanged: (config: HotkeyConfig) => void) {
+  return listen<HotkeyConfig>("remember://hotkeys-changed", (event) => {
+    onChanged(event.payload);
+  });
+}
+
+export async function subscribeToAdvancedSettingsChanged(
+  onChanged: (settings: AdvancedSettingsConfig) => void
+) {
+  return listen<AdvancedSettingsConfig>("remember://advanced-settings-changed", (event) => {
+    onChanged(event.payload);
   });
 }

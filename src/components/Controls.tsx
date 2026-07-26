@@ -1,4 +1,4 @@
-import { Circle, FolderOpen, Play, Save, Square } from "lucide-react";
+import { Circle, FolderOpen, Play, Save, Settings, Square } from "lucide-react";
 import type { UiState } from "../types";
 
 interface ControlsProps {
@@ -11,6 +11,7 @@ interface ControlsProps {
   onStop: () => void;
   onSave: () => void;
   onOpen: () => void;
+  onAdvancedSettings: () => void;
 }
 
 export function Controls({
@@ -22,7 +23,8 @@ export function Controls({
   onPlay,
   onStop,
   onSave,
-  onOpen
+  onOpen,
+  onAdvancedSettings
 }: ControlsProps) {
   const isRecording = state.mode === "recording";
   const isPlaying = state.mode === "playing";
@@ -66,6 +68,15 @@ export function Controls({
       >
         <FolderOpen size={16} aria-hidden="true" />
         <span className="button-label">打开</span>
+      </button>
+      <button
+        className="action-button"
+        type="button"
+        onClick={onAdvancedSettings}
+        disabled={pendingCommand || isBusy}
+      >
+        <Settings size={16} aria-hidden="true" />
+        <span className="button-label">高级设置</span>
       </button>
     </section>
   );

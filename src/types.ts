@@ -25,3 +25,13 @@ export interface HotkeyConfig {
   playback: string;
   stop: string;
 }
+
+export interface AdvancedSettingsConfig {
+  feedback_volume_percent: number;
+  feedback_muted: boolean;
+  show_activity_indicator: boolean;
+}
+
+export interface PrivilegeState {
+  is_elevated: boolean;
+}

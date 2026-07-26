@@ -1,6 +1,6 @@
 [package]
 name = "remember"
-version = "0.1.1"
+version = "0.1.2"
 description = "Portable Windows macro recorder"
 edition = "2021"
 
@@ -22,9 +22,11 @@ tauri-plugin-global-shortcut = "2"
 thiserror = "1"
 windows = { version = "0.58", features = [
   "Win32_Foundation",
+  "Win32_Security",
   "Win32_System_LibraryLoader",
   "Win32_System_Threading",
   "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging"
 ] }
 

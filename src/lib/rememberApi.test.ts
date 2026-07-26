@@ -12,6 +12,13 @@ import {
   setPlaybackSettings,
   startPlayback,
   confirmDeleteRecording,
+  getAdvancedSettings,
+  getPrivilegeState,
+  restartAsAdministrator,
+  setAdvancedSettings,
+  showAdvancedSettings,
+  subscribeToAdvancedSettingsChanged,
+  subscribeToHotkeysChanged,
   subscribeToRecordingsChanged
 } from "./rememberApi";
 
@@ -207,5 +214,56 @@ describe("rememberApi", () => {
 
     expect(tauriMocks.invoke).toHaveBeenNthCalledWith(1, "get_hotkeys");
     expect(tauriMocks.invoke).toHaveBeenNthCalledWith(2, "set_hotkeys", { config });
+  });
+
+  it("reads and saves advanced settings", async () => {
+    const settings = {
+      feedback_volume_percent: 75,
+      feedback_muted: true,
+      show_activity_indicator: false
+    };
+    tauriMocks.invoke.mockResolvedValue(settings);
+
+    await expect(getAdvancedSettings()).resolves.toBe(settings);
+    await expect(setAdvancedSettings(settings)).resolves.toBe(settings);
+
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(1, "get_advanced_settings");
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(2, "set_advanced_settings", { settings });
+  });
+
+  it("opens advanced settings and invokes administrator restart commands", async () => {
+    tauriMocks.invoke
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({ is_elevated: false })
+      .mockResolvedValueOnce(undefined);
+
+    await expect(showAdvancedSettings()).resolves.toBeUndefined();
+    await expect(getPrivilegeState()).resolves.toEqual({ is_elevated: false });
+    await expect(restartAsAdministrator()).resolves.toBeUndefined();
+
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(1, "show_advanced_settings");
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(2, "get_privilege_state");
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(3, "restart_as_administrator");
+  });
+
+  it("forwards hotkey and advanced-settings change events", async () => {
+    const hotkeyCallback = vi.fn();
+    const settingsCallback = vi.fn();
+    const hotkeys = { record: "F9", playback: "F12", stop: "F9" };
+    const settings = {
+      feedback_volume_percent: 80,
+      feedback_muted: false,
+      show_activity_indicator: true
+    };
+    tauriMocks.listen.mockImplementation(async (eventName, handler) => {
+      handler({ payload: eventName.includes("hotkeys") ? hotkeys : settings });
+      return vi.fn();
+    });
+
+    await subscribeToHotkeysChanged(hotkeyCallback);
+    await subscribeToAdvancedSettingsChanged(settingsCallback);
+
+    expect(hotkeyCallback).toHaveBeenCalledWith(hotkeys);
+    expect(settingsCallback).toHaveBeenCalledWith(settings);
   });
 });

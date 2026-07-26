@@ -145,7 +145,7 @@ pub fn register(
             &record_shortcut,
             allow_conflicts,
             move |app, _shortcut, event| {
-                if event.state != ShortcutState::Pressed || main_window_focused(app) {
+                if event.state != ShortcutState::Pressed || remember_window_focused(app) {
                     return;
                 }
 
@@ -176,7 +176,7 @@ pub fn register(
             &playback_shortcut,
             allow_conflicts,
             |app, _shortcut, event| {
-                if event.state != ShortcutState::Pressed || main_window_focused(app) {
+                if event.state != ShortcutState::Pressed || remember_window_focused(app) {
                     return;
                 }
 
@@ -193,7 +193,7 @@ pub fn register(
                 &stop_shortcut,
                 allow_conflicts,
                 |app, _shortcut, event| {
-                    if event.state != ShortcutState::Pressed || main_window_focused(app) {
+                    if event.state != ShortcutState::Pressed || remember_window_focused(app) {
                         return;
                     }
 
@@ -235,10 +235,12 @@ pub fn apply_to_controller(app: &AppHandle, config: &HotkeyConfig) -> Result<(),
 // while the main window is focused, so the global shortcut defers to it to
 // avoid double-triggering (mirrors the Windows hook's foreground check).
 #[cfg(not(target_os = "windows"))]
-fn main_window_focused(app: &AppHandle) -> bool {
-    app.get_webview_window("main")
-        .and_then(|window| window.is_focused().ok())
-        .unwrap_or(false)
+fn remember_window_focused(app: &AppHandle) -> bool {
+    ["main", "advanced-settings"].iter().any(|label| {
+        app.get_webview_window(label)
+            .and_then(|window| window.is_focused().ok())
+            .unwrap_or(false)
+    })
 }
 
 #[cfg(not(target_os = "windows"))]

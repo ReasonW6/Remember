@@ -45,6 +45,82 @@ fn main_window_uses_custom_titlebar() {
 }
 
 #[test]
+fn activity_indicator_window_is_non_interactive_and_topmost() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let config = std::fs::read_to_string(format!("{manifest_dir}/tauri.conf.json"))
+        .expect("read tauri config");
+    let config: serde_json::Value = serde_json::from_str(&config).expect("parse tauri config");
+    let indicator = config["app"]["windows"]
+        .as_array()
+        .expect("windows should be an array")
+        .iter()
+        .find(|window| window["label"] == "activity-indicator")
+        .expect("activity indicator window");
+
+    assert_eq!(indicator["visible"], false);
+    assert_eq!(indicator["focus"], false);
+    assert_eq!(indicator["focusable"], false);
+    assert_eq!(indicator["transparent"], true);
+    assert_eq!(indicator["decorations"], false);
+    assert_eq!(indicator["alwaysOnTop"], true);
+    assert_eq!(indicator["skipTaskbar"], true);
+    assert_eq!(indicator["shadow"], false);
+
+    let capability = std::fs::read_to_string(format!(
+        "{manifest_dir}/capabilities/activity-indicator.json"
+    ))
+    .expect("read activity indicator capability");
+    let capability: serde_json::Value =
+        serde_json::from_str(&capability).expect("parse activity indicator capability");
+    assert_eq!(
+        capability["windows"],
+        serde_json::json!(["activity-indicator"])
+    );
+    assert_eq!(
+        capability["permissions"],
+        serde_json::json!(["core:event:allow-listen", "core:event:allow-unlisten"])
+    );
+}
+
+#[test]
+fn advanced_settings_window_starts_hidden_with_narrow_permissions() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let config = std::fs::read_to_string(format!("{manifest_dir}/tauri.conf.json"))
+        .expect("read tauri config");
+    let config: serde_json::Value = serde_json::from_str(&config).expect("parse tauri config");
+    let settings = config["app"]["windows"]
+        .as_array()
+        .expect("windows should be an array")
+        .iter()
+        .find(|window| window["label"] == "advanced-settings")
+        .expect("advanced settings window");
+
+    assert_eq!(settings["visible"], false);
+    assert_eq!(settings["focus"], false);
+    assert_eq!(settings["decorations"], false);
+    assert_eq!(settings["resizable"], false);
+    assert_eq!(settings["skipTaskbar"], true);
+
+    let capability = std::fs::read_to_string(format!(
+        "{manifest_dir}/capabilities/advanced-settings.json"
+    ))
+    .expect("read advanced settings capability");
+    let capability: serde_json::Value =
+        serde_json::from_str(&capability).expect("parse advanced settings capability");
+    assert_eq!(
+        capability["windows"],
+        serde_json::json!(["advanced-settings"])
+    );
+    assert_eq!(
+        capability["permissions"],
+        serde_json::json!([
+            "core:window:allow-start-dragging",
+            "core:window:allow-close"
+        ])
+    );
+}
+
+#[test]
 fn production_webview_uses_a_restrictive_csp() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let config = std::fs::read_to_string(format!("{manifest_dir}/tauri.conf.json"))

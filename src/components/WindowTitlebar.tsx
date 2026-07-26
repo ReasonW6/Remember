@@ -8,7 +8,15 @@ function runWindowAction(action: () => Promise<void>) {
   });
 }
 
-export function WindowTitlebar() {
+interface WindowTitlebarProps {
+  subtitle?: string;
+  showMinimize?: boolean;
+}
+
+export function WindowTitlebar({
+  subtitle = "录制播放",
+  showMinimize = true
+}: WindowTitlebarProps) {
   const appWindow = getCurrentWindow();
 
   function handleDrag(event: MouseEvent<HTMLDivElement>) {
@@ -33,19 +41,21 @@ export function WindowTitlebar() {
             Remember
           </span>
           <span className="window-titlebar-subtitle" data-tauri-drag-region>
-            录制播放
+            {subtitle}
           </span>
         </div>
       </div>
       <div className="window-titlebar-controls" role="toolbar" aria-label="窗口控制">
-        <button
-          className="window-control-button"
-          type="button"
-          aria-label="最小化"
-          onClick={() => runWindowAction(() => appWindow.minimize())}
-        >
-          <Minus size={14} aria-hidden="true" />
-        </button>
+        {showMinimize ? (
+          <button
+            className="window-control-button"
+            type="button"
+            aria-label="最小化"
+            onClick={() => runWindowAction(() => appWindow.minimize())}
+          >
+            <Minus size={14} aria-hidden="true" />
+          </button>
+        ) : null}
         <button
           className="window-control-button close-button"
           type="button"

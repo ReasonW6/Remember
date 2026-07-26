@@ -11,7 +11,16 @@ const toneFrequency: Record<FeedbackTone, number> = {
   playback_stop: 330
 };
 
-export function playFeedbackTone(tone: FeedbackTone) {
+export function playFeedbackTone(
+  tone: FeedbackTone,
+  volumePercent = 50,
+  muted = false
+) {
+  const normalizedVolume = Math.min(100, Math.max(0, volumePercent));
+  if (muted || normalizedVolume === 0) {
+    return;
+  }
+
   const AudioContextClass = window.AudioContext ?? window.webkitAudioContext;
   if (!AudioContextClass) {
     return;
@@ -23,8 +32,9 @@ export function playFeedbackTone(tone: FeedbackTone) {
 
   oscillator.type = "sine";
   oscillator.frequency.value = toneFrequency[tone];
+  const peakGain = 0.48 * (normalizedVolume / 100);
   gain.gain.setValueAtTime(0.0001, context.currentTime);
-  gain.gain.exponentialRampToValueAtTime(0.24, context.currentTime + 0.01);
+  gain.gain.exponentialRampToValueAtTime(peakGain, context.currentTime + 0.01);
   gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.14);
 
   oscillator.connect(gain);

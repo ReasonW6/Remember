@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { AdministratorControl } from "./components/AdministratorControl";
 import { Controls } from "./components/Controls";
-import { HotkeyPanel } from "./components/HotkeyPanel";
 import { PlaybackSettings } from "./components/PlaybackSettings";
 import { RecordingList } from "./components/RecordingList";
 import { StatusPanel } from "./components/StatusPanel";
@@ -10,7 +10,13 @@ import * as rememberApi from "./lib/rememberApi";
 import { playFeedbackTone } from "./lib/sounds";
 import { displayErrorMessage, displayMessage, displayMode } from "./localization";
 import "./styles.css";
-import type { AppMode, HotkeyConfig, RecordingFile, UiState } from "./types";
+import type {
+  AdvancedSettingsConfig,
+  AppMode,
+  HotkeyConfig,
+  RecordingFile,
+  UiState
+} from "./types";
 
 const idleState: UiState = {
   mode: "idle",
@@ -28,6 +34,12 @@ const defaultHotkeys: HotkeyConfig = {
   stop: "F8"
 };
 
+const defaultAdvancedSettings: AdvancedSettingsConfig = {
+  feedback_volume_percent: 50,
+  feedback_muted: false,
+  show_activity_indicator: true
+};
+
 const loopCountError = "循环次数必须是大于等于 1 的整数。";
 const speedError = "速度必须是大于 0 的有效数字。";
 
@@ -40,10 +52,12 @@ export function App() {
   const [recordings, setRecordings] = useState<RecordingFile[]>([]);
   const [selectedRecordingPath, setSelectedRecordingPath] = useState<string | null>(null);
   const [hotkeys, setHotkeys] = useState(defaultHotkeys);
+  const [isElevated, setIsElevated] = useState(false);
   const [pendingCommand, setPendingCommand] = useState(false);
   const pendingCommandRef = useRef(false);
   const latestRevisionRef = useRef(idleState.revision);
   const previousModeRef = useRef(idleState.mode);
+  const advancedSettingsRef = useRef(defaultAdvancedSettings);
   const hasRecording = state.step_count > 0;
   const isBusy = state.mode === "recording" || state.mode === "playing";
   const validationError = useMemo(() => {
@@ -60,6 +74,8 @@ export function App() {
     let disposed = false;
     let unsubscribeState: (() => void) | undefined;
     let unsubscribeRecordings: (() => void) | undefined;
+    let unsubscribeHotkeys: (() => void) | undefined;
+    let unsubscribeAdvancedSettings: (() => void) | undefined;
 
     rememberApi
       .getState()
@@ -92,6 +108,32 @@ export function App() {
       .then((nextHotkeys) => {
         if (!disposed) {
           setHotkeys(nextHotkeys);
+        }
+      })
+      .catch((loadError: unknown) => {
+        if (!disposed) {
+          addInitializationError(loadError);
+        }
+      });
+
+    rememberApi
+      .getAdvancedSettings()
+      .then((settings) => {
+        if (!disposed) {
+          advancedSettingsRef.current = settings;
+        }
+      })
+      .catch((loadError: unknown) => {
+        if (!disposed) {
+          addInitializationError(loadError);
+        }
+      });
+
+    rememberApi
+      .getPrivilegeState()
+      .then((privilegeState) => {
+        if (!disposed) {
+          setIsElevated(privilegeState.is_elevated);
         }
       })
       .catch((loadError: unknown) => {
@@ -141,10 +183,48 @@ export function App() {
         }
       });
 
+    rememberApi
+      .subscribeToHotkeysChanged((nextHotkeys) => {
+        if (!disposed) {
+          setHotkeys(nextHotkeys);
+        }
+      })
+      .then((nextUnsubscribe) => {
+        unsubscribeHotkeys = nextUnsubscribe;
+        if (disposed) {
+          unsubscribeHotkeys();
+        }
+      })
+      .catch((subscribeError: unknown) => {
+        if (!disposed) {
+          addInitializationError(subscribeError);
+        }
+      });
+
+    rememberApi
+      .subscribeToAdvancedSettingsChanged((settings) => {
+        if (!disposed) {
+          advancedSettingsRef.current = settings;
+        }
+      })
+      .then((nextUnsubscribe) => {
+        unsubscribeAdvancedSettings = nextUnsubscribe;
+        if (disposed) {
+          unsubscribeAdvancedSettings();
+        }
+      })
+      .catch((subscribeError: unknown) => {
+        if (!disposed) {
+          addInitializationError(subscribeError);
+        }
+      });
+
     return () => {
       disposed = true;
       unsubscribeState?.();
       unsubscribeRecordings?.();
+      unsubscribeHotkeys?.();
+      unsubscribeAdvancedSettings?.();
     };
   }, []);
 
@@ -186,14 +266,31 @@ export function App() {
       return;
     }
 
+    const settings = advancedSettingsRef.current;
     if (nextMode === "recording") {
-      playFeedbackTone("recording_start");
+      playFeedbackTone(
+        "recording_start",
+        settings.feedback_volume_percent,
+        settings.feedback_muted
+      );
     } else if (previousMode === "recording") {
-      playFeedbackTone("recording_stop");
+      playFeedbackTone(
+        "recording_stop",
+        settings.feedback_volume_percent,
+        settings.feedback_muted
+      );
     } else if (nextMode === "playing") {
-      playFeedbackTone("playback_start");
+      playFeedbackTone(
+        "playback_start",
+        settings.feedback_volume_percent,
+        settings.feedback_muted
+      );
     } else if (previousMode === "playing") {
-      playFeedbackTone("playback_stop");
+      playFeedbackTone(
+        "playback_stop",
+        settings.feedback_volume_percent,
+        settings.feedback_muted
+      );
     }
 
     previousModeRef.current = nextMode;
@@ -296,10 +393,12 @@ export function App() {
     void applyCommand(refreshRecordings);
   }
 
-  function handleSaveHotkeys(config: HotkeyConfig) {
-    void applyCommand(async () => {
-      setHotkeys(await rememberApi.setHotkeys(config));
-    });
+  function handleAdvancedSettings() {
+    void applyCommand(rememberApi.showAdvancedSettings);
+  }
+
+  function handleRestartAsAdministrator() {
+    void applyCommand(rememberApi.restartAsAdministrator);
   }
 
   function handleDeleteRecording(recording: RecordingFile, force: boolean) {
@@ -403,6 +502,12 @@ export function App() {
               onStop={handleStop}
               onSave={handleSave}
               onOpen={handleOpen}
+              onAdvancedSettings={handleAdvancedSettings}
+            />
+            <AdministratorControl
+              isElevated={isElevated}
+              disabled={pendingCommand || isBusy}
+              onRestart={handleRestartAsAdministrator}
             />
             <RecordingList
               recordings={recordings}
@@ -420,11 +525,6 @@ export function App() {
               onSpeedMultiplierChange={setSpeedMultiplier}
             />
             <StatusPanel state={state} error={displayedError} />
-            <HotkeyPanel
-              hotkeys={hotkeys}
-              disabled={pendingCommand || isBusy}
-              onSave={handleSaveHotkeys}
-            />
           </div>
         </div>
       </div>

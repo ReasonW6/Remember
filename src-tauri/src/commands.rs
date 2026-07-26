@@ -1,12 +1,14 @@
 use crate::{
+    advanced_settings::{self, AdvancedSettings},
     app_state::{AppController, AppMode, ControlHotkeyAction, PlaybackRun, UiState},
     clock::now_ms,
     hotkeys::{self, HotkeyConfig},
     input::SystemInputExecutor,
     player::play_recording,
+    privileges::{self, PrivilegeState},
     storage::{self, RecordingFile},
 };
-use chrono::Utc;
+use chrono::{DateTime, Local};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -18,8 +20,20 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 pub type SharedApp = Arc<Mutex<AppController>>;
 const RECORDINGS_CHANGED_EVENT: &str = "remember://recordings-changed";
+const HOTKEYS_CHANGED_EVENT: &str = "remember://hotkeys-changed";
+const ADVANCED_SETTINGS_CHANGED_EVENT: &str = "remember://advanced-settings-changed";
 
 fn emit_state(app: &AppHandle, state: UiState) -> Result<(), String> {
+    let indicator_enabled = match advanced_settings::current(app) {
+        Ok(settings) => settings.show_activity_indicator,
+        Err(error) => {
+            eprintln!("Remember advanced settings could not be read: {error}");
+            true
+        }
+    };
+    if let Err(error) = crate::activity_indicator::sync(app, state.mode, indicator_enabled) {
+        eprintln!("Remember activity indicator could not update: {error}");
+    }
     app.emit("remember://state", state)
         .map_err(|error| error.to_string())
 }
@@ -120,7 +134,7 @@ fn start_recording_impl(
             .lock()
             .map_err(|_| "state lock poisoned".to_string())?;
         let name = format!("recording-{started_at_ms}");
-        let created_at = Utc::now().to_rfc3339();
+        let created_at = Local::now().to_rfc3339();
         if from_hotkey {
             controller.start_recording_from_hotkey(name, started_at_ms, created_at)?;
         } else {
@@ -145,6 +159,8 @@ pub(crate) fn stop_recording_shared(app: AppHandle, state: SharedApp) -> Result<
             .lock()
             .map_err(|_| "state lock poisoned".to_string())?;
         let recording = controller.stop_recording(now_ms())?;
+        let name = default_recording_name(&recording);
+        let recording = controller.set_stopped_recording_name(name)?;
         (recording, controller.ui_state())
     };
     drop(capture_pause);
@@ -250,7 +266,54 @@ pub fn set_hotkeys(
             .map_err(|error| error.to_string())?;
         controller.set_control_hotkeys(hotkeys, record_hotkey, playback_hotkey, stop_hotkey);
     }
+    if let Err(error) = app.emit(HOTKEYS_CHANGED_EVENT, normalized.clone()) {
+        eprintln!("Remember hotkey change event failed: {error}");
+    }
     Ok(normalized)
+}
+
+#[tauri::command]
+pub fn get_advanced_settings(app: AppHandle) -> Result<AdvancedSettings, String> {
+    advanced_settings::current(&app)
+}
+
+#[tauri::command]
+pub fn set_advanced_settings(
+    app: AppHandle,
+    state: State<'_, SharedApp>,
+    settings: AdvancedSettings,
+) -> Result<AdvancedSettings, String> {
+    let settings = advanced_settings::save(&app, settings)?;
+    advanced_settings::replace(&app, settings)?;
+    let mode = state
+        .lock()
+        .map_err(|_| "state lock poisoned".to_string())?
+        .mode();
+    crate::activity_indicator::sync(&app, mode, settings.show_activity_indicator)?;
+    app.emit(ADVANCED_SETTINGS_CHANGED_EVENT, settings)
+        .map_err(|error| error.to_string())?;
+    Ok(settings)
+}
+
+#[tauri::command]
+pub fn show_advanced_settings(app: AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("advanced-settings")
+        .ok_or_else(|| "advanced settings window is unavailable".to_string())?;
+    window.show().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn get_privilege_state() -> Result<PrivilegeState, String> {
+    privileges::state()
+}
+
+#[tauri::command]
+pub fn restart_as_administrator(app: AppHandle) -> Result<(), String> {
+    privileges::restart_as_administrator(&app)?;
+    app.exit(0);
+    Ok(())
 }
 
 #[tauri::command]
@@ -441,9 +504,17 @@ pub(crate) fn run_control_hotkey_action(
     }
 }
 
+fn default_recording_name(recording: &crate::model::Recording) -> String {
+    let date = DateTime::parse_from_rfc3339(&recording.created_at)
+        .map(|created_at| created_at.format("%Y%m%d").to_string())
+        .unwrap_or_else(|_| Local::now().format("%Y%m%d").to_string());
+    format!("{date}-{}ms", recording.duration_ms)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::recording_library_dir_for_executable;
+    use super::{default_recording_name, recording_library_dir_for_executable};
+    use crate::model::Recording;
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -454,5 +525,18 @@ mod tests {
             recording_library_dir_for_executable(&executable).expect("recording directory");
 
         assert_eq!(directory, PathBuf::from("portable").join("recordings"));
+    }
+
+    #[test]
+    fn default_recording_name_uses_start_date_and_duration() {
+        let recording = Recording {
+            version: 1,
+            name: "temporary".to_string(),
+            created_at: "2026-07-26T23:59:00+08:00".to_string(),
+            duration_ms: 11_824,
+            steps: Vec::new(),
+        };
+
+        assert_eq!(default_recording_name(&recording), "20260726-11824ms");
     }
 }

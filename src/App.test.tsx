@@ -18,10 +18,15 @@ const apiMocks = vi.hoisted(() => ({
   loadRecording: vi.fn(),
   saveCurrentRecording: vi.fn(),
   getHotkeys: vi.fn(),
-  setHotkeys: vi.fn(),
+  getAdvancedSettings: vi.fn(),
+  showAdvancedSettings: vi.fn(),
+  getPrivilegeState: vi.fn(),
+  restartAsAdministrator: vi.fn(),
   confirmDeleteRecording: vi.fn(),
   subscribeToState: vi.fn(),
-  subscribeToRecordingsChanged: vi.fn()
+  subscribeToRecordingsChanged: vi.fn(),
+  subscribeToHotkeysChanged: vi.fn(),
+  subscribeToAdvancedSettingsChanged: vi.fn()
 }));
 
 const soundMocks = vi.hoisted(() => ({
@@ -105,11 +110,21 @@ const defaultHotkeys = {
 describe("App", () => {
   let stateListener: ((state: UiState) => void) | undefined;
   let recordingsChangedListener: (() => void) | undefined;
+  let hotkeysChangedListener: ((hotkeys: typeof defaultHotkeys) => void) | undefined;
+  let advancedSettingsChangedListener:
+    | ((settings: {
+        feedback_volume_percent: number;
+        feedback_muted: boolean;
+        show_activity_indicator: boolean;
+      }) => void)
+    | undefined;
 
   beforeEach(() => {
     vi.clearAllMocks();
     stateListener = undefined;
     recordingsChangedListener = undefined;
+    hotkeysChangedListener = undefined;
+    advancedSettingsChangedListener = undefined;
     apiMocks.getState.mockResolvedValue(idleState);
     apiMocks.listRecordings.mockResolvedValue([]);
     apiMocks.deleteRecording.mockResolvedValue(undefined);
@@ -118,7 +133,14 @@ describe("App", () => {
     );
     apiMocks.setPlaybackSettings.mockResolvedValue(undefined);
     apiMocks.getHotkeys.mockResolvedValue(defaultHotkeys);
-    apiMocks.setHotkeys.mockResolvedValue(defaultHotkeys);
+    apiMocks.getAdvancedSettings.mockResolvedValue({
+      feedback_volume_percent: 50,
+      feedback_muted: false,
+      show_activity_indicator: true
+    });
+    apiMocks.showAdvancedSettings.mockResolvedValue(undefined);
+    apiMocks.getPrivilegeState.mockResolvedValue({ is_elevated: false });
+    apiMocks.restartAsAdministrator.mockResolvedValue(undefined);
     apiMocks.confirmDeleteRecording.mockResolvedValue(true);
     apiMocks.subscribeToState.mockImplementation(async (listener: (state: UiState) => void) => {
       stateListener = listener;
@@ -127,6 +149,18 @@ describe("App", () => {
     apiMocks.subscribeToRecordingsChanged.mockImplementation(
       async (listener: () => void) => {
         recordingsChangedListener = listener;
+        return () => undefined;
+      }
+    );
+    apiMocks.subscribeToHotkeysChanged.mockImplementation(
+      async (listener: (hotkeys: typeof defaultHotkeys) => void) => {
+        hotkeysChangedListener = listener;
+        return () => undefined;
+      }
+    );
+    apiMocks.subscribeToAdvancedSettingsChanged.mockImplementation(
+      async (listener: typeof advancedSettingsChangedListener) => {
+        advancedSettingsChangedListener = listener;
         return () => undefined;
       }
     );
@@ -142,7 +176,7 @@ describe("App", () => {
     windowMocks.close.mockResolvedValue(undefined);
   });
 
-  it("renders idle controls and hotkeys", async () => {
+  it("renders idle controls and moves hotkeys into advanced settings", async () => {
     render(<App />);
 
     expect(screen.getByRole("toolbar", { name: "窗口控制" })).toBeInTheDocument();
@@ -153,21 +187,31 @@ describe("App", () => {
     expect(await screen.findByRole("button", { name: "录制" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "播放" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "停止" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "高级设置" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "以管理员身份重启" })).toBeEnabled();
+    const administratorHelp = screen.getByLabelText("管理员模式说明");
+    expect(administratorHelp).toHaveAttribute(
+      "data-tooltip",
+      expect.stringContaining("高权限的系统窗口")
+    );
+    expect(administratorHelp).not.toHaveAttribute(
+      "data-tooltip",
+      expect.stringContaining("网络适配器")
+    );
     expect(screen.getByText("模式：就绪")).toBeInTheDocument();
-    expect(screen.getAllByText("F8", { selector: "kbd" })).toHaveLength(2);
-    expect(screen.getByText("F12", { selector: "kbd" })).toBeInTheDocument();
-    expect(screen.getByText("快捷键")).toBeInTheDocument();
+    expect(screen.queryByText("快捷键")).not.toBeInTheDocument();
     expect(screen.getByText("暂无录制文件")).toBeInTheDocument();
     expect(screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent)).toEqual([
       "录制文件",
       "回放设置",
-      "状态",
-      "快捷键"
+      "状态"
     ]);
 
     await waitFor(() => expect(apiMocks.getState).toHaveBeenCalledTimes(1));
     expect(apiMocks.listRecordings).toHaveBeenCalledTimes(1);
     expect(apiMocks.getHotkeys).toHaveBeenCalledTimes(1);
+    expect(apiMocks.getAdvancedSettings).toHaveBeenCalledTimes(1);
+    expect(apiMocks.getPrivilegeState).toHaveBeenCalledTimes(1);
     expect(apiMocks.subscribeToState).toHaveBeenCalledWith(expect.any(Function));
   });
 
@@ -180,6 +224,31 @@ describe("App", () => {
 
     expect(windowMocks.minimize).toHaveBeenCalledTimes(1);
     expect(windowMocks.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens advanced settings from the main control bar", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "高级设置" }));
+
+    expect(apiMocks.showAdvancedSettings).toHaveBeenCalledTimes(1);
+  });
+
+  it("requests an administrator restart from the dedicated control", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "以管理员身份重启" }));
+
+    expect(apiMocks.restartAsAdministrator).toHaveBeenCalledTimes(1);
+  });
+
+  it("disables administrator restart when already elevated", async () => {
+    apiMocks.getPrivilegeState.mockResolvedValue({ is_elevated: true });
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: "已在管理员模式" })).toBeDisabled();
   });
 
   it("starts recording from the Record button", async () => {
@@ -412,38 +481,6 @@ describe("App", () => {
     await waitFor(() => expect(apiMocks.saveCurrentRecording).toHaveBeenCalledTimes(1));
   });
 
-  it("saves custom hotkeys", async () => {
-    const nextHotkeys = { record: "Ctrl+Shift+R", playback: "F12", stop: "Ctrl+Shift+R" };
-    apiMocks.setHotkeys.mockResolvedValue(nextHotkeys);
-    const user = userEvent.setup();
-    render(<App />);
-
-    const recordHotkey = await screen.findByLabelText("录制快捷键");
-    expect(screen.queryByRole("textbox", { name: "录制快捷键" })).not.toBeInTheDocument();
-    await user.click(recordHotkey);
-    await user.keyboard("{Control>}{Shift>}r{/Shift}{/Control}");
-    const stopHotkey = screen.getByLabelText("停止快捷键");
-    await user.click(stopHotkey);
-    await user.keyboard("{Control>}{Shift>}r{/Shift}{/Control}");
-    await user.click(screen.getByRole("button", { name: "保存快捷键" }));
-
-    await waitFor(() => expect(apiMocks.setHotkeys).toHaveBeenCalledWith(nextHotkeys));
-    expect(await screen.findAllByText("Ctrl+Shift+R", { selector: "kbd" })).toHaveLength(2);
-  });
-
-  it("does not capture keys on a focused hotkey button before capture starts", async () => {
-    const user = userEvent.setup();
-    render(<App />);
-
-    const recordHotkey = await screen.findByLabelText("录制快捷键");
-    act(() => {
-      recordHotkey.focus();
-    });
-    await user.keyboard("a");
-
-    expect(recordHotkey).toHaveTextContent("F8");
-  });
-
   it("shows plugin ACL errors in Chinese", async () => {
     apiMocks.openRecording.mockRejectedValue(
       new Error("Command plugin:dialog|open not allowed by ACL")
@@ -475,10 +512,28 @@ describe("App", () => {
       stateListener?.(finishedState);
     });
 
-    expect(soundMocks.playFeedbackTone).toHaveBeenCalledWith("recording_start");
-    expect(soundMocks.playFeedbackTone).toHaveBeenCalledWith("recording_stop");
-    expect(soundMocks.playFeedbackTone).toHaveBeenCalledWith("playback_start");
-    expect(soundMocks.playFeedbackTone).toHaveBeenCalledWith("playback_stop");
+    expect(soundMocks.playFeedbackTone).toHaveBeenCalledWith("recording_start", 50, false);
+    expect(soundMocks.playFeedbackTone).toHaveBeenCalledWith("recording_stop", 50, false);
+    expect(soundMocks.playFeedbackTone).toHaveBeenCalledWith("playback_start", 50, false);
+    expect(soundMocks.playFeedbackTone).toHaveBeenCalledWith("playback_stop", 50, false);
+  });
+
+  it("uses advanced sound settings received from the settings window", async () => {
+    render(<App />);
+    await waitFor(() =>
+      expect(apiMocks.subscribeToAdvancedSettingsChanged).toHaveBeenCalledTimes(1)
+    );
+
+    act(() => {
+      advancedSettingsChangedListener?.({
+        feedback_volume_percent: 80,
+        feedback_muted: true,
+        show_activity_indicator: false
+      });
+      stateListener?.(recordingState);
+    });
+
+    expect(soundMocks.playFeedbackTone).toHaveBeenCalledWith("recording_start", 80, true);
   });
 
   it("supports infinite playback with a disabled finite loop input", async () => {
@@ -504,6 +559,18 @@ describe("App", () => {
     await user.keyboard("{F12}");
 
     await waitFor(() => expect(apiMocks.stopPlayback).toHaveBeenCalledTimes(1));
+  });
+
+  it("uses hotkeys received from the advanced settings window", async () => {
+    render(<App />);
+    await waitFor(() => expect(apiMocks.subscribeToHotkeysChanged).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      hotkeysChangedListener?.({ record: "F9", playback: "F12", stop: "F9" });
+    });
+    fireEvent.keyDown(window, { key: "F9" });
+
+    await waitFor(() => expect(apiMocks.startRecording).toHaveBeenCalledTimes(1));
   });
 
   it("does not let a late command response overwrite a newer state event", async () => {
@@ -638,34 +705,6 @@ describe("App", () => {
     expect(await screen.findByRole("button", { name: "无法载入 demo-auto" })).toBeDisabled();
     expect(screen.getByText("录制文件格式不正确。")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "删除 demo-auto" })).toBeEnabled();
-  });
-
-  it("rejects unsafe unmodified hotkeys and provides an explicit capture cancel", async () => {
-    const user = userEvent.setup();
-    render(<App />);
-
-    const capture = await screen.findByLabelText("录制快捷键");
-    await user.click(capture);
-    expect(capture).toHaveAttribute("aria-pressed", "true");
-    await user.keyboard("a");
-
-    expect(screen.getByRole("alert")).toHaveTextContent(
-      "单键快捷键仅支持 F1-F24；其他按键请搭配修饰键。"
-    );
-    await user.click(screen.getByRole("button", { name: "取消快捷键捕获" }));
-    expect(capture).toHaveTextContent("F8");
-    expect(capture).toHaveAttribute("aria-pressed", "false");
-  });
-
-  it("allows Escape when it is combined with a modifier", async () => {
-    const user = userEvent.setup();
-    render(<App />);
-
-    const capture = await screen.findByLabelText("录制快捷键");
-    await user.click(capture);
-    await user.keyboard("{Control>}{Escape}{/Control}");
-
-    expect(capture).toHaveTextContent("Ctrl+Esc");
   });
 
   it("ignores duplicate record clicks while the recording command is pending", async () => {

@@ -67,7 +67,7 @@ pub struct InputCaptureRuntime;
 pub fn start_capture(
     _shared: Arc<Mutex<AppController>>,
     _app_handle: AppHandle,
-    _main_window_hwnd: Option<usize>,
+    _own_window_hwnds: [Option<usize>; 2],
 ) -> Result<InputCaptureRuntime, String> {
     Err("Remember input capture is Windows-only".to_string())
 }
@@ -112,7 +112,7 @@ mod capture {
     };
 
     static CONTROL_HOTKEY_RUNTIME: Mutex<Option<ControlHotkeyRuntime>> = Mutex::new(None);
-    static MAIN_WINDOW_HWND: Mutex<Option<usize>> = Mutex::new(None);
+    static OWN_WINDOW_HWNDS: Mutex<[Option<usize>; 2]> = Mutex::new([None, None]);
     // Low-level hook callbacks must return within the system hook timeout or
     // Windows silently removes the hook, so hotkey actions (which can write to
     // disk) are queued here and executed on a dedicated worker thread.
@@ -168,26 +168,26 @@ mod capture {
             }
 
             clear_control_hotkey_runtime();
-            clear_main_window_hwnd();
+            clear_own_window_hwnds();
         }
     }
 
     pub fn start_capture(
         shared: Arc<Mutex<AppController>>,
         app_handle: AppHandle,
-        main_window_hwnd: Option<usize>,
+        own_window_hwnds: [Option<usize>; 2],
     ) -> Result<InputCaptureRuntime, String> {
         let control_hotkey_runtime = shared
             .lock()
             .map_err(|_| "state lock poisoned".to_string())?
             .control_hotkey_runtime();
         set_control_hotkey_runtime(control_hotkey_runtime)?;
-        set_main_window_hwnd(main_window_hwnd);
+        set_own_window_hwnds(own_window_hwnds);
 
         let (capture_tx, capture_rx) = mpsc::channel();
         if let Err(error) = set_capture_event_sender(capture_tx) {
             clear_control_hotkey_runtime();
-            clear_main_window_hwnd();
+            clear_own_window_hwnds();
             return Err(error);
         }
         let capture_shared = shared.clone();
@@ -218,7 +218,7 @@ mod capture {
             clear_capture_event_sender();
             let _ = capture_worker.join();
             clear_control_hotkey_runtime();
-            clear_main_window_hwnd();
+            clear_own_window_hwnds();
         };
 
         match installed_rx.recv() {
@@ -257,20 +257,23 @@ mod capture {
         }
     }
 
-    fn set_main_window_hwnd(hwnd: Option<usize>) {
-        if let Ok(mut main_window_hwnd) = MAIN_WINDOW_HWND.lock() {
-            *main_window_hwnd = hwnd;
+    fn set_own_window_hwnds(hwnds: [Option<usize>; 2]) {
+        if let Ok(mut own_window_hwnds) = OWN_WINDOW_HWNDS.lock() {
+            *own_window_hwnds = hwnds;
         }
     }
 
-    fn clear_main_window_hwnd() {
-        if let Ok(mut main_window_hwnd) = MAIN_WINDOW_HWND.lock() {
-            *main_window_hwnd = None;
+    fn clear_own_window_hwnds() {
+        if let Ok(mut own_window_hwnds) = OWN_WINDOW_HWNDS.lock() {
+            *own_window_hwnds = [None, None];
         }
     }
 
-    fn current_main_window_hwnd() -> Option<usize> {
-        MAIN_WINDOW_HWND.try_lock().ok().and_then(|hwnd| *hwnd)
+    fn current_own_window_hwnds() -> [Option<usize>; 2] {
+        OWN_WINDOW_HWNDS
+            .try_lock()
+            .map(|hwnds| *hwnds)
+            .unwrap_or([None, None])
     }
 
     fn set_capture_event_sender(sender: mpsc::Sender<CaptureWorkerMessage>) -> Result<(), String> {
@@ -470,9 +473,9 @@ mod capture {
     ) -> LRESULT {
         if code == HC_ACTION as i32 {
             let foreground_root_hwnd = foreground_root_window();
-            let main_window_hwnd = current_main_window_hwnd();
+            let own_window_hwnds = current_own_window_hwnds();
 
-            if same_root_window(foreground_root_hwnd, main_window_hwnd) {
+            if same_root_window(foreground_root_hwnd, own_window_hwnds) {
                 reset_control_hotkey_state();
             } else {
                 if let Some(event) = raw_key_event(w_param, l_param) {
@@ -490,7 +493,7 @@ mod capture {
                 w_param,
                 l_param,
                 foreground_root_hwnd,
-                main_window_hwnd,
+                own_window_hwnds,
             ) {
                 capture(event);
             }
@@ -535,7 +538,7 @@ mod capture {
         let at_ms = now_ms();
         let x = info.pt.x;
         let y = info.pt.y;
-        if same_root_window(root_window_from_point(x, y), current_main_window_hwnd()) {
+        if same_root_window(root_window_from_point(x, y), current_own_window_hwnds()) {
             return None;
         }
 
@@ -627,7 +630,7 @@ mod capture {
             w_param,
             l_param,
             foreground_root_window(),
-            current_main_window_hwnd(),
+            current_own_window_hwnds(),
         )
     }
 
@@ -635,10 +638,10 @@ mod capture {
         w_param: WPARAM,
         l_param: LPARAM,
         foreground_root_hwnd: Option<usize>,
-        main_window_hwnd: Option<usize>,
+        own_window_hwnds: [Option<usize>; 2],
     ) -> Option<RawInputEvent> {
         let event = raw_key_event(w_param, l_param)?;
-        if same_root_window(foreground_root_hwnd, main_window_hwnd) {
+        if same_root_window(foreground_root_hwnd, own_window_hwnds) {
             return None;
         }
 
@@ -693,11 +696,15 @@ mod capture {
         }
     }
 
-    fn same_root_window(event_root_hwnd: Option<usize>, main_window_hwnd: Option<usize>) -> bool {
+    fn same_root_window(
+        event_root_hwnd: Option<usize>,
+        own_window_hwnds: [Option<usize>; 2],
+    ) -> bool {
         matches!(
-            (event_root_hwnd, main_window_hwnd),
-            (Some(event_root_hwnd), Some(main_window_hwnd))
-                if event_root_hwnd != 0 && event_root_hwnd == main_window_hwnd
+            event_root_hwnd,
+            Some(event_root_hwnd)
+                if event_root_hwnd != 0
+                    && own_window_hwnds.contains(&Some(event_root_hwnd))
         )
     }
 
@@ -782,7 +789,7 @@ mod capture {
                 WPARAM(WM_KEYDOWN as usize),
                 LPARAM((&info as *const KBDLLHOOKSTRUCT) as isize),
                 Some(0x55),
-                Some(0x55),
+                [Some(0x55), Some(0x66)],
             );
 
             assert_eq!(event, None);
@@ -802,7 +809,7 @@ mod capture {
                 WPARAM(WM_KEYDOWN as usize),
                 LPARAM((&info as *const KBDLLHOOKSTRUCT) as isize),
                 Some(0x55),
-                Some(0x66),
+                [Some(0x66), Some(0x77)],
             );
 
             assert!(matches!(
@@ -818,11 +825,12 @@ mod capture {
         }
 
         #[test]
-        fn root_window_match_filters_main_window_input_only() {
-            assert!(same_root_window(Some(0x55), Some(0x55)));
-            assert!(!same_root_window(Some(0x55), Some(0x66)));
-            assert!(!same_root_window(Some(0x55), None));
-            assert!(!same_root_window(None, Some(0x55)));
+        fn root_window_match_filters_all_remember_windows() {
+            assert!(same_root_window(Some(0x55), [Some(0x55), None]));
+            assert!(same_root_window(Some(0x66), [Some(0x55), Some(0x66)]));
+            assert!(!same_root_window(Some(0x55), [Some(0x66), None]));
+            assert!(!same_root_window(Some(0x55), [None, None]));
+            assert!(!same_root_window(None, [Some(0x55), Some(0x66)]));
         }
 
         #[test]

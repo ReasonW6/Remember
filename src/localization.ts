@@ -41,6 +41,10 @@ const errorLabels: Array<[string, string]> = [
   ["invalid recording json", "录制文件格式不正确。"],
   ["unsupported recording version", "录制文件版本不受支持。"],
   ["recording path is outside the library", "只能删除录制文件列表中的文件。"],
+  ["feedback volume must be between 0 and 100", "提示音音量必须在 0% 到 100% 之间。"],
+  ["already running as administrator", "当前已经以管理员身份运行。"],
+  ["administrator restart was cancelled or failed", "管理员重启已取消或启动失败。"],
+  ["advanced settings window is unavailable", "高级设置窗口暂时不可用，请重启应用后再试。"],
   ["file error", "文件读写失败，请检查路径或权限。"],
   ["state lock poisoned", "应用状态暂时不可用，请重启应用后再试。"]
 ];

@@ -1,4 +1,3 @@
-import { Save } from "lucide-react";
 import { type KeyboardEvent, useEffect, useState } from "react";
 import { isAllowedGlobalShortcut, shortcutFromEvent } from "../lib/hotkeys";
 import type { HotkeyConfig } from "../types";
@@ -14,10 +13,10 @@ const fields: Array<{ id: keyof HotkeyConfig; label: string }> = [
 interface HotkeyPanelProps {
   hotkeys: HotkeyConfig;
   disabled: boolean;
-  onSave: (config: HotkeyConfig) => void;
+  onChange: (config: HotkeyConfig) => void;
 }
 
-export function HotkeyPanel({ hotkeys, disabled, onSave }: HotkeyPanelProps) {
+export function HotkeyPanel({ hotkeys, disabled, onChange }: HotkeyPanelProps) {
   const [draft, setDraft] = useState(hotkeys);
   const [capturingField, setCapturingField] = useState<keyof HotkeyConfig | null>(null);
   const [captureError, setCaptureError] = useState("");
@@ -55,7 +54,9 @@ export function HotkeyPanel({ hotkeys, disabled, onSave }: HotkeyPanelProps) {
       return;
     }
 
-    setDraft((current) => ({ ...current, [field]: shortcut }));
+    const nextDraft = { ...draft, [field]: shortcut };
+    setDraft(nextDraft);
+    onChange(nextDraft);
     setCapturingField(null);
     setCaptureError("");
   }
@@ -73,17 +74,7 @@ export function HotkeyPanel({ hotkeys, disabled, onSave }: HotkeyPanelProps) {
   return (
     <section className="panel hotkey-panel" aria-labelledby="hotkeys-title">
       <h2 id="hotkeys-title">快捷键</h2>
-      <form
-        className="hotkey-form"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (Object.values(draft).some((shortcut) => !isAllowedGlobalShortcut(shortcut))) {
-            setCaptureError(unsafeShortcutError);
-            return;
-          }
-          onSave(draft);
-        }}
-      >
+      <div className="hotkey-form">
         {fields.map((field) => (
           <label className="hotkey-field" key={field.id}>
             <span>{field.label}</span>
@@ -116,11 +107,7 @@ export function HotkeyPanel({ hotkeys, disabled, onSave }: HotkeyPanelProps) {
             {captureError}
           </p>
         ) : null}
-        <button className="action-button compact-button" type="submit" disabled={disabled}>
-          <Save size={15} aria-hidden="true" />
-          <span className="button-label">保存快捷键</span>
-        </button>
-      </form>
+      </div>
     </section>
   );
 }

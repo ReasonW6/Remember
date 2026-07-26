@@ -277,6 +277,18 @@ impl AppController {
         Ok(recording)
     }
 
+    pub fn set_stopped_recording_name(
+        &mut self,
+        name: impl Into<String>,
+    ) -> Result<Recording, String> {
+        let recording = self
+            .recording
+            .as_mut()
+            .ok_or_else(|| "no recording loaded".to_string())?;
+        recording.name = name.into();
+        Ok(recording.clone())
+    }
+
     pub fn capture_input(&mut self, event: RawInputEvent) {
         if self.mode() != AppMode::Recording {
             return;
