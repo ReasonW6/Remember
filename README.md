@@ -140,6 +140,15 @@ Get-AuthenticodeSignature .\remember.exe
 
 发行页必须明确说明文件是否签名，不把自签名证书或仅有 SHA-256 校验文件描述为正式签名版本。
 
+## Download and code signing policy
+
+- 官方下载：[GitHub Releases](https://github.com/ReasonW6/Remember/releases)
+- 完整政策：[Code signing policy](CODE_SIGNING_POLICY.md)
+- SignPath Foundation 申请目前正在审核；现有发行版仍未签名。
+- 申请获批后，未来的 Windows 发行文件将按以下声明签名：Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+Remember 使用 [MIT License](LICENSE)。
+
 ## 当前限制
 
 - 目前只面向 Windows。

@@ -138,6 +138,15 @@ Get-AuthenticodeSignature .\remember.exe
 
 Do not describe a self-signed binary or a checksum-only artifact as an officially signed release.
 
+## Download and code signing policy
+
+- Official downloads: [GitHub Releases](https://github.com/ReasonW6/Remember/releases)
+- Full policy: [Code signing policy](CODE_SIGNING_POLICY.md)
+- The SignPath Foundation application is currently pending; existing releases remain unsigned.
+- If the application is accepted, future Windows release files will use the following statement: Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+Remember is licensed under the [MIT License](LICENSE).
+
 ## Current Limits
 
 - Windows only.
