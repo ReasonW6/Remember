@@ -14,6 +14,8 @@ Remember is an original implementation. It does not copy TinyTask code, icons, n
 - Customize hotkeys. Unmodified single-key shortcuts are limited to `F1`–`F24`; character, editing, and navigation keys require `Ctrl`, `Alt`, `Shift`, or `Win`.
 - Use the same hotkey for recording and stopping. The default record/stop toggle is `F8`; during playback, both the play and stop hotkeys can stop the run.
 - Play feedback tones when recording or playback starts and stops.
+- Starting a recording from the main window does not minimize it automatically. Keyboard and mouse input inside Remember's own windows is filtered out of recordings.
+- Closing the main window hides the application in the system tray, where it can be restored or exited safely.
 - Use a custom titlebar and localized Chinese interface.
 
 ## Default Hotkeys
@@ -27,7 +29,9 @@ During playback, either `F8` or `F12` stops the run. Remember first releases any
 
 ## Recording Files
 
-Recording files are saved as `.remember.json`. Every time recording stops, Remember automatically saves the current recording to the local library. The Save button exports an additional copy to a user-selected location. The in-app list supports selecting, replaying, renaming, and deleting recordings; hold `Ctrl` while clicking delete to skip confirmation. Corrupt or unreadable recording files remain visible with an error and cannot be loaded or replayed.
+Recording files are saved as `.remember.json`. Every time recording stops, Remember automatically saves the current recording to the local library. The Save button exports an additional copy to a user-selected location. The in-app list supports selecting, replaying, renaming, and deleting recordings. A normal delete requires confirmation; holding `Ctrl` while clicking delete permanently removes the recording immediately. Corrupt, oversized, or unreadable recording files remain visible with an error and cannot be loaded or replayed.
+
+A recording can contain at most 250,000 steps, and a recording JSON file can be at most 64 MiB. When recording reaches the step limit, Remember truncates it, saves the captured prefix after stopping, and displays a warning.
 
 The recording library is the `recordings` folder next to `remember.exe`:
 

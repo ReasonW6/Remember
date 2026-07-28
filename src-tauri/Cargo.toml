@@ -1,6 +1,6 @@
 [package]
 name = "remember"
-version = "0.1.2"
+version = "0.1.3"
 description = "Portable Windows macro recorder"
 edition = "2021"
 

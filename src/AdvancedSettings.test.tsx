@@ -4,10 +4,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AdvancedSettings } from "./AdvancedSettings";
 
 const apiMocks = vi.hoisted(() => ({
-  getAdvancedSettings: vi.fn(),
-  setAdvancedSettings: vi.fn(),
-  getHotkeys: vi.fn(),
-  setHotkeys: vi.fn()
+  getSettingsBundle: vi.fn(),
+  setSettingsBundle: vi.fn()
 }));
 
 const windowMocks = vi.hoisted(() => ({
@@ -38,13 +36,15 @@ const hotkeys = {
   stop: "F8"
 };
 
+async function waitForSettingsLoaded() {
+  await waitFor(() => expect(screen.getByRole("button", { name: "保存" })).toBeEnabled());
+}
+
 describe("AdvancedSettings", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    apiMocks.getAdvancedSettings.mockResolvedValue(settings);
-    apiMocks.setAdvancedSettings.mockImplementation(async (nextSettings) => nextSettings);
-    apiMocks.getHotkeys.mockResolvedValue(hotkeys);
-    apiMocks.setHotkeys.mockImplementation(async (nextHotkeys) => nextHotkeys);
+    apiMocks.getSettingsBundle.mockResolvedValue({ advanced: settings, hotkeys });
+    apiMocks.setSettingsBundle.mockImplementation(async (bundle) => bundle);
     windowMocks.startDragging.mockResolvedValue(undefined);
     windowMocks.minimize.mockResolvedValue(undefined);
     windowMocks.close.mockResolvedValue(undefined);
@@ -52,6 +52,7 @@ describe("AdvancedSettings", () => {
 
   it("loads sound, hotkey, and indicator settings in a separate window", async () => {
     render(<AdvancedSettings />);
+    await waitForSettingsLoaded();
 
     expect(screen.getByRole("heading", { name: "高级设置", level: 1 })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "最小化" })).not.toBeInTheDocument();
@@ -76,26 +77,37 @@ describe("AdvancedSettings", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("previews the selected volume after adjustment settles", async () => {
+  it("previews the final selected volume only after adjustment ends", async () => {
     render(<AdvancedSettings />);
+    await waitForSettingsLoaded();
     const volume = await screen.findByRole("slider", { name: "提示音音量" });
-    vi.useFakeTimers();
 
     fireEvent.change(volume, { target: { value: "30" } });
-    act(() => vi.advanceTimersByTime(100));
     fireEvent.change(volume, { target: { value: "75" } });
-    act(() => vi.advanceTimersByTime(249));
     expect(soundMocks.playFeedbackTone).not.toHaveBeenCalled();
 
-    act(() => vi.advanceTimersByTime(1));
+    fireEvent.pointerUp(volume);
     expect(soundMocks.playFeedbackTone).toHaveBeenCalledOnce();
-    expect(soundMocks.playFeedbackTone).toHaveBeenCalledWith("recording_start", 75, false);
-    vi.useRealTimers();
+    expect(soundMocks.playFeedbackTone).toHaveBeenLastCalledWith(
+      "recording_start",
+      75,
+      false
+    );
+
+    fireEvent.change(volume, { target: { value: "80" } });
+    fireEvent.keyUp(volume, { key: "ArrowRight" });
+    expect(soundMocks.playFeedbackTone).toHaveBeenCalledTimes(2);
+    expect(soundMocks.playFeedbackTone).toHaveBeenLastCalledWith(
+      "recording_start",
+      80,
+      false
+    );
   });
 
   it("disables and dims the volume slider while muted", async () => {
     const user = userEvent.setup();
     render(<AdvancedSettings />);
+    await waitForSettingsLoaded();
 
     const volume = await screen.findByRole("slider", { name: "提示音音量" });
     await user.click(screen.getByRole("button", { name: "静音" }));
@@ -113,6 +125,7 @@ describe("AdvancedSettings", () => {
     };
     const user = userEvent.setup();
     render(<AdvancedSettings />);
+    await waitForSettingsLoaded();
 
     const volume = await screen.findByRole("slider", { name: "提示音音量" });
     fireEvent.change(volume, { target: { value: "75" } });
@@ -125,23 +138,25 @@ describe("AdvancedSettings", () => {
     await user.click(stopHotkey);
     await user.keyboard("{Control>}{Shift>}r{/Shift}{/Control}");
 
-    expect(apiMocks.setAdvancedSettings).not.toHaveBeenCalled();
-    expect(apiMocks.setHotkeys).not.toHaveBeenCalled();
+    expect(apiMocks.setSettingsBundle).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "保存" }));
 
     await waitFor(() =>
-      expect(apiMocks.setAdvancedSettings).toHaveBeenCalledWith({
-        feedback_volume_percent: 75,
-        feedback_muted: true,
-        show_activity_indicator: false
+      expect(apiMocks.setSettingsBundle).toHaveBeenCalledWith({
+        advanced: {
+          feedback_volume_percent: 75,
+          feedback_muted: true,
+          show_activity_indicator: false
+        },
+        hotkeys: nextHotkeys
       })
     );
-    await waitFor(() => expect(apiMocks.setHotkeys).toHaveBeenCalledWith(nextHotkeys));
     expect(await screen.findByText("已保存")).toBeInTheDocument();
   });
 
   it("automatically hides the saved notice", async () => {
     render(<AdvancedSettings />);
+    await waitForSettingsLoaded();
     const save = await screen.findByRole("button", { name: "保存" });
     vi.useFakeTimers();
 
@@ -162,13 +177,14 @@ describe("AdvancedSettings", () => {
   it("rejects unsafe single-key shortcuts and allows capture cancellation", async () => {
     const user = userEvent.setup();
     render(<AdvancedSettings />);
+    await waitForSettingsLoaded();
 
     const capture = await screen.findByLabelText("录制快捷键");
     await user.click(capture);
     await user.keyboard("a");
 
     expect(screen.getByRole("alert")).toHaveTextContent(
-      "单键快捷键仅支持 F1-F24；其他按键请搭配修饰键。"
+      "仅支持字母、数字、F1-F24 及常用导航键；F1-F24 以外的按键必须搭配修饰键。"
     );
     await user.click(screen.getByRole("button", { name: "取消快捷键捕获" }));
     expect(capture).toHaveTextContent("F8");
@@ -177,6 +193,7 @@ describe("AdvancedSettings", () => {
 
   it("does not capture a key until capture mode starts", async () => {
     render(<AdvancedSettings />);
+    await waitForSettingsLoaded();
 
     const capture = await screen.findByLabelText("录制快捷键");
     act(() => {
@@ -185,5 +202,44 @@ describe("AdvancedSettings", () => {
     fireEvent.keyDown(capture, { key: "A" });
 
     expect(capture).toHaveTextContent("F8");
+  });
+
+  it("reports an atomic bundle save failure without issuing compensation writes", async () => {
+    apiMocks.setSettingsBundle.mockRejectedValue(new Error("HotKey already registered"));
+    const user = userEvent.setup();
+    render(<AdvancedSettings />);
+    await waitForSettingsLoaded();
+
+    const volume = await screen.findByRole("slider", { name: "提示音音量" });
+    fireEvent.change(volume, { target: { value: "75" } });
+    await user.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(apiMocks.setSettingsBundle).toHaveBeenCalledTimes(1));
+    expect(apiMocks.setSettingsBundle).toHaveBeenCalledWith({
+      advanced: {
+        ...settings,
+        feedback_volume_percent: 75
+      },
+      hotkeys
+    });
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "这个快捷键已被其他程序占用，请换一个键。"
+    );
+    expect(volume).toHaveValue("75");
+    expect(screen.queryByText("已保存")).not.toBeInTheDocument();
+  });
+
+  it("keeps defaults locked when the settings bundle cannot be loaded", async () => {
+    apiMocks.getSettingsBundle.mockRejectedValue(new Error("settings unavailable"));
+    const user = userEvent.setup();
+    render(<AdvancedSettings />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "设置加载失败，保存已禁用。settings unavailable"
+    );
+    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+    expect(screen.getByRole("slider", { name: "提示音音量" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    expect(apiMocks.setSettingsBundle).not.toHaveBeenCalled();
   });
 });

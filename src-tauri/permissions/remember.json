@@ -1,0 +1,50 @@
+{
+  "default": null,
+  "permission": [
+    {
+      "identifier": "main-window-commands",
+      "description": "Application commands required by the main Remember window.",
+      "commands": {
+        "allow": [
+          "get_state",
+          "start_recording",
+          "stop_recording",
+          "list_recordings",
+          "delete_recording",
+          "rename_recording",
+          "open_recording",
+          "save_current_recording",
+          "get_hotkeys",
+          "get_advanced_settings",
+          "show_advanced_settings",
+          "get_privilege_state",
+          "restart_as_administrator",
+          "start_playback",
+          "set_playback_settings",
+          "stop_playback"
+        ],
+        "deny": []
+      }
+    },
+    {
+      "identifier": "advanced-settings-window-commands",
+      "description": "Settings commands required by the advanced settings window.",
+      "commands": {
+        "allow": [
+          "get_settings_bundle",
+          "set_settings_bundle"
+        ],
+        "deny": []
+      }
+    },
+    {
+      "identifier": "activity-indicator-window-commands",
+      "description": "Read-only state command required by the activity indicator.",
+      "commands": {
+        "allow": ["get_state"],
+        "deny": []
+      }
+    }
+  ],
+  "set": []
+}

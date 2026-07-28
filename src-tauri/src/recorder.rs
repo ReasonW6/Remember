@@ -1,5 +1,7 @@
 use crate::model::{ButtonState, KeyState, MacroStep, MouseButton, Recording, RECORDING_VERSION};
 
+pub const MAX_RECORDING_STEPS: usize = 250_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RawInputEvent {
     MouseMove {
@@ -33,6 +35,7 @@ pub enum RawInputEvent {
 pub struct Recorder {
     move_sample_interval_ms: u64,
     active: Option<ActiveRecording>,
+    last_stop_was_truncated: bool,
 }
 
 impl Recorder {
@@ -40,6 +43,7 @@ impl Recorder {
         Self {
             move_sample_interval_ms,
             active: None,
+            last_stop_was_truncated: false,
         }
     }
 
@@ -53,11 +57,13 @@ impl Recorder {
             return Err("already recording".to_string());
         }
 
+        self.last_stop_was_truncated = false;
         self.active = Some(ActiveRecording {
             name: name.into(),
             created_at: created_at.into(),
             start_ms,
             steps: Vec::new(),
+            step_limit_exceeded: false,
             last_mouse_move_elapsed_ms: None,
             pressed_mouse_buttons: Vec::new(),
         });
@@ -68,6 +74,9 @@ impl Recorder {
         let Some(active) = &mut self.active else {
             return;
         };
+        if active.step_limit_exceeded {
+            return;
+        }
 
         match event {
             RawInputEvent::MouseMove { at_ms, x, y } => {
@@ -96,7 +105,7 @@ impl Recorder {
                             .retain(|pressed| *pressed != button);
                     }
                 }
-                active.steps.push(MacroStep::MouseButton {
+                active.push_step(MacroStep::MouseButton {
                     elapsed_ms,
                     x,
                     y,
@@ -109,7 +118,7 @@ impl Recorder {
                 if active.is_stale_elapsed(elapsed_ms) {
                     return;
                 }
-                active.steps.push(MacroStep::MouseWheel {
+                active.push_step(MacroStep::MouseWheel {
                     elapsed_ms,
                     x,
                     y,
@@ -127,7 +136,7 @@ impl Recorder {
                 if active.is_stale_elapsed(elapsed_ms) {
                     return;
                 }
-                active.steps.push(MacroStep::Key {
+                active.push_step(MacroStep::Key {
                     elapsed_ms,
                     vk_code,
                     scan_code,
@@ -142,6 +151,7 @@ impl Recorder {
         let Some(active) = self.active.take() else {
             return Err("not recording".to_string());
         };
+        self.last_stop_was_truncated = active.step_limit_exceeded;
 
         let duration_ms = stop_ms
             .saturating_sub(active.start_ms)
@@ -159,6 +169,10 @@ impl Recorder {
     pub fn is_recording(&self) -> bool {
         self.active.is_some()
     }
+
+    pub fn last_stop_was_truncated(&self) -> bool {
+        self.last_stop_was_truncated
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -167,6 +181,7 @@ struct ActiveRecording {
     created_at: String,
     start_ms: u64,
     steps: Vec<MacroStep>,
+    step_limit_exceeded: bool,
     last_mouse_move_elapsed_ms: Option<u64>,
     pressed_mouse_buttons: Vec<MouseButton>,
 }
@@ -186,6 +201,16 @@ impl ActiveRecording {
             .unwrap_or(false)
     }
 
+    fn push_step(&mut self, step: MacroStep) -> bool {
+        if self.steps.len() >= MAX_RECORDING_STEPS {
+            self.step_limit_exceeded = true;
+            return false;
+        }
+
+        self.steps.push(step);
+        true
+    }
+
     fn capture_mouse_move(&mut self, at_ms: u64, x: i32, y: i32, move_sample_interval_ms: u64) {
         let elapsed_ms = self.elapsed_ms(at_ms);
         if self.is_stale_elapsed(elapsed_ms) {
@@ -198,8 +223,7 @@ impl ActiveRecording {
                 .map(|last| elapsed_ms.saturating_sub(last) >= move_sample_interval_ms)
                 .unwrap_or(true);
 
-        if should_sample {
-            self.steps.push(MacroStep::MouseMove { elapsed_ms, x, y });
+        if should_sample && self.push_step(MacroStep::MouseMove { elapsed_ms, x, y }) {
             self.last_mouse_move_elapsed_ms = Some(elapsed_ms);
         }
     }

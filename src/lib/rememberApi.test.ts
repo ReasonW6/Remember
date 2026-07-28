@@ -2,11 +2,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { UiState } from "../types";
 import {
   getHotkeys,
+  getSettingsBundle,
   listRecordings,
   loadRecording,
   openRecording,
   saveCurrentRecording,
-  setHotkeys,
   deleteRecording,
   renameRecording,
   setPlaybackSettings,
@@ -15,7 +15,7 @@ import {
   getAdvancedSettings,
   getPrivilegeState,
   restartAsAdministrator,
-  setAdvancedSettings,
+  setSettingsBundle,
   showAdvancedSettings,
   subscribeToAdvancedSettingsChanged,
   subscribeToHotkeysChanged,
@@ -205,18 +205,16 @@ describe("rememberApi", () => {
     expect(tauriMocks.invoke).toHaveBeenCalledWith("save_current_recording", { path });
   });
 
-  it("reads and saves hotkeys", async () => {
+  it("reads hotkeys", async () => {
     const config = { record: "F6", playback: "F7", stop: "F8" };
     tauriMocks.invoke.mockResolvedValue(config);
 
     await expect(getHotkeys()).resolves.toBe(config);
-    await expect(setHotkeys(config)).resolves.toBe(config);
 
-    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(1, "get_hotkeys");
-    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(2, "set_hotkeys", { config });
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("get_hotkeys");
   });
 
-  it("reads and saves advanced settings", async () => {
+  it("reads advanced settings", async () => {
     const settings = {
       feedback_volume_percent: 75,
       feedback_muted: true,
@@ -225,10 +223,26 @@ describe("rememberApi", () => {
     tauriMocks.invoke.mockResolvedValue(settings);
 
     await expect(getAdvancedSettings()).resolves.toBe(settings);
-    await expect(setAdvancedSettings(settings)).resolves.toBe(settings);
 
-    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(1, "get_advanced_settings");
-    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(2, "set_advanced_settings", { settings });
+    expect(tauriMocks.invoke).toHaveBeenCalledWith("get_advanced_settings");
+  });
+
+  it("reads and atomically saves the settings bundle", async () => {
+    const bundle = {
+      advanced: {
+        feedback_volume_percent: 75,
+        feedback_muted: true,
+        show_activity_indicator: false
+      },
+      hotkeys: { record: "F6", playback: "F7", stop: "F8" }
+    };
+    tauriMocks.invoke.mockResolvedValue(bundle);
+
+    await expect(getSettingsBundle()).resolves.toBe(bundle);
+    await expect(setSettingsBundle(bundle)).resolves.toBe(bundle);
+
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(1, "get_settings_bundle");
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(2, "set_settings_bundle", { bundle });
   });
 
   it("opens advanced settings and invokes administrator restart commands", async () => {

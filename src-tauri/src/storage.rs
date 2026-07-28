@@ -1,17 +1,24 @@
-use crate::model::Recording;
+use crate::{model::Recording, recorder::MAX_RECORDING_STEPS};
 use serde::Serialize;
 use std::{
+    collections::{HashMap, HashSet, VecDeque},
     fs::{self, File, OpenOptions},
     io::{self, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
     process,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex, OnceLock,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 use thiserror::Error;
 
 const LIBRARY_SUFFIX: &str = ".remember.json";
+const MAX_CACHED_RECORDING_LIBRARIES: usize = 8;
+pub const MAX_RECORDING_FILE_BYTES: u64 = 64 * 1024 * 1024;
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static RECORDING_LIST_CACHE: OnceLock<Mutex<RecordingListCache>> = OnceLock::new();
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RecordingFile {
@@ -22,6 +29,79 @@ pub struct RecordingFile {
     pub created_at: String,
     pub updated_at_ms: u64,
     pub load_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RecordingCacheKey {
+    path: PathBuf,
+    file_size: u64,
+    modified_at: SystemTime,
+}
+
+#[derive(Default)]
+struct LibraryRecordingCache {
+    entries: HashMap<RecordingCacheKey, RecordingFile>,
+}
+
+impl LibraryRecordingCache {
+    fn resolve<F>(&mut self, key: Option<RecordingCacheKey>, load: F) -> RecordingFile
+    where
+        F: FnOnce() -> RecordingFile,
+    {
+        if let Some(key) = key.as_ref() {
+            if let Some(file) = self.entries.get(key) {
+                return file.clone();
+            }
+        }
+
+        let file = load();
+        if let Some(key) = key {
+            self.entries.insert(key, file.clone());
+        }
+        file
+    }
+
+    fn retain_seen(&mut self, seen: &HashSet<RecordingCacheKey>) {
+        self.entries.retain(|key, _| seen.contains(key));
+    }
+}
+
+#[derive(Default)]
+struct RecordingListCache {
+    libraries: HashMap<PathBuf, LibraryRecordingCache>,
+    access_order: VecDeque<PathBuf>,
+}
+
+impl RecordingListCache {
+    fn library_mut(&mut self, library_path: &Path) -> &mut LibraryRecordingCache {
+        self.access_order.retain(|path| path != library_path);
+        self.access_order.push_back(library_path.to_path_buf());
+        self.libraries
+            .entry(library_path.to_path_buf())
+            .or_default();
+
+        while self.libraries.len() > MAX_CACHED_RECORDING_LIBRARIES {
+            let Some(oldest) = self.access_order.pop_front() else {
+                break;
+            };
+            self.libraries.remove(&oldest);
+        }
+
+        self.libraries
+            .get_mut(library_path)
+            .expect("the current recording library cache must be retained")
+    }
+
+    fn remove_library(&mut self, library_path: &Path) {
+        self.access_order.retain(|path| path != library_path);
+        self.libraries.remove(library_path);
+    }
+
+    fn remove_path(&mut self, path: &Path) {
+        for library in self.libraries.values_mut() {
+            library.entries.retain(|key, _| key.path != path);
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -35,24 +115,43 @@ pub enum StorageError {
 }
 
 pub fn recording_to_json(recording: &Recording) -> Result<String, StorageError> {
-    recording
-        .validate()
-        .map_err(StorageError::InvalidRecording)?;
-    serde_json::to_string_pretty(recording).map_err(StorageError::InvalidJson)
+    validate_recording_for_storage(recording)?;
+    let json = serde_json::to_string_pretty(recording).map_err(StorageError::InvalidJson)?;
+    ensure_json_size(json.len() as u64)?;
+    Ok(json)
 }
 
 pub fn recording_from_json(json: &str) -> Result<Recording, StorageError> {
+    ensure_json_size(json.len() as u64)?;
     let recording: Recording = serde_json::from_str(json).map_err(StorageError::InvalidJson)?;
-    recording
-        .validate()
-        .map_err(StorageError::InvalidRecording)?;
+    validate_recording_for_storage(&recording)?;
     Ok(recording)
 }
 
 pub fn save_recording(path: &Path, recording: &Recording) -> Result<(), StorageError> {
     let temp_path = write_recording_temp(path, recording)?;
     match atomic_replace(&temp_path, path) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            invalidate_recording_cache_path(path);
+            Ok(())
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&temp_path);
+            Err(error.into())
+        }
+    }
+}
+
+pub(crate) fn save_recording_without_overwrite(
+    path: &Path,
+    recording: &Recording,
+) -> Result<(), StorageError> {
+    let temp_path = write_recording_temp(path, recording)?;
+    match atomic_install_without_overwrite(&temp_path, path) {
+        Ok(()) => {
+            invalidate_recording_cache_path(path);
+            Ok(())
+        }
         Err(error) => {
             let _ = fs::remove_file(&temp_path);
             Err(error.into())
@@ -62,11 +161,10 @@ pub fn save_recording(path: &Path, recording: &Recording) -> Result<(), StorageE
 
 pub fn load_recording(path: &Path) -> Result<Recording, StorageError> {
     let file = File::open(path)?;
+    ensure_json_size(file.metadata()?.len())?;
     let recording: Recording =
         serde_json::from_reader(BufReader::new(file)).map_err(json_stream_error)?;
-    recording
-        .validate()
-        .map_err(StorageError::InvalidRecording)?;
+    validate_recording_for_storage(&recording)?;
     Ok(recording)
 }
 
@@ -83,7 +181,10 @@ pub fn save_recording_to_library(
     loop {
         let path = library_path(library_dir, &base_name, index);
         match atomic_install_without_overwrite(&temp_path, &path) {
-            Ok(()) => return Ok(path),
+            Ok(()) => {
+                invalidate_recording_cache_path(&path);
+                return Ok(path);
+            }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 index += 1;
             }
@@ -96,10 +197,16 @@ pub fn save_recording_to_library(
 }
 
 pub fn list_recordings(library_dir: &Path) -> Result<Vec<RecordingFile>, StorageError> {
+    let library_cache_path = complete_cache_path(library_dir);
     if !library_dir.exists() {
+        let mut cache = lock_recording_list_cache();
+        cache.remove_library(&library_cache_path);
         return Ok(Vec::new());
     }
 
+    let mut cache = lock_recording_list_cache();
+    let library_cache = cache.library_mut(&library_cache_path);
+    let mut seen_cache_keys = HashSet::new();
     let mut files = Vec::new();
     for entry in fs::read_dir(library_dir)? {
         let entry = entry?;
@@ -115,38 +222,29 @@ pub fn list_recordings(library_dir: &Path) -> Result<Vec<RecordingFile>, Storage
             continue;
         }
 
-        let updated_at_ms = entry
-            .metadata()
-            .ok()
-            .and_then(|metadata| metadata.modified().ok())
-            .and_then(system_time_ms)
-            .unwrap_or(0);
+        let metadata = entry.metadata().ok();
+        let modified_at = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.modified().ok());
+        let updated_at_ms = modified_at.and_then(system_time_ms).unwrap_or(0);
+        let cache_key = metadata.as_ref().and_then(|metadata| {
+            modified_at.map(|modified_at| RecordingCacheKey {
+                path: library_cache_path.join(entry.file_name()),
+                file_size: metadata.len(),
+                modified_at,
+            })
+        });
+        if let Some(cache_key) = cache_key.as_ref() {
+            seen_cache_keys.insert(cache_key.clone());
+        }
 
-        let file = match load_recording(&path) {
-            Ok(recording) => RecordingFile {
-                name: recording.name,
-                path: path.to_string_lossy().to_string(),
-                step_count: recording.steps.len(),
-                duration_ms: recording.duration_ms,
-                created_at: recording.created_at,
-                updated_at_ms,
-                load_error: None,
-            },
-            Err(error) => RecordingFile {
-                name: file_name
-                    .strip_suffix(LIBRARY_SUFFIX)
-                    .unwrap_or(file_name)
-                    .to_string(),
-                path: path.to_string_lossy().to_string(),
-                step_count: 0,
-                duration_ms: 0,
-                created_at: String::new(),
-                updated_at_ms,
-                load_error: Some(error.to_string()),
-            },
-        };
+        let mut file = library_cache.resolve(cache_key, || {
+            recording_file_from_path(&path, file_name, updated_at_ms)
+        });
+        file.path = path.to_string_lossy().to_string();
         files.push(file);
     }
+    library_cache.retain_seen(&seen_cache_keys);
 
     files.sort_by(|left, right| {
         right
@@ -196,13 +294,74 @@ pub fn rename_recording_in_library(
         let _ = fs::remove_file(&renamed_path);
         return Err(error.into());
     }
+    invalidate_recording_cache_path(&path);
     Ok(renamed_path)
 }
 
 pub fn delete_recording_from_library(library_dir: &Path, path: &Path) -> Result<(), StorageError> {
     let (_, path) = validated_library_recording_path(library_dir, path)?;
-    fs::remove_file(path)?;
+    fs::remove_file(&path)?;
+    invalidate_recording_cache_path(&path);
     Ok(())
+}
+
+fn recording_file_from_path(path: &Path, file_name: &str, updated_at_ms: u64) -> RecordingFile {
+    match load_recording(path) {
+        Ok(recording) => RecordingFile {
+            name: recording.name,
+            path: path.to_string_lossy().to_string(),
+            step_count: recording.steps.len(),
+            duration_ms: recording.duration_ms,
+            created_at: recording.created_at,
+            updated_at_ms,
+            load_error: None,
+        },
+        Err(error) => RecordingFile {
+            name: file_name
+                .strip_suffix(LIBRARY_SUFFIX)
+                .unwrap_or(file_name)
+                .to_string(),
+            path: path.to_string_lossy().to_string(),
+            step_count: 0,
+            duration_ms: 0,
+            created_at: String::new(),
+            updated_at_ms,
+            load_error: Some(error.to_string()),
+        },
+    }
+}
+
+fn recording_list_cache() -> &'static Mutex<RecordingListCache> {
+    RECORDING_LIST_CACHE.get_or_init(|| Mutex::new(RecordingListCache::default()))
+}
+
+fn lock_recording_list_cache() -> std::sync::MutexGuard<'static, RecordingListCache> {
+    recording_list_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn complete_cache_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|current_dir| current_dir.join(path))
+                .unwrap_or_else(|_| path.to_path_buf())
+        }
+    })
+}
+
+fn invalidate_recording_cache_path(path: &Path) {
+    let Some(cache) = RECORDING_LIST_CACHE.get() else {
+        return;
+    };
+    let path = complete_cache_path(path);
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove_path(&path);
 }
 
 fn validated_library_recording_path(
@@ -226,9 +385,7 @@ fn validated_library_recording_path(
 }
 
 fn write_recording_temp(path: &Path, recording: &Recording) -> Result<PathBuf, StorageError> {
-    recording
-        .validate()
-        .map_err(StorageError::InvalidRecording)?;
+    validate_recording_for_storage(recording)?;
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -256,10 +413,10 @@ fn write_recording_temp(path: &Path, recording: &Recording) -> Result<PathBuf, S
             Err(error) => return Err(error.into()),
         };
         let write_result = (|| -> Result<(), StorageError> {
-            let mut writer = BufWriter::new(file);
+            let mut writer = SizeLimitedWriter::new(BufWriter::new(file), MAX_RECORDING_FILE_BYTES);
             serde_json::to_writer_pretty(&mut writer, recording).map_err(json_stream_error)?;
             writer.flush()?;
-            writer.get_ref().sync_all()?;
+            writer.get_ref().get_ref().sync_all()?;
             Ok(())
         })();
         if let Err(error) = write_result {
@@ -267,6 +424,72 @@ fn write_recording_temp(path: &Path, recording: &Recording) -> Result<PathBuf, S
             return Err(error);
         }
         return Ok(temp_path);
+    }
+}
+
+fn validate_recording_for_storage(recording: &Recording) -> Result<(), StorageError> {
+    if recording.steps.len() > MAX_RECORDING_STEPS {
+        return Err(StorageError::InvalidRecording(format!(
+            "recording exceeds the maximum of {MAX_RECORDING_STEPS} steps"
+        )));
+    }
+    recording.validate().map_err(StorageError::InvalidRecording)
+}
+
+fn ensure_json_size(byte_count: u64) -> Result<(), StorageError> {
+    if byte_count > MAX_RECORDING_FILE_BYTES {
+        return Err(StorageError::InvalidRecording(format!(
+            "recording JSON exceeds the maximum size of {MAX_RECORDING_FILE_BYTES} bytes"
+        )));
+    }
+    Ok(())
+}
+
+struct SizeLimitedWriter<W> {
+    inner: W,
+    bytes_written: u64,
+    max_bytes: u64,
+}
+
+impl<W> SizeLimitedWriter<W> {
+    fn new(inner: W, max_bytes: u64) -> Self {
+        Self {
+            inner,
+            bytes_written: 0,
+            max_bytes,
+        }
+    }
+
+    fn get_ref(&self) -> &W {
+        &self.inner
+    }
+}
+
+impl<W: Write> Write for SizeLimitedWriter<W> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+
+        let remaining = self.max_bytes.saturating_sub(self.bytes_written);
+        if remaining == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "recording JSON exceeds the maximum size of {} bytes",
+                    self.max_bytes
+                ),
+            ));
+        }
+
+        let allowed = buffer.len().min(remaining as usize);
+        let written = self.inner.write(&buffer[..allowed])?;
+        self.bytes_written = self.bytes_written.saturating_add(written as u64);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
     }
 }
 
@@ -322,12 +545,12 @@ fn move_file_windows(source: &Path, destination: &Path, replace: bool) -> std::i
 }
 
 #[cfg(target_os = "windows")]
-fn atomic_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
+pub(crate) fn atomic_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
     move_file_windows(source, destination, true)
 }
 
 #[cfg(not(target_os = "windows"))]
-fn atomic_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
+pub(crate) fn atomic_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
     fs::rename(source, destination)
 }
 
@@ -369,4 +592,59 @@ fn system_time_ms(time: SystemTime) -> Option<u64> {
     time.duration_since(UNIX_EPOCH)
         .ok()
         .map(|duration| duration.as_millis() as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn cached_file(name: &str) -> RecordingFile {
+        RecordingFile {
+            name: name.to_string(),
+            path: "recording.remember.json".to_string(),
+            step_count: 0,
+            duration_ms: 0,
+            created_at: String::new(),
+            updated_at_ms: 0,
+            load_error: None,
+        }
+    }
+
+    #[test]
+    fn unchanged_signature_reuses_metadata_and_changed_signature_reloads_it() {
+        let path = PathBuf::from("C:\\recordings\\recording.remember.json");
+        let unchanged_key = RecordingCacheKey {
+            path: path.clone(),
+            file_size: 100,
+            modified_at: UNIX_EPOCH + Duration::from_secs(1),
+        };
+        let changed_key = RecordingCacheKey {
+            path,
+            file_size: 101,
+            modified_at: UNIX_EPOCH + Duration::from_secs(2),
+        };
+        let mut cache = LibraryRecordingCache::default();
+        let mut loads = 0;
+
+        let first = cache.resolve(Some(unchanged_key.clone()), || {
+            loads += 1;
+            cached_file("first")
+        });
+        let cached = cache.resolve(Some(unchanged_key), || {
+            loads += 1;
+            cached_file("unexpected reload")
+        });
+        let changed = cache.resolve(Some(changed_key.clone()), || {
+            loads += 1;
+            cached_file("changed")
+        });
+        cache.retain_seen(&HashSet::from([changed_key]));
+
+        assert_eq!(first.name, "first");
+        assert_eq!(cached.name, "first");
+        assert_eq!(changed.name, "changed");
+        assert_eq!(loads, 2);
+        assert_eq!(cache.entries.len(), 1);
+    }
 }

@@ -1,5 +1,5 @@
 use remember_lib::model::{ButtonState, KeyState, MacroStep, MouseButton};
-use remember_lib::recorder::{RawInputEvent, Recorder};
+use remember_lib::recorder::{RawInputEvent, Recorder, MAX_RECORDING_STEPS};
 
 #[test]
 fn records_key_press_and_release() {
@@ -293,4 +293,33 @@ fn cannot_start_twice_without_stopping() {
         .expect_err("second start fails");
 
     assert!(error.contains("already recording"));
+}
+
+#[test]
+fn truncates_recording_growth_at_step_limit_without_losing_captured_steps() {
+    let mut recorder = Recorder::new(50);
+    recorder
+        .start("bounded", 0, "2026-06-29T00:00:00Z")
+        .expect("start");
+
+    for index in 0..=MAX_RECORDING_STEPS {
+        recorder.capture(RawInputEvent::MouseWheel {
+            at_ms: index as u64,
+            x: 0,
+            y: 0,
+            delta: 1,
+        });
+    }
+
+    let recording = recorder
+        .stop(MAX_RECORDING_STEPS as u64)
+        .expect("bounded recording remains saveable");
+
+    assert_eq!(recording.steps.len(), MAX_RECORDING_STEPS);
+    assert!(recorder.last_stop_was_truncated());
+
+    recorder
+        .start("next", 0, "2026-06-29T00:00:00Z")
+        .expect("start next recording");
+    assert!(!recorder.last_stop_was_truncated());
 }

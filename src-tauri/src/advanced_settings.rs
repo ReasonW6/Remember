@@ -77,7 +77,7 @@ fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| error.to_string())
 }
 
-fn normalize(settings: AdvancedSettings) -> Result<AdvancedSettings, String> {
+pub(crate) fn normalize(settings: AdvancedSettings) -> Result<AdvancedSettings, String> {
     if settings.feedback_volume_percent > 100 {
         return Err("feedback volume must be between 0 and 100".to_string());
     }

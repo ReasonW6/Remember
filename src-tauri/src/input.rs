@@ -93,6 +93,7 @@ mod capture {
         recorder::RawInputEvent,
     };
     use std::{
+        cell::RefCell,
         sync::{mpsc, Arc, Mutex},
         thread::{self, JoinHandle},
     };
@@ -111,22 +112,48 @@ mod capture {
         },
     };
 
-    static CONTROL_HOTKEY_RUNTIME: Mutex<Option<ControlHotkeyRuntime>> = Mutex::new(None);
-    static OWN_WINDOW_HWNDS: Mutex<[Option<usize>; 2]> = Mutex::new([None, None]);
-    // Low-level hook callbacks must return within the system hook timeout or
-    // Windows silently removes the hook, so hotkey actions (which can write to
-    // disk) are queued here and executed on a dedicated worker thread.
-    static HOTKEY_ACTION_TX: Mutex<Option<mpsc::Sender<ControlHotkeyAction>>> = Mutex::new(None);
-    static CAPTURE_EVENT_TX: Mutex<Option<mpsc::Sender<CaptureWorkerMessage>>> = Mutex::new(None);
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct QueuedControlHotkeyAction {
+        action: ControlHotkeyAction,
+        at_ms: u64,
+    }
 
     enum CaptureWorkerMessage {
         Input(RawInputEvent),
+        Action(QueuedControlHotkeyAction),
         ResetHotkeyFilter,
         Pause {
             reached: mpsc::SyncSender<()>,
             resume: mpsc::Receiver<()>,
         },
+        Shutdown,
     }
+
+    struct HookContext {
+        control_hotkeys: ControlHotkeyRuntime,
+        own_window_hwnds: [Option<usize>; 2],
+        capture_event_tx: mpsc::Sender<CaptureWorkerMessage>,
+    }
+
+    impl HookContext {
+        fn dispatch(&self, message: CaptureWorkerMessage) -> bool {
+            self.capture_event_tx.send(message).is_ok()
+        }
+    }
+
+    // Low-level hook callbacks must return within the system hook timeout or
+    // Windows silently removes the hook. Windows invokes these low-level hooks
+    // on the thread that installed them, so their immutable context can live in
+    // thread-local storage and be read without a shared lock. Input and hotkey
+    // actions share its one ordered queue so a start/stop hotkey remains the
+    // exact capture boundary without doing disk I/O inside the hook.
+    thread_local! {
+        static HOOK_CONTEXT: RefCell<Option<HookContext>> = const { RefCell::new(None) };
+    }
+
+    // Only non-hook lifecycle and command code uses this sender. Hook callbacks
+    // dispatch through their thread-local HookContext above.
+    static CAPTURE_CONTROL_TX: Mutex<Option<mpsc::Sender<CaptureWorkerMessage>>> = Mutex::new(None);
 
     pub struct CapturePauseGuard {
         resume: Option<mpsc::Sender<()>>,
@@ -143,7 +170,6 @@ mod capture {
     pub struct InputCaptureRuntime {
         hook_thread_id: u32,
         worker: Option<JoinHandle<()>>,
-        hotkey_worker: Option<JoinHandle<()>>,
         capture_worker: Option<JoinHandle<()>>,
     }
 
@@ -157,18 +183,10 @@ mod capture {
                 let _ = worker.join();
             }
 
-            clear_hotkey_action_sender();
-            if let Some(hotkey_worker) = self.hotkey_worker.take() {
-                let _ = hotkey_worker.join();
-            }
-
-            clear_capture_event_sender();
+            stop_capture_worker();
             if let Some(capture_worker) = self.capture_worker.take() {
                 let _ = capture_worker.join();
             }
-
-            clear_control_hotkey_runtime();
-            clear_own_window_hwnds();
         }
     }
 
@@ -181,149 +199,117 @@ mod capture {
             .lock()
             .map_err(|_| "state lock poisoned".to_string())?
             .control_hotkey_runtime();
-        set_control_hotkey_runtime(control_hotkey_runtime)?;
-        set_own_window_hwnds(own_window_hwnds);
-
         let (capture_tx, capture_rx) = mpsc::channel();
-        if let Err(error) = set_capture_event_sender(capture_tx) {
-            clear_control_hotkey_runtime();
-            clear_own_window_hwnds();
-            return Err(error);
-        }
+        set_capture_control_sender(capture_tx.clone())?;
+        let hook_context = HookContext {
+            control_hotkeys: control_hotkey_runtime,
+            own_window_hwnds,
+            capture_event_tx: capture_tx,
+        };
         let capture_shared = shared.clone();
+        let action_shared = shared.clone();
         let capture_worker = thread::spawn(move || {
-            run_capture_worker(capture_shared, capture_rx);
-        });
-
-        let (hotkey_tx, hotkey_rx) = mpsc::channel();
-        set_hotkey_action_sender(hotkey_tx);
-        let hotkey_worker = thread::spawn(move || {
-            while let Ok(action) = hotkey_rx.recv() {
-                commands::run_control_hotkey_action(app_handle.clone(), shared.clone(), action);
-            }
+            run_capture_worker_with_actions(capture_shared, capture_rx, |queued| {
+                commands::run_control_hotkey_action(
+                    app_handle.clone(),
+                    action_shared.clone(),
+                    queued.action,
+                    queued.at_ms,
+                );
+            });
         });
 
         let (installed_tx, installed_rx) = mpsc::channel();
 
         let worker = thread::spawn(move || {
-            run_capture_thread(installed_tx);
+            run_capture_thread(installed_tx, hook_context);
         });
 
-        let cleanup = |worker: JoinHandle<()>,
-                       hotkey_worker: JoinHandle<()>,
-                       capture_worker: JoinHandle<()>| {
+        let cleanup = |worker: JoinHandle<()>, capture_worker: JoinHandle<()>| {
             let _ = worker.join();
-            clear_hotkey_action_sender();
-            let _ = hotkey_worker.join();
-            clear_capture_event_sender();
+            stop_capture_worker();
             let _ = capture_worker.join();
-            clear_control_hotkey_runtime();
-            clear_own_window_hwnds();
         };
 
         match installed_rx.recv() {
             Ok(Ok(hook_thread_id)) => Ok(InputCaptureRuntime {
                 hook_thread_id,
                 worker: Some(worker),
-                hotkey_worker: Some(hotkey_worker),
                 capture_worker: Some(capture_worker),
             }),
             Ok(Err(error)) => {
-                cleanup(worker, hotkey_worker, capture_worker);
+                cleanup(worker, capture_worker);
                 Err(error)
             }
             Err(_) => {
-                cleanup(worker, hotkey_worker, capture_worker);
+                cleanup(worker, capture_worker);
                 Err("input capture thread stopped before installing hooks".to_string())
             }
         }
     }
 
-    fn set_control_hotkey_runtime(runtime: ControlHotkeyRuntime) -> Result<(), String> {
-        let mut control_hotkeys = CONTROL_HOTKEY_RUNTIME
+    fn set_capture_control_sender(
+        sender: mpsc::Sender<CaptureWorkerMessage>,
+    ) -> Result<(), String> {
+        let mut current = CAPTURE_CONTROL_TX
             .lock()
-            .map_err(|_| "control hotkey runtime lock poisoned".to_string())?;
-        if control_hotkeys.is_some() {
-            return Err("control hotkey runtime already started".to_string());
+            .map_err(|_| "capture event queue lock poisoned".to_string())?;
+        if current.is_some() {
+            return Err("input capture event queue already started".to_string());
         }
-
-        *control_hotkeys = Some(runtime);
+        *current = Some(sender);
         Ok(())
-    }
-
-    fn clear_control_hotkey_runtime() {
-        if let Ok(mut control_hotkeys) = CONTROL_HOTKEY_RUNTIME.lock() {
-            *control_hotkeys = None;
-        }
-    }
-
-    fn set_own_window_hwnds(hwnds: [Option<usize>; 2]) {
-        if let Ok(mut own_window_hwnds) = OWN_WINDOW_HWNDS.lock() {
-            *own_window_hwnds = hwnds;
-        }
-    }
-
-    fn clear_own_window_hwnds() {
-        if let Ok(mut own_window_hwnds) = OWN_WINDOW_HWNDS.lock() {
-            *own_window_hwnds = [None, None];
-        }
     }
 
     fn current_own_window_hwnds() -> [Option<usize>; 2] {
-        OWN_WINDOW_HWNDS
-            .try_lock()
-            .map(|hwnds| *hwnds)
-            .unwrap_or([None, None])
+        HOOK_CONTEXT.with(|current| {
+            current
+                .borrow()
+                .as_ref()
+                .map(|context| context.own_window_hwnds)
+                .unwrap_or([None, None])
+        })
     }
 
-    fn set_capture_event_sender(sender: mpsc::Sender<CaptureWorkerMessage>) -> Result<(), String> {
-        let mut tx = CAPTURE_EVENT_TX
+    fn stop_capture_worker() {
+        let sender = CAPTURE_CONTROL_TX
             .lock()
-            .map_err(|_| "capture event queue lock poisoned".to_string())?;
-        if tx.is_some() {
-            return Err("input capture event queue already started".to_string());
-        }
-
-        *tx = Some(sender);
-        Ok(())
-    }
-
-    fn clear_capture_event_sender() {
-        if let Ok(mut tx) = CAPTURE_EVENT_TX.lock() {
-            *tx = None;
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(sender) = sender {
+            let _ = sender.send(CaptureWorkerMessage::Shutdown);
         }
     }
 
     fn dispatch_capture_event(event: RawInputEvent) -> bool {
-        dispatch_capture_message(CaptureWorkerMessage::Input(event))
+        dispatch_hook_message(CaptureWorkerMessage::Input(event))
     }
 
-    fn dispatch_capture_message(message: CaptureWorkerMessage) -> bool {
-        match CAPTURE_EVENT_TX.lock() {
-            Ok(tx) => tx
+    fn dispatch_hook_message(message: CaptureWorkerMessage) -> bool {
+        HOOK_CONTEXT.with(|current| {
+            current
+                .borrow()
                 .as_ref()
-                .is_some_and(|sender| sender.send(message).is_ok()),
-            Err(_) => false,
-        }
+                .is_some_and(|context| context.dispatch(message))
+        })
     }
 
     pub fn pause_capture_events() -> Result<CapturePauseGuard, String> {
         let (reached_tx, reached_rx) = mpsc::sync_channel(0);
         let (resume_tx, resume_rx) = mpsc::channel();
-        {
-            let tx = CAPTURE_EVENT_TX
-                .lock()
-                .map_err(|_| "capture event queue lock poisoned".to_string())?;
-            let Some(sender) = tx.as_ref() else {
-                return Ok(CapturePauseGuard { resume: None });
-            };
-            sender
-                .send(CaptureWorkerMessage::Pause {
-                    reached: reached_tx,
-                    resume: resume_rx,
-                })
-                .map_err(|_| "input capture event queue stopped".to_string())?;
-        }
+        let sender = CAPTURE_CONTROL_TX
+            .lock()
+            .map_err(|_| "capture event queue lock poisoned".to_string())?
+            .clone();
+        let Some(sender) = sender else {
+            return Ok(CapturePauseGuard { resume: None });
+        };
+        sender
+            .send(CaptureWorkerMessage::Pause {
+                reached: reached_tx,
+                resume: resume_rx,
+            })
+            .map_err(|_| "input capture event queue stopped".to_string())?;
 
         reached_rx
             .recv()
@@ -333,56 +319,84 @@ mod capture {
         })
     }
 
+    #[cfg(test)]
     fn run_capture_worker(
         shared: Arc<Mutex<AppController>>,
         receiver: mpsc::Receiver<CaptureWorkerMessage>,
     ) {
+        run_capture_worker_with_actions(shared, receiver, |_| {});
+    }
+
+    fn run_capture_worker_with_actions(
+        shared: Arc<Mutex<AppController>>,
+        receiver: mpsc::Receiver<CaptureWorkerMessage>,
+        mut run_action: impl FnMut(QueuedControlHotkeyAction),
+    ) {
+        const BATCH_SIZE: usize = 256;
+        let mut messages = Vec::with_capacity(BATCH_SIZE);
+
         while let Ok(message) = receiver.recv() {
-            match message {
-                CaptureWorkerMessage::Input(event) => {
-                    if let Ok(mut controller) = shared.lock() {
-                        controller.capture_input(event);
+            messages.push(message);
+            messages.extend(receiver.try_iter().take(BATCH_SIZE - 1));
+
+            let mut controller = None;
+            let mut should_shutdown = false;
+            for message in messages.drain(..) {
+                match message {
+                    CaptureWorkerMessage::Input(event) => {
+                        if controller.is_none() {
+                            controller = shared.lock().ok();
+                        }
+                        if let Some(controller) = controller.as_mut() {
+                            controller.capture_input(event);
+                        }
+                    }
+                    CaptureWorkerMessage::Action(action) => {
+                        drop(controller.take());
+                        run_action(action);
+                    }
+                    CaptureWorkerMessage::ResetHotkeyFilter => {
+                        if controller.is_none() {
+                            controller = shared.lock().ok();
+                        }
+                        if let Some(controller) = controller.as_mut() {
+                            controller.reset_recording_hotkey_filter();
+                        }
+                    }
+                    CaptureWorkerMessage::Pause { reached, resume } => {
+                        drop(controller.take());
+                        if reached.send(()).is_ok() {
+                            let _ = resume.recv();
+                        }
+                    }
+                    CaptureWorkerMessage::Shutdown => {
+                        drop(controller.take());
+                        should_shutdown = true;
+                        break;
                     }
                 }
-                CaptureWorkerMessage::ResetHotkeyFilter => {
-                    if let Ok(mut controller) = shared.lock() {
-                        controller.reset_recording_hotkey_filter();
-                    }
-                }
-                CaptureWorkerMessage::Pause { reached, resume } => {
-                    if reached.send(()).is_ok() {
-                        let _ = resume.recv();
-                    }
-                }
+            }
+            if should_shutdown {
+                break;
             }
         }
     }
 
-    fn set_hotkey_action_sender(sender: mpsc::Sender<ControlHotkeyAction>) {
-        if let Ok(mut tx) = HOTKEY_ACTION_TX.lock() {
-            *tx = Some(sender);
-        }
+    fn dispatch_hotkey_action(action: ControlHotkeyAction, at_ms: u64) -> bool {
+        dispatch_hook_message(CaptureWorkerMessage::Action(QueuedControlHotkeyAction {
+            action,
+            at_ms,
+        }))
     }
 
-    fn clear_hotkey_action_sender() {
-        if let Ok(mut tx) = HOTKEY_ACTION_TX.lock() {
-            *tx = None;
-        }
-    }
-
-    fn dispatch_hotkey_action(action: ControlHotkeyAction) -> bool {
-        let sender = match HOTKEY_ACTION_TX.try_lock() {
-            Ok(tx) => tx.clone(),
-            Err(_) => None,
-        };
-
-        match sender {
-            Some(sender) => sender.send(action).is_ok(),
-            None => false,
-        }
-    }
-
-    fn run_capture_thread(installed_tx: mpsc::Sender<Result<u32, String>>) {
+    fn run_capture_thread(
+        installed_tx: mpsc::Sender<Result<u32, String>>,
+        hook_context: HookContext,
+    ) {
+        HOOK_CONTEXT.with(|current| {
+            debug_assert!(current.borrow().is_none());
+            *current.borrow_mut() = Some(hook_context);
+        });
         let mut message = MSG::default();
         unsafe {
             let _ = PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE);
@@ -481,7 +495,11 @@ mod capture {
                 if let Some(event) = raw_key_event(w_param, l_param) {
                     let decision = handle_control_hotkey(event);
                     if let Some(action) = decision.action {
-                        dispatch_hotkey_action(action);
+                        let at_ms = match event {
+                            RawInputEvent::Key { at_ms, .. } => at_ms,
+                            _ => unreachable!("keyboard hook produced a non-key event"),
+                        };
+                        dispatch_hotkey_action(action, at_ms);
                     }
                     if decision.suppress {
                         return LRESULT(1);
@@ -503,26 +521,25 @@ mod capture {
     }
 
     fn handle_control_hotkey(event: RawInputEvent) -> ControlHotkeyDecision {
-        CONTROL_HOTKEY_RUNTIME
-            .lock()
-            .ok()
-            .and_then(|runtime| runtime.clone())
-            .map(|runtime| runtime.decide(event))
-            .unwrap_or(ControlHotkeyDecision {
-                suppress: false,
-                action: None,
-            })
+        HOOK_CONTEXT.with(|current| {
+            current
+                .borrow()
+                .as_ref()
+                .map(|context| context.control_hotkeys.decide(event))
+                .unwrap_or(ControlHotkeyDecision {
+                    suppress: false,
+                    action: None,
+                })
+        })
     }
 
     fn reset_control_hotkey_state() {
-        if let Some(runtime) = CONTROL_HOTKEY_RUNTIME
-            .lock()
-            .ok()
-            .and_then(|runtime| runtime.clone())
-        {
-            runtime.reset_action();
-        }
-        let _ = dispatch_capture_message(CaptureWorkerMessage::ResetHotkeyFilter);
+        HOOK_CONTEXT.with(|current| {
+            if let Some(context) = current.borrow().as_ref() {
+                context.control_hotkeys.reset_action();
+            }
+        });
+        let _ = dispatch_hook_message(CaptureWorkerMessage::ResetHotkeyFilter);
     }
 
     fn capture(event: RawInputEvent) {
@@ -975,6 +992,199 @@ mod capture {
                     button: MouseButton::Left,
                     state: ButtonState::Pressed,
                 }]
+            ));
+        }
+
+        #[test]
+        fn immutable_hook_context_preserves_the_ordered_hotkey_capture_boundary() {
+            let shared = Arc::new(Mutex::new(AppController::new()));
+            shared
+                .lock()
+                .unwrap()
+                .start_recording("boundary", 1_000, "2026-07-25T00:00:00Z")
+                .unwrap();
+            let stopped_recording = Arc::new(Mutex::new(None));
+            let (tx, rx) = mpsc::channel();
+            let hook_context = HookContext {
+                control_hotkeys: ControlHotkeyRuntime::default(),
+                own_window_hwnds: [Some(0x55), Some(0x66)],
+                capture_event_tx: tx,
+            };
+            let lifecycle_sender_guard = CAPTURE_CONTROL_TX
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let (dispatch_done_tx, dispatch_done_rx) = mpsc::channel();
+            let hook_worker = thread::spawn(move || {
+                HOOK_CONTEXT.with(|current| {
+                    *current.borrow_mut() = Some(hook_context);
+                });
+                assert_eq!(current_own_window_hwnds(), [Some(0x55), Some(0x66)]);
+                assert!(dispatch_hook_message(CaptureWorkerMessage::Input(
+                    RawInputEvent::MouseButton {
+                        at_ms: 1_010,
+                        x: 10,
+                        y: 10,
+                        button: MouseButton::Left,
+                        state: ButtonState::Pressed,
+                    }
+                )));
+                assert!(dispatch_hook_message(CaptureWorkerMessage::Action(
+                    QueuedControlHotkeyAction {
+                        action: ControlHotkeyAction::Stop,
+                        at_ms: 1_015,
+                    }
+                )));
+                assert!(dispatch_hook_message(CaptureWorkerMessage::Input(
+                    RawInputEvent::MouseButton {
+                        at_ms: 1_020,
+                        x: 20,
+                        y: 20,
+                        button: MouseButton::Left,
+                        state: ButtonState::Released,
+                    }
+                )));
+                assert!(dispatch_hook_message(CaptureWorkerMessage::Shutdown));
+                dispatch_done_tx.send(()).unwrap();
+            });
+            let worker_shared = shared.clone();
+            let action_shared = shared.clone();
+            let action_recording = stopped_recording.clone();
+            let worker = thread::spawn(move || {
+                run_capture_worker_with_actions(worker_shared, rx, |queued| {
+                    assert_eq!(queued.action, ControlHotkeyAction::Stop);
+                    let recording = action_shared
+                        .lock()
+                        .unwrap()
+                        .stop_recording(queued.at_ms)
+                        .unwrap();
+                    *action_recording.lock().unwrap() = Some(recording);
+                });
+            });
+
+            dispatch_done_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("hook dispatch must not wait for the lifecycle sender lock");
+            drop(lifecycle_sender_guard);
+            hook_worker.join().unwrap();
+            worker.join().unwrap();
+
+            let recording = stopped_recording.lock().unwrap().take().unwrap();
+            assert_eq!(recording.duration_ms, 15);
+            assert!(matches!(
+                recording.steps.as_slice(),
+                [MacroStep::MouseButton {
+                    elapsed_ms: 10,
+                    x: 10,
+                    y: 10,
+                    button: MouseButton::Left,
+                    state: ButtonState::Pressed,
+                }]
+            ));
+        }
+
+        #[test]
+        fn capture_worker_shutdown_discards_nothing_queued_before_it() {
+            let shared = Arc::new(Mutex::new(AppController::new()));
+            shared
+                .lock()
+                .unwrap()
+                .start_recording("shutdown", 1_000, "2026-07-25T00:00:00Z")
+                .unwrap();
+            let (tx, rx) = mpsc::channel();
+            let worker_shared = shared.clone();
+            let worker = thread::spawn(move || run_capture_worker(worker_shared, rx));
+
+            tx.send(CaptureWorkerMessage::Input(RawInputEvent::MouseButton {
+                at_ms: 1_010,
+                x: 10,
+                y: 10,
+                button: MouseButton::Left,
+                state: ButtonState::Pressed,
+            }))
+            .unwrap();
+            tx.send(CaptureWorkerMessage::Input(RawInputEvent::MouseButton {
+                at_ms: 1_020,
+                x: 20,
+                y: 20,
+                button: MouseButton::Left,
+                state: ButtonState::Released,
+            }))
+            .unwrap();
+            tx.send(CaptureWorkerMessage::Shutdown).unwrap();
+            worker.join().unwrap();
+
+            let recording = shared.lock().unwrap().stop_recording(1_025).unwrap();
+            assert!(matches!(
+                recording.steps.as_slice(),
+                [
+                    MacroStep::MouseButton {
+                        elapsed_ms: 10,
+                        button: MouseButton::Left,
+                        state: ButtonState::Pressed,
+                        ..
+                    },
+                    MacroStep::MouseButton {
+                        elapsed_ms: 20,
+                        button: MouseButton::Left,
+                        state: ButtonState::Released,
+                        ..
+                    }
+                ]
+            ));
+        }
+
+        #[test]
+        fn capture_worker_batches_preserve_every_ordered_drag_point() {
+            let shared = Arc::new(Mutex::new(AppController::new()));
+            shared
+                .lock()
+                .unwrap()
+                .start_recording("batched-drag", 1_000, "2026-07-25T00:00:00Z")
+                .unwrap();
+            let (tx, rx) = mpsc::channel();
+
+            tx.send(CaptureWorkerMessage::Input(RawInputEvent::MouseButton {
+                at_ms: 1_001,
+                x: 0,
+                y: 0,
+                button: MouseButton::Left,
+                state: ButtonState::Pressed,
+            }))
+            .unwrap();
+            for point in 1..=600 {
+                tx.send(CaptureWorkerMessage::Input(RawInputEvent::MouseMove {
+                    at_ms: 1_001 + point,
+                    x: point as i32,
+                    y: (point * 2) as i32,
+                }))
+                .unwrap();
+            }
+            tx.send(CaptureWorkerMessage::Input(RawInputEvent::MouseButton {
+                at_ms: 1_602,
+                x: 600,
+                y: 1_200,
+                button: MouseButton::Left,
+                state: ButtonState::Released,
+            }))
+            .unwrap();
+            tx.send(CaptureWorkerMessage::Shutdown).unwrap();
+
+            run_capture_worker(shared.clone(), rx);
+
+            let recording = shared.lock().unwrap().stop_recording(1_610).unwrap();
+            assert_eq!(recording.steps.len(), 602);
+            assert!(matches!(
+                recording.steps.get(300),
+                Some(MacroStep::MouseMove { x: 300, y: 600, .. })
+            ));
+            assert!(matches!(
+                recording.steps.last(),
+                Some(MacroStep::MouseButton {
+                    x: 600,
+                    y: 1_200,
+                    state: ButtonState::Released,
+                    ..
+                })
             ));
         }
 

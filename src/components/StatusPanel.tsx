@@ -8,7 +8,10 @@ interface StatusPanelProps {
 
 export function StatusPanel({ state, error }: StatusPanelProps) {
   const stateError = state.message_is_error ? displayErrorMessage(state.message) : "";
-  const displayedError = [error, stateError].filter(Boolean).join(" ");
+  const displayedError =
+    stateError && error.includes(stateError)
+      ? error
+      : [error, stateError].filter(Boolean).join(" ");
   const displayedMessage = state.message_is_error
     ? displayErrorMessage(state.message)
     : displayMessage(state.message);

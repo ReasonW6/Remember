@@ -37,6 +37,10 @@ pub fn restart_as_administrator(app: &AppHandle) -> Result<(), String> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
+    let parameters: Vec<u16> = OsStr::new(crate::single_instance::ELEVATED_RESTART_ARG)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
     let parent_address = app
         .get_webview_window("main")
         .and_then(|window| window.hwnd().ok())
@@ -49,7 +53,7 @@ pub fn restart_as_administrator(app: &AppHandle) -> Result<(), String> {
             parent,
             PCWSTR(operation.as_ptr()),
             PCWSTR(executable.as_ptr()),
-            None,
+            PCWSTR(parameters.as_ptr()),
             None,
             SW_SHOWNORMAL,
         )

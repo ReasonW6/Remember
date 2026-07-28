@@ -6,6 +6,7 @@ import type {
   HotkeyConfig,
   PrivilegeState,
   RecordingFile,
+  SettingsBundle,
   UiState
 } from "../types";
 
@@ -84,16 +85,16 @@ export function getHotkeys() {
   return invoke<HotkeyConfig>("get_hotkeys");
 }
 
-export function setHotkeys(config: HotkeyConfig) {
-  return invoke<HotkeyConfig>("set_hotkeys", { config });
-}
-
 export function getAdvancedSettings() {
   return invoke<AdvancedSettingsConfig>("get_advanced_settings");
 }
 
-export function setAdvancedSettings(settings: AdvancedSettingsConfig) {
-  return invoke<AdvancedSettingsConfig>("set_advanced_settings", { settings });
+export function getSettingsBundle() {
+  return invoke<SettingsBundle>("get_settings_bundle");
+}
+
+export function setSettingsBundle(bundle: SettingsBundle) {
+  return invoke<SettingsBundle>("set_settings_bundle", { bundle });
 }
 
 export function showAdvancedSettings() {

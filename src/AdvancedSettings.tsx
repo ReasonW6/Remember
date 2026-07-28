@@ -19,27 +19,40 @@ const defaultHotkeys: HotkeyConfig = {
   stop: "F8"
 };
 
+const volumeAdjustmentKeys = new Set([
+  "ArrowLeft",
+  "ArrowRight",
+  "ArrowUp",
+  "ArrowDown",
+  "Home",
+  "End",
+  "PageUp",
+  "PageDown"
+]);
+
 export function AdvancedSettings() {
   const [settings, setSettings] = useState(defaultSettings);
   const [hotkeys, setHotkeys] = useState(defaultHotkeys);
   const [pending, setPending] = useState(true);
+  const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState("");
   const [showSavedNotice, setShowSavedNotice] = useState(false);
-  const volumePreviewTimerRef = useRef<number | undefined>();
   const savedNoticeTimerRef = useRef<number | undefined>();
 
   useEffect(() => {
     let disposed = false;
-    void Promise.all([rememberApi.getAdvancedSettings(), rememberApi.getHotkeys()])
-      .then(([loadedSettings, loadedHotkeys]) => {
+    void rememberApi
+      .getSettingsBundle()
+      .then((bundle) => {
         if (!disposed) {
-          setSettings(loadedSettings);
-          setHotkeys(loadedHotkeys);
+          setSettings(bundle.advanced);
+          setHotkeys(bundle.hotkeys);
+          setLoaded(true);
         }
       })
       .catch((loadError: unknown) => {
         if (!disposed) {
-          setError(displayErrorMessage(loadError));
+          setError(`设置加载失败，保存已禁用。${displayErrorMessage(loadError)}`);
         }
       })
       .finally(() => {
@@ -50,19 +63,15 @@ export function AdvancedSettings() {
 
     return () => {
       disposed = true;
-      window.clearTimeout(volumePreviewTimerRef.current);
       window.clearTimeout(savedNoticeTimerRef.current);
     };
   }, []);
 
   function previewVolume(volumePercent: number, muted: boolean) {
-    window.clearTimeout(volumePreviewTimerRef.current);
     if (muted || volumePercent === 0) {
       return;
     }
-    volumePreviewTimerRef.current = window.setTimeout(() => {
-      playFeedbackTone("recording_start", volumePercent, false);
-    }, 250);
+    playFeedbackTone("recording_start", volumePercent, false);
   }
 
   function toggleMute() {
@@ -80,16 +89,19 @@ export function AdvancedSettings() {
   }
 
   async function saveAllSettings() {
-    if (pending) {
+    if (pending || !loaded) {
       return;
     }
     setPending(true);
     setError("");
     setShowSavedNotice(false);
     try {
-      const savedHotkeys = await rememberApi.setHotkeys(hotkeys);
-      setSettings(await rememberApi.setAdvancedSettings(settings));
-      setHotkeys(savedHotkeys);
+      const savedBundle = await rememberApi.setSettingsBundle({
+        advanced: settings,
+        hotkeys
+      });
+      setSettings(savedBundle.advanced);
+      setHotkeys(savedBundle.hotkeys);
       showSavedToast();
     } catch (saveError) {
       setError(displayErrorMessage(saveError));
@@ -97,6 +109,8 @@ export function AdvancedSettings() {
       setPending(false);
     }
   }
+
+  const controlsDisabled = pending || !loaded;
 
   return (
     <main className="app-shell advanced-settings-shell">
@@ -110,7 +124,7 @@ export function AdvancedSettings() {
           <button
             className="action-button advanced-settings-save-button"
             type="button"
-            disabled={pending}
+            disabled={controlsDisabled}
             onClick={() => void saveAllSettings()}
           >
             <Save size={15} aria-hidden="true" />
@@ -143,20 +157,30 @@ export function AdvancedSettings() {
               step="1"
               aria-label="提示音音量"
               value={settings.feedback_volume_percent}
-              disabled={pending || settings.feedback_muted}
+              disabled={controlsDisabled || settings.feedback_muted}
               onChange={(event) => {
                 const volumePercent = Number(event.target.value);
                 setSettings((current) => ({
                   ...current,
                   feedback_volume_percent: volumePercent
                 }));
-                previewVolume(volumePercent, settings.feedback_muted);
+              }}
+              onPointerUp={(event) =>
+                previewVolume(Number(event.currentTarget.value), settings.feedback_muted)
+              }
+              onKeyUp={(event) => {
+                if (volumeAdjustmentKeys.has(event.key)) {
+                  previewVolume(
+                    Number(event.currentTarget.value),
+                    settings.feedback_muted
+                  );
+                }
               }}
             />
             <button
               className="action-button mute-button"
               type="button"
-              disabled={pending}
+              disabled={controlsDisabled}
               aria-pressed={settings.feedback_muted}
               onClick={toggleMute}
             >
@@ -170,7 +194,7 @@ export function AdvancedSettings() {
           </div>
         </section>
 
-        <HotkeyPanel hotkeys={hotkeys} disabled={pending} onChange={setHotkeys} />
+        <HotkeyPanel hotkeys={hotkeys} disabled={controlsDisabled} onChange={setHotkeys} />
 
         <section
           className="panel advanced-setting-panel"
@@ -181,7 +205,7 @@ export function AdvancedSettings() {
             <input
               type="checkbox"
               checked={settings.show_activity_indicator}
-              disabled={pending}
+              disabled={controlsDisabled}
               onChange={(event) =>
                 setSettings((current) => ({
                   ...current,

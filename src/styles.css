@@ -475,6 +475,13 @@ select {
   color: #9a3412;
 }
 
+.playback-settings-status {
+  margin: 10px 0 0;
+  color: #5f665f;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
 .status-list,
 .hotkey-list {
   display: grid;

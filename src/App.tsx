@@ -40,8 +40,19 @@ const defaultAdvancedSettings: AdvancedSettingsConfig = {
   show_activity_indicator: true
 };
 
-const loopCountError = "循环次数必须是大于等于 1 的整数。";
+const maxLoopCount = 0xffffffff;
+const loopCountError = `循环次数必须是 1 到 ${maxLoopCount} 之间的整数。`;
 const speedError = "速度必须是大于 0 的有效数字。";
+
+interface PlaybackSettingsValue {
+  loopCount: number | null;
+  speedMultiplier: number;
+}
+
+const defaultPlaybackSettings: PlaybackSettingsValue = {
+  loopCount: 1,
+  speedMultiplier: 1
+};
 
 export function App() {
   const [state, setState] = useState<UiState>(idleState);
@@ -54,14 +65,28 @@ export function App() {
   const [hotkeys, setHotkeys] = useState(defaultHotkeys);
   const [isElevated, setIsElevated] = useState(false);
   const [pendingCommand, setPendingCommand] = useState(false);
+  const [playbackSettingsReady, setPlaybackSettingsReady] = useState(false);
+  const [playbackSettingsPending, setPlaybackSettingsPending] = useState(true);
+  const [playbackSettingsError, setPlaybackSettingsError] = useState("");
+  const [appliedPlaybackSettings, setAppliedPlaybackSettings] =
+    useState<PlaybackSettingsValue>(defaultPlaybackSettings);
   const pendingCommandRef = useRef(false);
+  const playbackSettingsSyncRef = useRef(0);
+  const playbackSettingsQueueRef = useRef<Promise<void>>(Promise.resolve());
   const latestRevisionRef = useRef(idleState.revision);
   const previousModeRef = useRef(idleState.mode);
   const advancedSettingsRef = useRef(defaultAdvancedSettings);
+  const recordingsChangeVersionRef = useRef(0);
+  const recordingsRefreshRef = useRef<Promise<void> | null>(null);
+  const hotkeysChangeVersionRef = useRef(0);
+  const advancedSettingsChangeVersionRef = useRef(0);
   const hasRecording = state.step_count > 0;
   const isBusy = state.mode === "recording" || state.mode === "playing";
   const validationError = useMemo(() => {
-    if (loopCount !== null && (!Number.isInteger(loopCount) || loopCount < 1)) {
+    if (
+      loopCount !== null &&
+      (!Number.isInteger(loopCount) || loopCount < 1 || loopCount > maxLoopCount)
+    ) {
       return loopCountError;
     }
     if (!Number.isFinite(speedMultiplier) || speedMultiplier <= 0) {
@@ -77,59 +102,152 @@ export function App() {
     let unsubscribeHotkeys: (() => void) | undefined;
     let unsubscribeAdvancedSettings: (() => void) | undefined;
 
-    rememberApi
-      .getState()
-      .then((nextState) => {
-        if (!disposed) {
-          applyUiState(nextState);
+    async function initializeState() {
+      try {
+        const nextUnsubscribe = await rememberApi.subscribeToState((nextState) => {
+          if (!disposed) {
+            applyUiState(nextState);
+          }
+        });
+        if (disposed) {
+          nextUnsubscribe();
+          return;
         }
-      })
-      .catch((loadError: unknown) => {
+        unsubscribeState = nextUnsubscribe;
+      } catch (subscribeError) {
+        if (!disposed) {
+          addInitializationError(subscribeError);
+        }
+      }
+
+      if (disposed) {
+        return;
+      }
+      try {
+        applyUiState(await rememberApi.getState());
+      } catch (loadError) {
         if (!disposed) {
           addInitializationError(loadError);
         }
-      });
+      }
+    }
 
-    rememberApi
-      .listRecordings()
-      .then((nextRecordings) => {
+    async function initializeRecordings() {
+      try {
+        const nextUnsubscribe = await rememberApi.subscribeToRecordingsChanged(() => {
+          if (disposed) {
+            return;
+          }
+          void refreshRecordings().catch((refreshError: unknown) => {
+            if (!disposed) {
+              setActionError(displayErrorMessage(refreshError));
+            }
+          });
+        });
+        if (disposed) {
+          nextUnsubscribe();
+          return;
+        }
+        unsubscribeRecordings = nextUnsubscribe;
+      } catch (subscribeError) {
         if (!disposed) {
+          addInitializationError(subscribeError);
+        }
+      }
+
+      if (disposed) {
+        return;
+      }
+      const changeVersion = recordingsChangeVersionRef.current;
+      try {
+        const nextRecordings = await rememberApi.listRecordings();
+        if (!disposed && changeVersion === recordingsChangeVersionRef.current) {
           setRecordings(nextRecordings);
         }
-      })
-      .catch((loadError: unknown) => {
+      } catch (loadError) {
         if (!disposed) {
           addInitializationError(loadError);
         }
-      });
+      }
+    }
 
-    rememberApi
-      .getHotkeys()
-      .then((nextHotkeys) => {
+    async function initializeHotkeys() {
+      try {
+        const nextUnsubscribe = await rememberApi.subscribeToHotkeysChanged((nextHotkeys) => {
+          if (!disposed) {
+            hotkeysChangeVersionRef.current += 1;
+            setHotkeys(nextHotkeys);
+          }
+        });
+        if (disposed) {
+          nextUnsubscribe();
+          return;
+        }
+        unsubscribeHotkeys = nextUnsubscribe;
+      } catch (subscribeError) {
         if (!disposed) {
+          addInitializationError(subscribeError);
+        }
+      }
+
+      if (disposed) {
+        return;
+      }
+      const changeVersion = hotkeysChangeVersionRef.current;
+      try {
+        const nextHotkeys = await rememberApi.getHotkeys();
+        if (!disposed && changeVersion === hotkeysChangeVersionRef.current) {
           setHotkeys(nextHotkeys);
         }
-      })
-      .catch((loadError: unknown) => {
+      } catch (loadError) {
         if (!disposed) {
           addInitializationError(loadError);
         }
-      });
+      }
+    }
 
-    rememberApi
-      .getAdvancedSettings()
-      .then((settings) => {
+    async function initializeAdvancedSettings() {
+      try {
+        const nextUnsubscribe = await rememberApi.subscribeToAdvancedSettingsChanged(
+          (settings) => {
+            if (!disposed) {
+              advancedSettingsChangeVersionRef.current += 1;
+              advancedSettingsRef.current = settings;
+            }
+          }
+        );
+        if (disposed) {
+          nextUnsubscribe();
+          return;
+        }
+        unsubscribeAdvancedSettings = nextUnsubscribe;
+      } catch (subscribeError) {
         if (!disposed) {
+          addInitializationError(subscribeError);
+        }
+      }
+
+      if (disposed) {
+        return;
+      }
+      const changeVersion = advancedSettingsChangeVersionRef.current;
+      try {
+        const settings = await rememberApi.getAdvancedSettings();
+        if (!disposed && changeVersion === advancedSettingsChangeVersionRef.current) {
           advancedSettingsRef.current = settings;
         }
-      })
-      .catch((loadError: unknown) => {
+      } catch (loadError) {
         if (!disposed) {
           addInitializationError(loadError);
         }
-      });
+      }
+    }
 
-    rememberApi
+    void initializeState();
+    void initializeRecordings();
+    void initializeHotkeys();
+    void initializeAdvancedSettings();
+    void rememberApi
       .getPrivilegeState()
       .then((privilegeState) => {
         if (!disposed) {
@@ -139,83 +257,6 @@ export function App() {
       .catch((loadError: unknown) => {
         if (!disposed) {
           addInitializationError(loadError);
-        }
-      });
-
-    rememberApi
-      .subscribeToState((nextState) => {
-        if (!disposed) {
-          applyUiState(nextState);
-        }
-      })
-      .then((nextUnsubscribe) => {
-        unsubscribeState = nextUnsubscribe;
-        if (disposed) {
-          unsubscribeState();
-        }
-      })
-      .catch((subscribeError: unknown) => {
-        if (!disposed) {
-          addInitializationError(subscribeError);
-        }
-      });
-
-    rememberApi
-      .subscribeToRecordingsChanged(() => {
-        if (disposed) {
-          return;
-        }
-        void refreshRecordings().catch((refreshError: unknown) => {
-          if (!disposed) {
-            setActionError(displayErrorMessage(refreshError));
-          }
-        });
-      })
-      .then((nextUnsubscribe) => {
-        unsubscribeRecordings = nextUnsubscribe;
-        if (disposed) {
-          unsubscribeRecordings();
-        }
-      })
-      .catch((subscribeError: unknown) => {
-        if (!disposed) {
-          addInitializationError(subscribeError);
-        }
-      });
-
-    rememberApi
-      .subscribeToHotkeysChanged((nextHotkeys) => {
-        if (!disposed) {
-          setHotkeys(nextHotkeys);
-        }
-      })
-      .then((nextUnsubscribe) => {
-        unsubscribeHotkeys = nextUnsubscribe;
-        if (disposed) {
-          unsubscribeHotkeys();
-        }
-      })
-      .catch((subscribeError: unknown) => {
-        if (!disposed) {
-          addInitializationError(subscribeError);
-        }
-      });
-
-    rememberApi
-      .subscribeToAdvancedSettingsChanged((settings) => {
-        if (!disposed) {
-          advancedSettingsRef.current = settings;
-        }
-      })
-      .then((nextUnsubscribe) => {
-        unsubscribeAdvancedSettings = nextUnsubscribe;
-        if (disposed) {
-          unsubscribeAdvancedSettings();
-        }
-      })
-      .catch((subscribeError: unknown) => {
-        if (!disposed) {
-          addInitializationError(subscribeError);
         }
       });
 
@@ -229,22 +270,40 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    const syncRevision = ++playbackSettingsSyncRef.current;
     if (validationError) {
+      setPlaybackSettingsReady(false);
+      setPlaybackSettingsPending(false);
+      setPlaybackSettingsError("");
       return;
     }
 
-    let disposed = false;
-    rememberApi
-      .setPlaybackSettings(loopCount, speedMultiplier)
+    const requestedSettings = { loopCount, speedMultiplier };
+    setPlaybackSettingsReady(false);
+    setPlaybackSettingsPending(true);
+    setPlaybackSettingsError("");
+    const synchronization = playbackSettingsQueueRef.current.then(() =>
+      rememberApi.setPlaybackSettings(
+        requestedSettings.loopCount,
+        requestedSettings.speedMultiplier
+      )
+    );
+    playbackSettingsQueueRef.current = synchronization.catch(() => undefined);
+
+    void synchronization
+      .then(() => {
+        setAppliedPlaybackSettings(requestedSettings);
+        if (syncRevision === playbackSettingsSyncRef.current) {
+          setPlaybackSettingsPending(false);
+          setPlaybackSettingsReady(true);
+        }
+      })
       .catch((settingsError: unknown) => {
-        if (!disposed) {
-          setActionError(displayErrorMessage(settingsError));
+        if (syncRevision === playbackSettingsSyncRef.current) {
+          setPlaybackSettingsPending(false);
+          setPlaybackSettingsError(displayErrorMessage(settingsError));
         }
       });
-
-    return () => {
-      disposed = true;
-    };
   }, [loopCount, speedMultiplier, validationError]);
 
   useEffect(() => {
@@ -301,9 +360,15 @@ export function App() {
       return false;
     }
 
+    const previousMode = previousModeRef.current;
     latestRevisionRef.current = nextState.revision;
     announceModeTransition(nextState.mode);
     setState(nextState);
+    if (previousMode === "recording" && nextState.mode === "idle") {
+      void refreshRecordings().catch((refreshError: unknown) => {
+        setActionError(displayErrorMessage(refreshError));
+      });
+    }
     return true;
   }
 
@@ -332,16 +397,48 @@ export function App() {
     });
   }
 
-  async function refreshRecordings() {
-    setRecordings(await rememberApi.listRecordings());
+  function refreshRecordings() {
+    const requestedVersion = ++recordingsChangeVersionRef.current;
+    if (recordingsRefreshRef.current) {
+      return recordingsRefreshRef.current;
+    }
+
+    const refresh = (async () => {
+      let refreshVersion = requestedVersion;
+      while (true) {
+        try {
+          const nextRecordings = await rememberApi.listRecordings();
+          if (refreshVersion === recordingsChangeVersionRef.current) {
+            setRecordings(nextRecordings);
+            return;
+          }
+        } catch (refreshError) {
+          if (refreshVersion === recordingsChangeVersionRef.current) {
+            throw refreshError;
+          }
+        }
+        refreshVersion = recordingsChangeVersionRef.current;
+      }
+    })();
+    recordingsRefreshRef.current = refresh;
+    void refresh.then(
+      () => {
+        if (recordingsRefreshRef.current === refresh) {
+          recordingsRefreshRef.current = null;
+        }
+      },
+      () => {
+        if (recordingsRefreshRef.current === refresh) {
+          recordingsRefreshRef.current = null;
+        }
+      }
+    );
+    return refresh;
   }
 
   function handleRecord() {
     if (state.mode === "recording") {
-      void applyCommand(async () => {
-        applyUiState(await rememberApi.stopRecording());
-        await refreshRecordings();
-      });
+      void applyState(rememberApi.stopRecording);
       return;
     }
 
@@ -349,18 +446,20 @@ export function App() {
   }
 
   function handlePlay() {
-    if (validationError) {
+    if (validationError || !playbackSettingsReady) {
       return;
     }
-    void applyState(() => rememberApi.startPlayback(loopCount, speedMultiplier));
+    void applyState(() =>
+      rememberApi.startPlayback(
+        appliedPlaybackSettings.loopCount,
+        appliedPlaybackSettings.speedMultiplier
+      )
+    );
   }
 
   function handleStop() {
     if (state.mode === "recording") {
-      void applyCommand(async () => {
-        applyUiState(await rememberApi.stopRecording());
-        await refreshRecordings();
-      });
+      void applyState(rememberApi.stopRecording);
       return;
     }
 
@@ -454,7 +553,12 @@ export function App() {
         if (state.mode === "playing") {
           event.preventDefault();
           handleStop();
-        } else if (state.mode === "idle" && hasRecording && !validationError) {
+        } else if (
+          state.mode === "idle" &&
+          hasRecording &&
+          !validationError &&
+          playbackSettingsReady
+        ) {
           event.preventDefault();
           handlePlay();
         }
@@ -469,9 +573,22 @@ export function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [hasRecording, hotkeys, state.mode, loopCount, speedMultiplier, validationError]);
+  }, [
+    hasRecording,
+    hotkeys,
+    state.mode,
+    validationError,
+    playbackSettingsReady,
+    appliedPlaybackSettings
+  ]);
 
-  const displayedError = [...initializationErrors, actionError].filter(Boolean).join(" ");
+  const displayedError = [
+    ...initializationErrors,
+    actionError,
+    playbackSettingsError
+  ]
+    .filter(Boolean)
+    .join(" ");
   const displayedStateMessage = state.message_is_error
     ? displayErrorMessage(state.message)
     : displayMessage(state.message);
@@ -488,14 +605,21 @@ export function App() {
               <p>模式：{displayMode(state.mode)}</p>
             </div>
           </div>
-          <p className="mode-summary">{displayedStateMessage}</p>
+          <p
+            className="mode-summary"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            {displayedStateMessage}
+          </p>
         </header>
         <div className="content-grid">
           <div className="main-stack">
             <Controls
               state={state}
               hasRecording={hasRecording}
-              playbackValid={!validationError}
+              playbackValid={!validationError && playbackSettingsReady}
               pendingCommand={pendingCommand}
               onRecord={handleRecord}
               onPlay={handlePlay}
@@ -521,6 +645,11 @@ export function App() {
             <PlaybackSettings
               loopCount={loopCount}
               speedMultiplier={speedMultiplier}
+              appliedLoopCount={appliedPlaybackSettings.loopCount}
+              appliedSpeedMultiplier={appliedPlaybackSettings.speedMultiplier}
+              syncPending={playbackSettingsPending}
+              syncReady={playbackSettingsReady}
+              playbackHotkey={hotkeys.playback}
               onLoopCountChange={setLoopCount}
               onSpeedMultiplierChange={setSpeedMultiplier}
             />

@@ -78,7 +78,11 @@ fn activity_indicator_window_is_non_interactive_and_topmost() {
     );
     assert_eq!(
         capability["permissions"],
-        serde_json::json!(["core:event:allow-listen", "core:event:allow-unlisten"])
+        serde_json::json!([
+            "core:event:allow-listen",
+            "core:event:allow-unlisten",
+            "activity-indicator-window-commands"
+        ])
     );
 }
 
@@ -115,7 +119,8 @@ fn advanced_settings_window_starts_hidden_with_narrow_permissions() {
         capability["permissions"],
         serde_json::json!([
             "core:window:allow-start-dragging",
-            "core:window:allow-close"
+            "core:window:allow-close",
+            "advanced-settings-window-commands"
         ])
     );
 }
@@ -167,12 +172,15 @@ fn main_window_capability_uses_only_required_events_windows_and_dialogs() {
         "core:event:allow-unlisten",
         "core:window:allow-start-dragging",
         "core:window:allow-minimize",
+        "core:window:allow-unminimize",
+        "core:window:allow-set-focus",
         "core:window:allow-close",
         "dialog:allow-open",
         "dialog:allow-save",
         "dialog:allow-ask",
+        "main-window-commands",
     ] {
         assert!(has(required), "missing {required}");
     }
-    assert_eq!(permissions.len(), 8);
+    assert_eq!(permissions.len(), 11);
 }

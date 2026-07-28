@@ -1,5 +1,6 @@
 export interface ShortcutEventLike {
   key: string;
+  code?: string;
   ctrlKey: boolean;
   altKey: boolean;
   shiftKey: boolean;
@@ -7,7 +8,7 @@ export interface ShortcutEventLike {
 }
 
 export function shortcutFromEvent(event: ShortcutEventLike) {
-  const key = keyLabel(event.key);
+  const key = keyLabel(event.key, event.code);
   if (!key || isModifierKey(key)) {
     return "";
   }
@@ -30,15 +31,26 @@ export function shortcutFromEvent(event: ShortcutEventLike) {
 }
 
 export function isAllowedGlobalShortcut(shortcut: string) {
-  if (shortcut.includes("+")) {
-    return true;
+  const parts = shortcut.split("+");
+  const key = parts.pop() ?? "";
+  const modifiers = parts;
+  if (
+    !isSupportedKey(key) ||
+    modifiers.some((modifier) => !["Ctrl", "Alt", "Shift", "Win"].includes(modifier)) ||
+    new Set(modifiers).size !== modifiers.length
+  ) {
+    return false;
   }
-  return /^F([1-9]|1[0-9]|2[0-4])$/.test(shortcut);
+
+  return modifiers.length > 0 || isFunctionKey(key);
 }
 
-function keyLabel(key: string) {
-  if (key.length === 1) {
-    return key.toUpperCase();
+function keyLabel(key: string, code?: string) {
+  if (code && /^Key[A-Z]$/.test(code)) {
+    return code.slice(3);
+  }
+  if (code && /^Digit[0-9]$/.test(code)) {
+    return code.slice(5);
   }
 
   const labels: Record<string, string> = {
@@ -59,13 +71,49 @@ function keyLabel(key: string) {
     Tab: "Tab"
   };
 
-  if (/^F([1-9]|1[0-9]|2[0-4])$/.test(key)) {
+  if (labels[key]) {
+    return labels[key];
+  }
+
+  if (isFunctionKey(key)) {
     return key;
   }
 
-  return labels[key] ?? "";
+  if (/^[A-Za-z0-9]$/.test(key)) {
+    return key.toUpperCase();
+  }
+
+  return key.length === 1 ? key : "";
 }
 
 function isModifierKey(key: string) {
   return key === "Control" || key === "Alt" || key === "Shift" || key === "Meta";
+}
+
+function isFunctionKey(key: string) {
+  return /^F([1-9]|1[0-9]|2[0-4])$/.test(key);
+}
+
+function isSupportedKey(key: string) {
+  return (
+    /^[A-Z0-9]$/.test(key) ||
+    isFunctionKey(key) ||
+    [
+      "Esc",
+      "Space",
+      "Tab",
+      "Enter",
+      "Backspace",
+      "Delete",
+      "Insert",
+      "Home",
+      "End",
+      "PageUp",
+      "PageDown",
+      "ArrowUp",
+      "ArrowDown",
+      "ArrowLeft",
+      "ArrowRight"
+    ].includes(key)
+  );
 }

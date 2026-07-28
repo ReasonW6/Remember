@@ -2,7 +2,8 @@ import { type KeyboardEvent, useEffect, useState } from "react";
 import { isAllowedGlobalShortcut, shortcutFromEvent } from "../lib/hotkeys";
 import type { HotkeyConfig } from "../types";
 
-const unsafeShortcutError = "单键快捷键仅支持 F1-F24；其他按键请搭配修饰键。";
+const unsafeShortcutError =
+  "仅支持字母、数字、F1-F24 及常用导航键；F1-F24 以外的按键必须搭配修饰键。";
 
 const fields: Array<{ id: keyof HotkeyConfig; label: string }> = [
   { id: "record", label: "录制" },

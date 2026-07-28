@@ -3,7 +3,8 @@ use remember_lib::app_state::{
     ControlHotkeyModifiers,
 };
 use remember_lib::model::{KeyState, MacroStep, Recording};
-use remember_lib::recorder::RawInputEvent;
+use remember_lib::recorder::{RawInputEvent, MAX_RECORDING_STEPS};
+use std::sync::Arc;
 
 fn recording() -> Recording {
     Recording::new(
@@ -58,8 +59,18 @@ fn stopped_recording_stays_pending_until_the_matching_recording_is_saved() {
     let recording = app.stop_recording(150).expect("stop");
 
     assert_eq!(app.recording_pending_save(), Some(&recording));
+    assert!(Arc::ptr_eq(
+        app.recording_pending_save().expect("pending recording"),
+        &recording
+    ));
+    assert!(Arc::ptr_eq(
+        &app.saveable_recording().expect("saveable recording"),
+        &recording
+    ));
 
-    let stale = Recording::new("stale", "2026-06-29T00:00:01Z", Vec::new());
+    let stale = Arc::new((*recording).clone());
+    assert_eq!(stale, recording);
+    assert!(!Arc::ptr_eq(&stale, &recording));
     app.mark_recording_saved(&stale);
     assert_eq!(app.recording_pending_save(), Some(&recording));
 
@@ -79,7 +90,7 @@ fn pending_recording_cannot_be_replaced_by_a_new_recording() {
         .expect_err("pending recording must be preserved");
 
     assert!(error.contains("current recording has not been saved"));
-    assert_eq!(app.current_recording(), Some(&recording));
+    assert_eq!(app.current_recording(), Some(recording.as_ref()));
     assert_eq!(app.recording_pending_save(), Some(&recording));
 }
 
@@ -99,7 +110,7 @@ fn pending_recording_cannot_be_replaced_by_a_loaded_recording() {
         .expect_err("pending recording must be preserved");
 
     assert!(error.contains("current recording has not been saved"));
-    assert_eq!(app.current_recording(), Some(&recording));
+    assert_eq!(app.current_recording(), Some(recording.as_ref()));
     assert_eq!(app.recording_pending_save(), Some(&recording));
 }
 
@@ -181,6 +192,42 @@ fn recognizes_same_record_stop_hotkey_as_toggle() {
 }
 
 #[test]
+fn release_before_recording_worker_start_does_not_block_stop_hotkey() {
+    let mut app = AppController::new();
+
+    let start = app.control_hotkey_decision(RawInputEvent::Key {
+        at_ms: 125,
+        vk_code: 0x77,
+        scan_code: 0x42,
+        extended: false,
+        state: KeyState::Pressed,
+    });
+    assert_eq!(start.action, Some(ControlHotkeyAction::Record));
+
+    let release = app.control_hotkey_decision(RawInputEvent::Key {
+        at_ms: 126,
+        vk_code: 0x77,
+        scan_code: 0x42,
+        extended: false,
+        state: KeyState::Released,
+    });
+    assert!(release.suppress);
+    assert_eq!(release.action, None);
+
+    app.start_recording_from_hotkey("test", 125, "2026-06-29T00:00:00Z")
+        .expect("start");
+
+    let stop = app.control_hotkey_decision(RawInputEvent::Key {
+        at_ms: 150,
+        vk_code: 0x77,
+        scan_code: 0x42,
+        extended: false,
+        state: KeyState::Pressed,
+    });
+    assert_eq!(stop.action, Some(ControlHotkeyAction::Stop));
+}
+
+#[test]
 fn ignores_repeated_control_hotkey_press_until_release() {
     let mut app = AppController::new();
 
@@ -202,6 +249,69 @@ fn ignores_repeated_control_hotkey_press_until_release() {
     assert_eq!(first.action, Some(ControlHotkeyAction::Record));
     assert!(repeated.suppress);
     assert_eq!(repeated.action, None);
+}
+
+#[test]
+fn keeps_stop_hotkey_suppressed_until_it_is_released_after_recording_finishes() {
+    let mut app = AppController::new();
+
+    let start = app.control_hotkey_decision(RawInputEvent::Key {
+        at_ms: 100,
+        vk_code: 0x77,
+        scan_code: 0x42,
+        extended: false,
+        state: KeyState::Pressed,
+    });
+    assert_eq!(start.action, Some(ControlHotkeyAction::Record));
+    app.start_recording_from_hotkey("test", 100, "2026-06-29T00:00:00Z")
+        .expect("start");
+    let start_release = app.control_hotkey_decision(RawInputEvent::Key {
+        at_ms: 101,
+        vk_code: 0x77,
+        scan_code: 0x42,
+        extended: false,
+        state: KeyState::Released,
+    });
+    assert!(start_release.suppress);
+
+    let stop = app.control_hotkey_decision(RawInputEvent::Key {
+        at_ms: 110,
+        vk_code: 0x77,
+        scan_code: 0x42,
+        extended: false,
+        state: KeyState::Pressed,
+    });
+    assert_eq!(stop.action, Some(ControlHotkeyAction::Stop));
+    app.stop_recording(110).expect("stop");
+
+    let repeated = app.control_hotkey_decision(RawInputEvent::Key {
+        at_ms: 111,
+        vk_code: 0x77,
+        scan_code: 0x42,
+        extended: false,
+        state: KeyState::Pressed,
+    });
+    assert!(repeated.suppress);
+    assert_eq!(repeated.action, None);
+
+    let stop_release = app.control_hotkey_decision(RawInputEvent::Key {
+        at_ms: 112,
+        vk_code: 0x77,
+        scan_code: 0x42,
+        extended: false,
+        state: KeyState::Released,
+    });
+    assert!(stop_release.suppress);
+    assert_eq!(stop_release.action, None);
+
+    let next_press = app.control_hotkey_decision(RawInputEvent::Key {
+        at_ms: 120,
+        vk_code: 0x77,
+        scan_code: 0x42,
+        extended: false,
+        state: KeyState::Pressed,
+    });
+    assert_eq!(next_press.action, Some(ControlHotkeyAction::Record));
 }
 
 #[test]
@@ -673,6 +783,18 @@ fn loads_recording_and_starts_playback() {
 }
 
 #[test]
+fn playback_reuses_the_completed_recording_allocation() {
+    let mut app = AppController::new();
+    app.start_recording("completed", 100, "2026-06-29T00:00:00Z")
+        .expect("start");
+    let recording = app.stop_recording(150).expect("stop");
+
+    let run = app.start_playback(1, 1.0).expect("play");
+
+    assert!(Arc::ptr_eq(&run.recording, &recording));
+}
+
+#[test]
 fn starts_playback_with_current_settings() {
     let mut app = AppController::new();
     app.set_recording(Recording::new(
@@ -974,4 +1096,46 @@ fn ui_state_revision_increases_and_marks_playback_errors() {
     assert!(failed.revision > playing.revision);
     assert!(failed.message_is_error);
     assert_eq!(failed.message, "executor failed");
+}
+
+#[test]
+fn runtime_errors_are_visible_and_duplicate_reports_do_not_churn_revision() {
+    let mut app = AppController::new();
+    let initial_revision = app.ui_state().revision;
+
+    assert!(app.set_error("hotkey failed"));
+    let failed = app.ui_state();
+    assert!(failed.message_is_error);
+    assert_eq!(failed.message, "hotkey failed");
+    assert!(failed.revision > initial_revision);
+
+    assert!(!app.set_error("hotkey failed"));
+    assert_eq!(app.ui_state().revision, failed.revision);
+}
+
+#[test]
+fn step_limit_stops_with_a_saveable_truncated_recording_and_visible_warning() {
+    let mut app = AppController::new();
+    app.start_recording("bounded", 0, "2026-06-29T00:00:00Z")
+        .expect("start");
+    for index in 0..=MAX_RECORDING_STEPS {
+        app.capture_input(RawInputEvent::MouseWheel {
+            at_ms: index as u64,
+            x: 0,
+            y: 0,
+            delta: 1,
+        });
+    }
+
+    let recording = app
+        .stop_recording(MAX_RECORDING_STEPS as u64 + 1)
+        .expect("stop with truncated recording");
+    let state = app.ui_state();
+
+    assert_eq!(recording.steps.len(), MAX_RECORDING_STEPS);
+    assert_eq!(app.recording_pending_save(), Some(&recording));
+    assert_eq!(state.mode, AppMode::Idle);
+    assert_eq!(state.step_count, MAX_RECORDING_STEPS);
+    assert!(state.message_is_error);
+    assert!(state.message.contains(&MAX_RECORDING_STEPS.to_string()));
 }

@@ -199,6 +199,10 @@ describe("App", () => {
       expect.stringContaining("网络适配器")
     );
     expect(screen.getByText("模式：就绪")).toBeInTheDocument();
+    expect(screen.getByText("就绪", { selector: ".mode-summary" })).toHaveAttribute(
+      "aria-live",
+      "polite"
+    );
     expect(screen.queryByText("快捷键")).not.toBeInTheDocument();
     expect(screen.getByText("暂无录制文件")).toBeInTheDocument();
     expect(screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent)).toEqual([
@@ -258,8 +262,20 @@ describe("App", () => {
     await user.click(await screen.findByRole("button", { name: "录制" }));
 
     await waitFor(() => expect(apiMocks.startRecording).toHaveBeenCalledTimes(1));
+    expect(windowMocks.minimize).not.toHaveBeenCalled();
     expect(await screen.findAllByText("正在录制")).not.toHaveLength(0);
     expect(screen.getByRole("button", { name: "停止" })).toBeEnabled();
+  });
+
+  it("reports a manual recording failure without minimizing the main window", async () => {
+    apiMocks.startRecording.mockRejectedValue(new Error("recording unavailable"));
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "录制" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("recording unavailable");
+    expect(windowMocks.minimize).not.toHaveBeenCalled();
   });
 
   it("uses the merged Record button as Stop while recording", async () => {
@@ -312,7 +328,11 @@ describe("App", () => {
     await user.clear(loopCount);
     await user.type(loopCount, "0");
 
-    expect(screen.getByRole("alert")).toHaveTextContent("循环次数必须是大于等于 1 的整数。");
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "循环次数必须是 1 到 4294967295 之间的整数。"
+    );
+    expect(screen.getByText(/当前输入无效/, { selector: ".playback-settings-status" }))
+      .toHaveTextContent("前台播放已禁用，全局 F12 仍使用已应用值。");
   });
 
   it("does not start playback with a fractional loop count", async () => {
@@ -325,8 +345,24 @@ describe("App", () => {
     await user.type(loopCount, "1.5");
     expect(screen.getByRole("button", { name: "播放" })).toBeDisabled();
 
-    expect(screen.getByRole("alert")).toHaveTextContent("循环次数必须是大于等于 1 的整数。");
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "循环次数必须是 1 到 4294967295 之间的整数。"
+    );
     expect(apiMocks.startPlayback).not.toHaveBeenCalled();
+  });
+
+  it("does not send loop counts larger than Rust u32", async () => {
+    apiMocks.getState.mockResolvedValue(stoppedState);
+    render(<App />);
+
+    const loopCount = await screen.findByLabelText("循环次数");
+    fireEvent.change(loopCount, { target: { value: "4294967296" } });
+
+    expect(screen.getByRole("button", { name: "播放" })).toBeDisabled();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "循环次数必须是 1 到 4294967295 之间的整数。"
+    );
+    expect(apiMocks.setPlaybackSettings).not.toHaveBeenCalledWith(4294967296, 1);
   });
 
   it("does not start playback with a non-finite speed", async () => {
@@ -360,6 +396,64 @@ describe("App", () => {
     await user.keyboard("{F12}");
 
     await waitFor(() => expect(apiMocks.startPlayback).toHaveBeenCalledWith(3, 2));
+  });
+
+  it("blocks UI and focused hotkey playback until settings synchronization is acknowledged", async () => {
+    let acknowledgeSettings!: () => void;
+    apiMocks.getState.mockResolvedValue(stoppedState);
+    apiMocks.setPlaybackSettings.mockReturnValue(
+      new Promise<void>((resolve) => {
+        acknowledgeSettings = resolve;
+      })
+    );
+    render(<App />);
+
+    const play = await screen.findByRole("button", { name: "播放" });
+    expect(play).toBeDisabled();
+    expect(screen.getByText(/正在应用新设置/, { selector: ".playback-settings-status" }))
+      .toHaveTextContent("全局 F12 仍使用已应用值");
+    fireEvent.keyDown(window, { key: "F12" });
+    expect(apiMocks.startPlayback).not.toHaveBeenCalled();
+
+    act(() => acknowledgeSettings());
+
+    await waitFor(() => expect(play).toBeEnabled());
+    fireEvent.keyDown(window, { key: "F12" });
+    await waitFor(() => expect(apiMocks.startPlayback).toHaveBeenCalledWith(1, 1));
+  });
+
+  it("serializes playback setting writes and exposes only acknowledged values", async () => {
+    const acknowledgements: Array<() => void> = [];
+    apiMocks.getState.mockResolvedValue(stoppedState);
+    apiMocks.setPlaybackSettings.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          acknowledgements.push(resolve);
+        })
+    );
+    render(<App />);
+
+    await waitFor(() => expect(apiMocks.setPlaybackSettings).toHaveBeenCalledTimes(1));
+    fireEvent.change(screen.getByLabelText("循环次数"), { target: { value: "3" } });
+
+    expect(apiMocks.setPlaybackSettings).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/正在应用新设置/, { selector: ".playback-settings-status" }))
+      .toHaveTextContent("已应用：循环 1 次，速度 1 倍。");
+
+    act(() => acknowledgements[0]());
+    await waitFor(() => expect(apiMocks.setPlaybackSettings).toHaveBeenCalledTimes(2));
+    expect(apiMocks.setPlaybackSettings).toHaveBeenNthCalledWith(2, 3, 1);
+    expect(screen.getByRole("button", { name: "播放" })).toBeDisabled();
+
+    act(() => acknowledgements[1]());
+    await waitFor(() =>
+      expect(
+        screen.getByText("已应用：循环 3 次，速度 1 倍。", {
+          selector: ".playback-settings-status"
+        })
+      ).toBeInTheDocument()
+    );
+    expect(screen.getByRole("button", { name: "播放" })).toBeEnabled();
   });
 
   it("opens a recording and displays the loaded recording name", async () => {
@@ -448,7 +542,9 @@ describe("App", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(await screen.findByRole("button", { name: "重命名 demo-auto" }));
+    await user.click(
+      await screen.findByRole("button", { name: "重命名 demo-auto" }, { timeout: 3000 })
+    );
     const input = screen.getByRole("textbox", { name: "重命名 demo-auto" });
     await user.clear(input);
     await user.type(input, "weekly report");
@@ -499,17 +595,12 @@ describe("App", () => {
     render(<App />);
     await waitFor(() => expect(apiMocks.subscribeToState).toHaveBeenCalled());
 
-    act(() => {
+    await act(async () => {
       stateListener?.(recordingState);
-    });
-    act(() => {
       stateListener?.({ ...stoppedState, message: "Recording stopped", revision: 3 });
-    });
-    act(() => {
       stateListener?.({ ...playingState, revision: 4 });
-    });
-    act(() => {
       stateListener?.(finishedState);
+      await Promise.resolve();
     });
 
     expect(soundMocks.playFeedbackTone).toHaveBeenCalledWith("recording_start", 50, false);
@@ -612,6 +703,29 @@ describe("App", () => {
     expect(await screen.findAllByText("正在录制")).not.toHaveLength(0);
   });
 
+  it("waits for asynchronous state subscription registration before reading the snapshot", async () => {
+    let finishSubscription!: () => void;
+    apiMocks.subscribeToState.mockImplementation(
+      (listener: (state: UiState) => void) =>
+        new Promise<() => void>((resolve) => {
+          stateListener = listener;
+          finishSubscription = () => resolve(() => undefined);
+        })
+    );
+    render(<App />);
+
+    await waitFor(() => expect(apiMocks.subscribeToState).toHaveBeenCalledTimes(1));
+    expect(apiMocks.getState).not.toHaveBeenCalled();
+
+    act(() => {
+      stateListener?.({ ...recordingState, revision: 5 });
+      finishSubscription();
+    });
+
+    await waitFor(() => expect(apiMocks.getState).toHaveBeenCalledTimes(1));
+    expect(await screen.findAllByText("正在录制")).not.toHaveLength(0);
+  });
+
   it("refreshes recordings when the backend library changes", async () => {
     apiMocks.listRecordings.mockResolvedValueOnce([]).mockResolvedValueOnce([recordingFile]);
     render(<App />);
@@ -621,6 +735,54 @@ describe("App", () => {
 
     expect(await screen.findByRole("button", { name: "选择 demo-auto" })).toBeEnabled();
     expect(apiMocks.listRecordings).toHaveBeenCalledTimes(2);
+  });
+
+  it("refreshes recordings after a recording-to-idle state transition", async () => {
+    apiMocks.listRecordings.mockResolvedValueOnce([]).mockResolvedValueOnce([recordingFile]);
+    render(<App />);
+    await waitFor(() => expect(apiMocks.listRecordings).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(stateListener).toBeTypeOf("function"));
+
+    act(() => stateListener?.({ ...recordingState, revision: 10 }));
+    expect(apiMocks.listRecordings).toHaveBeenCalledTimes(1);
+
+    act(() =>
+      stateListener?.({
+        ...stoppedState,
+        message: "Recording stopped",
+        revision: 11
+      })
+    );
+
+    expect(await screen.findByRole("button", { name: "选择 demo-auto" })).toBeEnabled();
+    expect(apiMocks.listRecordings).toHaveBeenCalledTimes(2);
+  });
+
+  it("serializes concurrent refreshes and follows up when data changes in flight", async () => {
+    let resolveRefresh: ((recordings: (typeof recordingFile)[]) => void) | undefined;
+    const refresh = new Promise<(typeof recordingFile)[]>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    apiMocks.listRecordings
+      .mockResolvedValueOnce([])
+      .mockReturnValueOnce(refresh)
+      .mockResolvedValueOnce([recordingFile]);
+    render(<App />);
+    await waitFor(() => expect(apiMocks.listRecordings).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(stateListener).toBeTypeOf("function"));
+    await waitFor(() => expect(recordingsChangedListener).toBeTypeOf("function"));
+
+    act(() => {
+      stateListener?.({ ...recordingState, revision: 10 });
+      stateListener?.({ ...stoppedState, revision: 11 });
+      recordingsChangedListener?.();
+    });
+
+    expect(apiMocks.listRecordings).toHaveBeenCalledTimes(2);
+    act(() => resolveRefresh?.([]));
+    await waitFor(() => expect(apiMocks.listRecordings).toHaveBeenCalledTimes(3));
+    expect(await screen.findByRole("button", { name: "选择 demo-auto" })).toBeEnabled();
+    expect(apiMocks.listRecordings).toHaveBeenCalledTimes(3);
   });
 
   it("clears the selected recording highlight when a new recording starts", async () => {
@@ -679,6 +841,17 @@ describe("App", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "系统未能发送模拟输入，请检查应用权限。"
     );
+  });
+
+  it("localizes the playback stopping state", async () => {
+    apiMocks.getState.mockResolvedValue({
+      ...playingState,
+      message: "Stopping playback",
+      revision: 6
+    });
+    render(<App />);
+
+    expect(await screen.findAllByText("正在停止回放")).toHaveLength(2);
   });
 
   it("requires confirmation before deleting and preserves a cancelled deletion", async () => {

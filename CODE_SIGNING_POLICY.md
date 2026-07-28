@@ -8,7 +8,7 @@ The SignPath Foundation application is currently pending. Existing releases are 
 
 Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
 
-Official release binaries must be produced by the repository's GitHub Actions workflow from the corresponding source revision. Each signing request requires manual approval. SHA-256 checksum files are generated only after signing.
+Official release binaries must be produced by the repository's GitHub Actions workflow from the corresponding source revision. Each signing request requires manual approval. Every distributed artifact, including an unsigned release candidate, receives a SHA-256 checksum. When an executable is signed, its published checksum must be regenerated from the final signed bytes.
 
 ## Team roles
 

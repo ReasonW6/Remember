@@ -3,6 +3,11 @@ import { useRef } from "react";
 interface PlaybackSettingsProps {
   loopCount: number | null;
   speedMultiplier: number;
+  appliedLoopCount: number | null;
+  appliedSpeedMultiplier: number;
+  syncPending: boolean;
+  syncReady: boolean;
+  playbackHotkey: string;
   onLoopCountChange: (value: number | null) => void;
   onSpeedMultiplierChange: (value: number) => void;
 }
@@ -11,12 +16,18 @@ function displayNumber(value: number) {
   return Number.isFinite(value) ? value : "";
 }
 
-const loopCountError = "循环次数必须是大于等于 1 的整数。";
+const maxLoopCount = 0xffffffff;
+const loopCountError = `循环次数必须是 1 到 ${maxLoopCount} 之间的整数。`;
 const speedError = "速度必须是大于 0 的有效数字。";
 
 export function PlaybackSettings({
   loopCount,
   speedMultiplier,
+  appliedLoopCount,
+  appliedSpeedMultiplier,
+  syncPending,
+  syncReady,
+  playbackHotkey,
   onLoopCountChange,
   onSpeedMultiplierChange
 }: PlaybackSettingsProps) {
@@ -27,12 +38,22 @@ export function PlaybackSettings({
   }
 
   const loopValidationError =
-    loopCount !== null && (!Number.isInteger(loopCount) || loopCount < 1)
+    loopCount !== null &&
+    (!Number.isInteger(loopCount) || loopCount < 1 || loopCount > maxLoopCount)
       ? loopCountError
       : "";
   const speedValidationError =
     !Number.isFinite(speedMultiplier) || speedMultiplier <= 0 ? speedError : "";
   const validationMessage = loopValidationError || speedValidationError;
+  const appliedLoopDescription =
+    appliedLoopCount === null ? "无限循环" : `循环 ${appliedLoopCount} 次`;
+  const synchronizationMessage = validationMessage
+    ? `当前输入无效；前台播放已禁用，全局 ${playbackHotkey} 仍使用已应用值。`
+    : syncPending
+      ? `正在应用新设置；前台播放已禁用，全局 ${playbackHotkey} 仍使用已应用值。`
+      : !syncReady
+        ? `新设置尚未应用；前台播放已禁用，全局 ${playbackHotkey} 仍使用已应用值。`
+        : "";
 
   return (
     <section className="panel settings-panel" aria-labelledby="playback-settings-title">
@@ -64,6 +85,7 @@ export function PlaybackSettings({
           <input
             type="number"
             min="1"
+            max={maxLoopCount}
             step="1"
             value={displayNumber(isInfinite ? finiteLoopCountRef.current : loopCount)}
             onChange={(event) => {
@@ -91,6 +113,15 @@ export function PlaybackSettings({
           {validationMessage}
         </p>
       ) : null}
+      <p
+        className="playback-settings-status"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        已应用：{appliedLoopDescription}，速度 {appliedSpeedMultiplier} 倍。
+        {synchronizationMessage ? ` ${synchronizationMessage}` : ""}
+      </p>
     </section>
   );
 }

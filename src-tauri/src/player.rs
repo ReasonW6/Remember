@@ -1,12 +1,11 @@
 use crate::model::{ButtonState, KeyState, MacroStep, MouseButton, Recording};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Condvar, Mutex,
 };
-use std::thread;
 use std::time::{Duration, Instant};
 
-const STOP_SLEEP_CHUNK: Duration = Duration::from_millis(10);
+const MIN_REPEATED_LOOP_DURATION: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlaybackSettings {
@@ -61,18 +60,70 @@ pub trait StepExecutor {
     fn release_mouse_button(&self, button: MouseButton) -> Result<(), String>;
 }
 
+#[derive(Default)]
+struct StopState {
+    stopped: AtomicBool,
+    wait_lock: Mutex<()>,
+    wake: Condvar,
+}
+
 #[derive(Clone, Default)]
 pub struct StopToken {
-    stopped: Arc<AtomicBool>,
+    state: Arc<StopState>,
 }
 
 impl StopToken {
     pub fn request_stop(&self) {
-        self.stopped.store(true, Ordering::SeqCst);
+        let _guard = self
+            .state
+            .wait_lock
+            .lock()
+            .expect("stop token wait lock poisoned");
+        self.state.stopped.store(true, Ordering::SeqCst);
+        self.state.wake.notify_all();
     }
 
     pub fn is_stopped(&self) -> bool {
-        self.stopped.load(Ordering::SeqCst)
+        self.state.stopped.load(Ordering::SeqCst)
+    }
+
+    fn wait_for_stop(&self, timeout: Duration) -> bool {
+        if self.is_stopped() {
+            return true;
+        }
+
+        let guard = self
+            .state
+            .wait_lock
+            .lock()
+            .expect("stop token wait lock poisoned");
+        if self.is_stopped() {
+            return true;
+        }
+
+        let (_guard, _timeout) = self
+            .state
+            .wake
+            .wait_timeout_while(guard, timeout, |_| !self.is_stopped())
+            .expect("stop token wait lock poisoned");
+        self.is_stopped()
+    }
+
+    fn wait_until_stopped(&self) {
+        if self.is_stopped() {
+            return;
+        }
+
+        let guard = self
+            .state
+            .wait_lock
+            .lock()
+            .expect("stop token wait lock poisoned");
+        let _guard = self
+            .state
+            .wake
+            .wait_while(guard, |_| !self.is_stopped())
+            .expect("stop token wait lock poisoned");
     }
 }
 
@@ -92,15 +143,12 @@ pub fn play_recording<E: StepExecutor + ?Sized>(
         return match settings.loop_count {
             Some(_) => Ok(()),
             None => {
-                while !stop_token.is_stopped() {
-                    thread::sleep(STOP_SLEEP_CHUNK);
-                }
+                stop_token.wait_until_stopped();
                 Err("playback stopped".to_string())
             }
         };
     }
 
-    let mut pressed_inputs = PressedInputs::default();
     let mut completed_loops = 0_u32;
 
     loop {
@@ -108,16 +156,13 @@ pub fn play_recording<E: StepExecutor + ?Sized>(
             .loop_count
             .is_some_and(|loop_count| completed_loops >= loop_count)
         {
-            return pressed_inputs.release_all(executor);
+            return Ok(());
         }
         if stop_token.is_stopped() {
-            return cleanup_and_return(
-                &mut pressed_inputs,
-                executor,
-                "playback stopped".to_string(),
-            );
+            return Err("playback stopped".to_string());
         }
 
+        let mut pressed_inputs = PressedInputs::default();
         let loop_started = Instant::now();
         for step in &recording.steps {
             let target_ms = scaled_delay_ms(step.elapsed_ms(), settings.speed_multiplier);
@@ -130,10 +175,25 @@ pub fn play_recording<E: StepExecutor + ?Sized>(
         }
 
         let duration_ms = scaled_delay_ms(recording.duration_ms, settings.speed_multiplier);
-        if let Err(error) = sleep_until(loop_started, duration_ms, stop_token) {
+        let next_completed_loops = completed_loops.saturating_add(1);
+        let repeats_after_this_loop = settings
+            .loop_count
+            .is_none_or(|loop_count| next_completed_loops < loop_count);
+        let minimum_repeat_ms = MIN_REPEATED_LOOP_DURATION.as_millis() as u64;
+        let loop_duration_ms = if duration_ms == 0 && repeats_after_this_loop {
+            minimum_repeat_ms
+        } else {
+            duration_ms
+        };
+        if let Err(error) = sleep_until(loop_started, loop_duration_ms, stop_token) {
             return cleanup_and_return(&mut pressed_inputs, executor, error);
         }
-        completed_loops = completed_loops.saturating_add(1);
+        if let Err(error) = pressed_inputs.release_all(executor) {
+            return Err(format!(
+                "input cleanup failed at playback loop boundary: {error}"
+            ));
+        }
+        completed_loops = next_completed_loops;
     }
 }
 
@@ -190,13 +250,9 @@ fn sleep_with_stop(delay_ms: u64, stop_token: &StopToken) -> Result<(), String> 
             return Ok(());
         }
 
-        let remaining = delay.saturating_sub(elapsed);
-        let chunk = if remaining > STOP_SLEEP_CHUNK {
-            STOP_SLEEP_CHUNK
-        } else {
-            remaining
-        };
-        thread::sleep(chunk);
+        if stop_token.wait_for_stop(delay.saturating_sub(elapsed)) {
+            return Err("playback stopped".to_string());
+        }
     }
 }
 
@@ -212,7 +268,9 @@ fn sleep_until(started: Instant, target_ms: u64, stop_token: &StopToken) -> Resu
             return Ok(());
         }
 
-        thread::sleep(target.saturating_sub(elapsed).min(STOP_SLEEP_CHUNK));
+        if stop_token.wait_for_stop(target.saturating_sub(elapsed)) {
+            return Err("playback stopped".to_string());
+        }
     }
 }
 

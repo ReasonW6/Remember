@@ -1,7 +1,9 @@
 use remember_lib::model::{KeyState, MacroStep, Recording};
+use remember_lib::recorder::MAX_RECORDING_STEPS;
 use remember_lib::storage::{
     delete_recording_from_library, list_recordings, load_recording, recording_from_json,
     recording_to_json, rename_recording_in_library, save_recording, save_recording_to_library,
+    MAX_RECORDING_FILE_BYTES,
 };
 use std::{
     env, fs, process,
@@ -103,6 +105,54 @@ fn rejects_step_timestamps_that_move_backward() {
 }
 
 #[test]
+fn rejects_recordings_over_the_step_limit_on_import_and_export() {
+    let recording = Recording {
+        version: 1,
+        name: "too many steps".to_string(),
+        created_at: "2026-06-29T00:00:00Z".to_string(),
+        duration_ms: 0,
+        steps: vec![MacroStep::Wait { elapsed_ms: 0 }; MAX_RECORDING_STEPS + 1],
+    };
+
+    let export_error =
+        recording_to_json(&recording).expect_err("oversized recording must not serialize");
+    assert!(export_error
+        .to_string()
+        .contains(&MAX_RECORDING_STEPS.to_string()));
+
+    let json = serde_json::to_string(&recording).expect("construct oversized import fixture");
+    assert!(
+        json.len() as u64 <= MAX_RECORDING_FILE_BYTES,
+        "step-limit fixture must remain below the independent file-size limit"
+    );
+    let import_error =
+        recording_from_json(&json).expect_err("oversized recording must not deserialize");
+    assert!(import_error
+        .to_string()
+        .contains(&MAX_RECORDING_STEPS.to_string()));
+}
+
+#[test]
+fn rejects_recording_file_over_the_byte_limit_before_parsing() {
+    let path = env::temp_dir().join(format!(
+        "remember-model-storage-{}-oversized.json",
+        process::id()
+    ));
+    let file = fs::File::create(&path).expect("create oversized fixture");
+    file.set_len(MAX_RECORDING_FILE_BYTES + 1)
+        .expect("set oversized fixture length");
+    drop(file);
+
+    let error = load_recording(&path).expect_err("oversized file must fail");
+
+    fs::remove_file(&path).expect("clean up oversized fixture");
+
+    assert!(error
+        .to_string()
+        .contains(&MAX_RECORDING_FILE_BYTES.to_string()));
+}
+
+#[test]
 fn saves_and_loads_recording_from_file() {
     let recording = sample_recording();
     let path = env::temp_dir().join(format!(
@@ -143,6 +193,57 @@ fn saves_recording_to_library_and_lists_it() {
     assert_eq!(files[0].step_count, recording.steps.len());
     assert_eq!(files[0].duration_ms, recording.duration_ms);
     assert_eq!(files[0].load_error, None);
+}
+
+#[test]
+fn recording_list_cache_refreshes_changed_corrupt_and_removed_files() {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time")
+        .as_nanos();
+    let library_dir = env::temp_dir().join(format!(
+        "remember-model-storage-{}-{unique}-cache-refresh",
+        process::id(),
+    ));
+    let original = sample_recording();
+    let path = save_recording_to_library(&library_dir, &original).expect("save to library");
+
+    let initial = list_recordings(&library_dir).expect("prime recording list cache");
+    assert_eq!(initial[0].name, original.name);
+
+    let original_size = fs::metadata(&path).expect("read original metadata").len();
+    let mut changed = original;
+    changed.name = "externally updated recording with a longer name".to_string();
+    changed.duration_ms = 450;
+    let changed_json = recording_to_json(&changed).expect("serialize changed recording");
+    assert_ne!(
+        changed_json.len() as u64,
+        original_size,
+        "fixture must change the cache file-size key"
+    );
+    fs::write(&path, changed_json).expect("replace recording outside storage API");
+
+    let refreshed = list_recordings(&library_dir).expect("refresh changed recording");
+    assert_eq!(refreshed.len(), 1);
+    assert_eq!(refreshed[0].name, changed.name);
+    assert_eq!(refreshed[0].duration_ms, changed.duration_ms);
+    assert_eq!(refreshed[0].load_error, None);
+
+    fs::write(&path, "not valid json after a cached valid recording")
+        .expect("corrupt cached recording externally");
+    let corrupt = list_recordings(&library_dir).expect("refresh corrupt recording");
+    assert_eq!(corrupt.len(), 1);
+    assert_eq!(corrupt[0].name, "notepad-smoke");
+    assert!(corrupt[0]
+        .load_error
+        .as_deref()
+        .is_some_and(|error| error.contains("invalid recording json")));
+
+    fs::remove_file(&path).expect("remove cached recording externally");
+    let removed = list_recordings(&library_dir).expect("prune removed recording");
+    fs::remove_dir(&library_dir).expect("clean up library");
+
+    assert!(removed.is_empty());
 }
 
 #[test]

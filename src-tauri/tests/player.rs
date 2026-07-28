@@ -57,6 +57,7 @@ fn stop_token_defaults_to_not_stopped() {
 struct FakeExecutor {
     calls: Arc<Mutex<Vec<String>>>,
     fail_on_call: Arc<Mutex<Option<usize>>>,
+    stop_on_call: Option<(usize, StopToken)>,
 }
 
 impl FakeExecutor {
@@ -64,6 +65,15 @@ impl FakeExecutor {
         Self {
             calls: Arc::new(Mutex::new(Vec::new())),
             fail_on_call: Arc::new(Mutex::new(Some(call_number))),
+            stop_on_call: None,
+        }
+    }
+
+    fn stopping_on(call_number: usize, stop_token: StopToken) -> Self {
+        Self {
+            calls: Arc::new(Mutex::new(Vec::new())),
+            fail_on_call: Arc::new(Mutex::new(None)),
+            stop_on_call: Some((call_number, stop_token)),
         }
     }
 
@@ -72,6 +82,12 @@ impl FakeExecutor {
         calls.push(call);
         let call_number = calls.len();
         drop(calls);
+
+        if let Some((stop_on_call, stop_token)) = &self.stop_on_call {
+            if *stop_on_call == call_number {
+                stop_token.request_stop();
+            }
+        }
 
         let should_fail = self
             .fail_on_call
@@ -124,13 +140,130 @@ impl StepExecutor for FakeExecutor {
 
 #[test]
 fn finite_playback_does_not_expand_large_loop_counts() {
-    let fake = FakeExecutor::default();
-    let recording = Recording::new("empty", "2026-06-29T00:00:00Z", Vec::new());
+    let stop_token = StopToken::default();
+    let fake = FakeExecutor::stopping_on(1, stop_token.clone());
+    let calls = fake.calls.clone();
+    let recording = Recording::new(
+        "large loop",
+        "2026-06-29T00:00:00Z",
+        vec![MacroStep::MouseMove {
+            elapsed_ms: 0,
+            x: 1,
+            y: 2,
+        }],
+    );
     let settings = PlaybackSettings::new(Some(u32::MAX), 1.0).expect("settings");
 
-    play_recording(&recording, settings, &fake, &StopToken::default()).expect("play");
+    let result = play_recording(&recording, settings, &fake, &stop_token);
 
-    assert!(fake.calls.lock().unwrap().is_empty());
+    assert_eq!(result, Err("playback stopped".to_string()));
+    assert_eq!(calls.lock().unwrap().as_slice(), ["move:1:2"]);
+}
+
+#[test]
+fn unmatched_inputs_are_released_at_each_loop_boundary() {
+    let fake = FakeExecutor::default();
+    let calls = fake.calls.clone();
+    let recording = Recording::new(
+        "unmatched inputs",
+        "2026-06-29T00:00:00Z",
+        vec![
+            MacroStep::Key {
+                elapsed_ms: 0,
+                vk_code: 0x41,
+                scan_code: 0x1E,
+                extended: false,
+                state: KeyState::Pressed,
+            },
+            MacroStep::MouseButton {
+                elapsed_ms: 0,
+                x: 10,
+                y: 20,
+                button: MouseButton::Left,
+                state: ButtonState::Pressed,
+            },
+        ],
+    );
+
+    play_recording(
+        &recording,
+        PlaybackSettings::new(Some(2), 1.0).expect("settings"),
+        &fake,
+        &StopToken::default(),
+    )
+    .expect("play");
+
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        [
+            "key:65:30:false:Pressed",
+            "button:10:20:Left:Pressed",
+            "key:65:30:false:Released",
+            "release-button:Left",
+            "key:65:30:false:Pressed",
+            "button:10:20:Left:Pressed",
+            "key:65:30:false:Released",
+            "release-button:Left",
+        ]
+    );
+}
+
+#[test]
+fn loop_boundary_release_failure_is_returned() {
+    let fake = FakeExecutor::failing_on(2);
+    let recording = Recording::new(
+        "release failure",
+        "2026-06-29T00:00:00Z",
+        vec![MacroStep::Key {
+            elapsed_ms: 0,
+            vk_code: 0x41,
+            scan_code: 0x1E,
+            extended: false,
+            state: KeyState::Pressed,
+        }],
+    );
+
+    let result = play_recording(
+        &recording,
+        PlaybackSettings::new(Some(1), 1.0).expect("settings"),
+        &fake,
+        &StopToken::default(),
+    );
+
+    assert_eq!(
+        result,
+        Err("input cleanup failed at playback loop boundary: executor failed".to_string())
+    );
+}
+
+#[test]
+fn zero_duration_repeated_playback_is_throttled() {
+    let fake = FakeExecutor::default();
+    let calls = fake.calls.clone();
+    let recording = Recording::new(
+        "zero duration",
+        "2026-06-29T00:00:00Z",
+        vec![MacroStep::MouseMove {
+            elapsed_ms: 0,
+            x: 1,
+            y: 2,
+        }],
+    );
+    let started = Instant::now();
+
+    play_recording(
+        &recording,
+        PlaybackSettings::new(Some(3), 1.0).expect("settings"),
+        &fake,
+        &StopToken::default(),
+    )
+    .expect("play");
+
+    assert!(
+        started.elapsed() >= Duration::from_millis(15),
+        "three zero-duration loops must include two throttle intervals"
+    );
+    assert_eq!(calls.lock().unwrap().len(), 3);
 }
 
 #[test]
@@ -207,28 +340,54 @@ fn delayed_action_can_be_stopped_before_full_delay() {
     let plan = vec![PlaybackAction {
         loop_index: 0,
         step_index: 0,
-        delay_ms: 1_000,
-        step: MacroStep::Wait { elapsed_ms: 1_000 },
+        delay_ms: 30_000,
+        step: MacroStep::Wait { elapsed_ms: 30_000 },
     }];
     let token = StopToken::default();
     let play_token = token.clone();
 
-    let started = Instant::now();
     let handle = thread::spawn(move || {
         let fake = FakeExecutor::default();
         play_actions(&plan, &fake, &play_token)
     });
     thread::sleep(Duration::from_millis(50));
+    let stop_requested = Instant::now();
     token.request_stop();
 
     let result = handle.join().unwrap();
-    let elapsed = started.elapsed();
+    let stop_elapsed = stop_requested.elapsed();
 
     assert_eq!(result, Err("playback stopped".to_string()));
     assert!(
-        elapsed < Duration::from_millis(400),
-        "stop should interrupt delay promptly, elapsed: {elapsed:?}"
+        stop_elapsed < Duration::from_millis(250),
+        "stop should wake a long delay promptly, elapsed after request: {stop_elapsed:?}"
     );
+}
+
+#[test]
+fn delayed_action_does_not_execute_before_recorded_delay() {
+    let fake = FakeExecutor::default();
+    let calls = fake.calls.clone();
+    let plan = vec![PlaybackAction {
+        loop_index: 0,
+        step_index: 0,
+        delay_ms: 80,
+        step: MacroStep::MouseMove {
+            elapsed_ms: 80,
+            x: 10,
+            y: 20,
+        },
+    }];
+    let started = Instant::now();
+
+    play_actions(&plan, &fake, &StopToken::default()).expect("play");
+
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(80),
+        "action executed before its recorded delay: {elapsed:?}"
+    );
+    assert_eq!(calls.lock().unwrap().as_slice(), ["move:10:20"]);
 }
 
 #[test]

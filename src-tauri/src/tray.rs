@@ -16,11 +16,11 @@ pub fn setup(app: &AppHandle) -> Result<(), String> {
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id() {
-            id if id == "show" => show_main_window(app),
+            id if id == "show" => show_main_window_or_log(app),
             id if id == "quit" => {
                 if let Err(error) = commands::prepare_for_exit(app) {
                     eprintln!("Remember could not exit safely: {error}");
-                    show_main_window(app);
+                    show_main_window_or_log(app);
                     return;
                 }
                 app.exit(0);
@@ -35,7 +35,7 @@ pub fn setup(app: &AppHandle) -> Result<(), String> {
             } = event
             {
                 if button == MouseButton::Left && button_state == MouseButtonState::Up {
-                    show_main_window(tray.app_handle());
+                    show_main_window_or_log(tray.app_handle());
                 }
             }
         });
@@ -50,9 +50,17 @@ pub fn setup(app: &AppHandle) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-fn show_main_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.set_focus();
+fn show_main_window_or_log(app: &AppHandle) {
+    if let Err(error) = show_main_window(app) {
+        eprintln!("Remember could not show its main window: {error}");
     }
+}
+
+pub(crate) fn show_main_window(app: &AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window is unavailable".to_string())?;
+    window.unminimize().map_err(|error| error.to_string())?;
+    window.show().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())
 }

@@ -18,17 +18,25 @@ export function ActivityIndicator() {
       setMode(state.mode);
     }
 
-    void rememberApi
-      .subscribeToState(applyState)
-      .then((nextUnsubscribe) => {
-        unsubscribe = nextUnsubscribe;
+    async function initialize() {
+      try {
+        const nextUnsubscribe = await rememberApi.subscribeToState(applyState);
         if (disposed) {
-          unsubscribe();
+          nextUnsubscribe();
+          return;
         }
-      })
-      .catch(() => undefined);
+        unsubscribe = nextUnsubscribe;
+      } catch {
+        // The indicator is supplementary; a missing event permission must not
+        // surface an unusable transparent window.
+      }
 
-    void rememberApi.getState().then(applyState).catch(() => undefined);
+      if (!disposed) {
+        void rememberApi.getState().then(applyState).catch(() => undefined);
+      }
+    }
+
+    void initialize();
 
     return () => {
       disposed = true;
@@ -37,12 +45,22 @@ export function ActivityIndicator() {
   }, []);
 
   if (mode === "idle") {
-    return null;
+    return (
+      <span className="sr-only" role="status" aria-live="polite">
+        就绪
+      </span>
+    );
   }
 
+  const modeLabel = mode === "recording" ? "正在录制" : "正在回放";
   return (
-    <div className={`activity-indicator activity-indicator-${mode}`} aria-hidden="true">
-      <span className="activity-indicator-dot" />
+    <div
+      className={`activity-indicator activity-indicator-${mode}`}
+      role="status"
+      aria-live="polite"
+    >
+      <span className="activity-indicator-dot" aria-hidden="true" />
+      <span className="sr-only">{modeLabel}</span>
     </div>
   );
 }

@@ -32,6 +32,11 @@ export interface AdvancedSettingsConfig {
   show_activity_indicator: boolean;
 }
 
+export interface SettingsBundle {
+  advanced: AdvancedSettingsConfig;
+  hotkeys: HotkeyConfig;
+}
+
 export interface PrivilegeState {
   is_elevated: boolean;
 }

@@ -1,7 +1,7 @@
 use crate::{
     model::{KeyState, Recording},
     player::{PlaybackSettings, StopToken},
-    recorder::{RawInputEvent, Recorder},
+    recorder::{RawInputEvent, Recorder, MAX_RECORDING_STEPS},
 };
 use serde::Serialize;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -31,7 +31,7 @@ pub struct PlaybackRunId(u64);
 #[derive(Debug, Clone)]
 pub struct PlaybackRun {
     pub id: PlaybackRunId,
-    pub recording: Recording,
+    pub recording: Arc<Recording>,
     pub settings: PlaybackSettings,
 }
 
@@ -109,16 +109,21 @@ impl ControlHotkeyRuntime {
 
     fn enter_recording(&self, suppress_record_hotkey_release_tail: bool) {
         let mut state = self.lock();
-        state.suppressor.reset();
         if suppress_record_hotkey_release_tail {
+            state.suppressor.reset_filter();
             state.suppressor.suppress_record_hotkey_release_tail();
+        } else {
+            state.suppressor.reset();
         }
         state.mode = AppMode::Recording;
     }
 
     fn finish_recording(&self) {
         let mut state = self.lock();
-        state.suppressor.reset();
+        // Keep the action-layer suppression until the physical stop key is
+        // released. Clearing it here lets Windows key-repeat start a new
+        // recording while the user is still holding the stop hotkey.
+        state.suppressor.reset_filter();
         state.mode = AppMode::Idle;
     }
 
@@ -161,7 +166,7 @@ pub struct AppController {
     recorder: Recorder,
     control_hotkeys: ControlHotkeyRuntime,
     playback_settings: PlaybackSettings,
-    recording: Option<Recording>,
+    recording: Option<Arc<Recording>>,
     recording_needs_save: bool,
     stop_token: StopToken,
     next_playback_id: u64,
@@ -266,27 +271,34 @@ impl AppController {
         Ok(())
     }
 
-    pub fn stop_recording(&mut self, stopped_at_ms: u64) -> Result<Recording, String> {
-        let recording = self.recorder.stop(stopped_at_ms)?;
-        self.recording = Some(recording.clone());
+    pub fn stop_recording(&mut self, stopped_at_ms: u64) -> Result<Arc<Recording>, String> {
+        let recording = Arc::new(self.recorder.stop(stopped_at_ms)?);
+        let recording_was_truncated = self.recorder.last_stop_was_truncated();
+        self.recording = Some(Arc::clone(&recording));
         self.recording_needs_save = true;
         self.control_hotkeys.finish_recording();
-        self.message = "Recording stopped".to_string();
-        self.message_is_error = false;
+        if recording_was_truncated {
+            self.message = format!(
+                "Recording reached the maximum of {MAX_RECORDING_STEPS} steps; the captured prefix was retained for saving"
+            );
+            self.message_is_error = true;
+        } else {
+            self.message = "Recording stopped".to_string();
+            self.message_is_error = false;
+        }
         self.bump_revision();
         Ok(recording)
     }
 
-    pub fn set_stopped_recording_name(
-        &mut self,
-        name: impl Into<String>,
-    ) -> Result<Recording, String> {
+    pub fn set_stopped_recording_name(&mut self, name: impl Into<String>) -> Result<(), String> {
         let recording = self
             .recording
             .as_mut()
             .ok_or_else(|| "no recording loaded".to_string())?;
-        recording.name = name.into();
-        Ok(recording.clone())
+        Arc::get_mut(recording)
+            .ok_or_else(|| "stopped recording is already in use".to_string())?
+            .name = name.into();
+        Ok(())
     }
 
     pub fn capture_input(&mut self, event: RawInputEvent) {
@@ -327,7 +339,7 @@ impl AppController {
         }
         self.ensure_recording_saved_before_replace()?;
         recording.validate()?;
-        self.recording = Some(recording);
+        self.recording = Some(Arc::new(recording));
         self.recording_needs_save = false;
         self.control_hotkeys.set_mode(AppMode::Idle);
         self.message = "Recording loaded".to_string();
@@ -337,10 +349,10 @@ impl AppController {
     }
 
     pub fn current_recording(&self) -> Option<&Recording> {
-        self.recording.as_ref()
+        self.recording.as_deref()
     }
 
-    pub fn recording_pending_save(&self) -> Option<&Recording> {
+    pub fn recording_pending_save(&self) -> Option<&Arc<Recording>> {
         if self.recording_needs_save {
             self.recording.as_ref()
         } else {
@@ -348,15 +360,20 @@ impl AppController {
         }
     }
 
-    pub fn mark_recording_saved(&mut self, recording: &Recording) {
-        if self.recording.as_ref() == Some(recording) {
+    pub fn mark_recording_saved(&mut self, recording: &Arc<Recording>) {
+        if self
+            .recording
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, recording))
+        {
             self.recording_needs_save = false;
         }
     }
 
-    pub fn saveable_recording(&self) -> Result<Recording, String> {
+    pub fn saveable_recording(&self) -> Result<Arc<Recording>, String> {
         self.recording
-            .clone()
+            .as_ref()
+            .map(Arc::clone)
             .ok_or_else(|| "no recording loaded".to_string())
     }
 
@@ -366,6 +383,17 @@ impl AppController {
         self.message = message.into();
         self.message_is_error = false;
         self.bump_revision();
+    }
+
+    pub fn set_error(&mut self, message: impl Into<String>) -> bool {
+        let message = message.into();
+        if self.message_is_error && self.message == message {
+            return false;
+        }
+        self.message = message;
+        self.message_is_error = true;
+        self.bump_revision();
+        true
     }
 
     pub fn finish_playback_if_current(
@@ -421,7 +449,7 @@ impl AppController {
             .recording
             .as_ref()
             .ok_or_else(|| "no recording loaded".to_string())?;
-        let recording = recording.clone();
+        let recording = Arc::clone(recording);
         self.stop_token = StopToken::default();
         self.next_playback_id += 1;
         let id = PlaybackRunId(self.next_playback_id);
@@ -652,7 +680,6 @@ impl ControlHotkeySuppressor {
         self.active_modifiers.clear();
         self.suppressed_modifier_releases.clear();
         self.suppressed_key = Some(self.record_hotkey.vk_code);
-        self.action_suppressed_keys.push(self.record_hotkey.vk_code);
         self.suppress_unknown_modifier_release_tail = true;
     }
 
