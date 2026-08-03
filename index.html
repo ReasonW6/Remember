@@ -4,9 +4,71 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Remember</title>
+    <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <main id="startup-shell" class="app-shell compact-shell" aria-label="Remember 正在启动">
+        <div class="window-titlebar">
+          <div class="window-titlebar-drag" data-tauri-drag-region>
+            <img
+              class="window-titlebar-icon"
+              src="/remember-icon.svg"
+              alt=""
+              aria-hidden="true"
+              data-tauri-drag-region
+            />
+            <span class="window-titlebar-name" data-tauri-drag-region>Remember</span>
+          </div>
+          <div class="window-titlebar-controls" aria-hidden="true">
+            <button class="window-control-button" type="button" disabled tabindex="-1">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M15 3h6v6" />
+                <path d="m21 3-7 7" />
+                <path d="m3 21 7-7" />
+                <path d="M9 21H3v-6" />
+              </svg>
+            </button>
+            <button class="window-control-button" type="button" disabled tabindex="-1">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <path d="M5 12h14" />
+              </svg>
+            </button>
+            <button class="window-control-button close-button" type="button" disabled tabindex="-1">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <path d="M18 6 6 18" />
+                <path d="m6 6 12 12" />
+              </svg>
+            </button>
+          </div>
+        </div>
+        <section class="compact-content" aria-label="快速控制">
+          <div class="compact-controls">
+            <select class="compact-recording-select" aria-label="选择录制文件" disabled>
+              <option>选择录制文件</option>
+            </select>
+            <button class="action-button compact-action-button" type="button" disabled>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10" />
+              </svg>
+              <span>录制</span>
+            </button>
+            <button class="action-button compact-action-button" type="button" disabled>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="m6 3 14 9-14 9z" />
+              </svg>
+              <span>播放</span>
+            </button>
+            <button class="action-button compact-action-button compact-admin-button" type="button" aria-label="以管理员身份重启" disabled>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3z" />
+              </svg>
+            </button>
+          </div>
+          <p class="compact-feedback" role="status" aria-live="polite">正在启动…</p>
+        </section>
+      </main>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

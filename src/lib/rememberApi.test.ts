@@ -72,7 +72,7 @@ describe("rememberApi", () => {
     tauriMocks.open.mockResolvedValue(path);
     tauriMocks.invoke.mockResolvedValue(loadedState);
 
-    await expect(openRecording()).resolves.toBe(loadedState);
+    await expect(openRecording()).resolves.toEqual({ path, state: loadedState });
 
     expect(tauriMocks.open).toHaveBeenCalledWith({
       multiple: false,

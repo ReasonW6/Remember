@@ -15,21 +15,27 @@ use std::{
     path::{Path, PathBuf},
     process,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     thread,
     time::{Duration, Instant},
 };
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{
+    webview::PageLoadEvent, AppHandle, Emitter, Manager, State, WebviewWindow, WebviewWindowBuilder,
+};
 
 pub type SharedApp = Arc<Mutex<AppController>>;
 const RECORDINGS_CHANGED_EVENT: &str = "remember://recordings-changed";
 const HOTKEYS_CHANGED_EVENT: &str = "remember://hotkeys-changed";
 const ADVANCED_SETTINGS_CHANGED_EVENT: &str = "remember://advanced-settings-changed";
+const ADVANCED_SETTINGS_WINDOW_LABEL: &str = "advanced-settings";
 const ADMIN_RESTART_RECOVERY_DIR: &str = "administrator-restart-recovery";
 static RECORDING_SAVE_LOCK: Mutex<()> = Mutex::new(());
 static SETTINGS_TRANSACTION_LOCK: Mutex<()> = Mutex::new(());
+static ADVANCED_SETTINGS_CREATE_LOCK: Mutex<()> = Mutex::new(());
+static ADVANCED_SETTINGS_PAGE_READY: AtomicBool = AtomicBool::new(false);
+static ADVANCED_SETTINGS_HANDLE_REGISTERED: AtomicBool = AtomicBool::new(false);
 static ADMIN_RESTART_RECOVERY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn emit_state(app: &AppHandle, state: UiState) -> Result<(), String> {
@@ -388,10 +394,68 @@ fn combine_transaction_error(error: String, rollback_error: Option<String>) -> S
 }
 
 #[tauri::command]
-pub fn show_advanced_settings(app: AppHandle) -> Result<(), String> {
-    let window = app
-        .get_webview_window("advanced-settings")
-        .ok_or_else(|| "advanced settings window is unavailable".to_string())?;
+pub async fn show_advanced_settings(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(ADVANCED_SETTINGS_WINDOW_LABEL) {
+        register_advanced_settings_window(&app, &window)?;
+        return show_advanced_settings_when_ready(&window);
+    }
+
+    let _create_guard = ADVANCED_SETTINGS_CREATE_LOCK
+        .lock()
+        .map_err(|_| "advanced settings creation lock poisoned".to_string())?;
+    if let Some(window) = app.get_webview_window(ADVANCED_SETTINGS_WINDOW_LABEL) {
+        register_advanced_settings_window(&app, &window)?;
+        return show_advanced_settings_when_ready(&window);
+    }
+
+    ADVANCED_SETTINGS_PAGE_READY.store(false, Ordering::Release);
+    ADVANCED_SETTINGS_HANDLE_REGISTERED.store(false, Ordering::Release);
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|config| config.label == ADVANCED_SETTINGS_WINDOW_LABEL)
+        .cloned()
+        .ok_or_else(|| "advanced settings window configuration is unavailable".to_string())?;
+    let window = WebviewWindowBuilder::from_config(&app, &config)
+        .map_err(|error| error.to_string())?
+        .on_page_load(|window, payload| {
+            if payload.event() == PageLoadEvent::Finished {
+                ADVANCED_SETTINGS_PAGE_READY.store(true, Ordering::Release);
+                if let Err(error) = show_advanced_settings_when_ready(&window) {
+                    eprintln!("Remember advanced settings could not become visible: {error}");
+                }
+            }
+        })
+        .build()
+        .map_err(|error| error.to_string())?;
+    register_advanced_settings_window(&app, &window)?;
+    show_advanced_settings_when_ready(&window)
+}
+
+fn register_advanced_settings_window(
+    app: &AppHandle,
+    window: &WebviewWindow,
+) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let hwnd = window.hwnd().map_err(|error| error.to_string())?;
+        let handles = app
+            .try_state::<Arc<crate::input::OwnWindowHandles>>()
+            .ok_or_else(|| "own window handle state is unavailable".to_string())?;
+        handles.set_advanced_settings(hwnd.0 as usize);
+    }
+    ADVANCED_SETTINGS_HANDLE_REGISTERED.store(true, Ordering::Release);
+    Ok(())
+}
+
+fn show_advanced_settings_when_ready(window: &WebviewWindow) -> Result<(), String> {
+    if !ADVANCED_SETTINGS_PAGE_READY.load(Ordering::Acquire)
+        || !ADVANCED_SETTINGS_HANDLE_REGISTERED.load(Ordering::Acquire)
+    {
+        return Ok(());
+    }
     window.show().map_err(|error| error.to_string())?;
     window.set_focus().map_err(|error| error.to_string())
 }
@@ -606,6 +670,25 @@ pub(crate) fn prepare_for_exit(app: &AppHandle) -> Result<(), String> {
     save_pending_recording_shared(app, &state)
 }
 
+pub(crate) fn report_exit_failure(app: &AppHandle, error: String) {
+    eprintln!("Remember could not exit safely: {error}");
+    let Some(state) = app.try_state::<SharedApp>() else {
+        return;
+    };
+    let ui_state = match state.lock() {
+        Ok(mut controller) => {
+            controller.set_error(format!("Could not close Remember safely: {error}"));
+            Some(controller.ui_state())
+        }
+        Err(_) => None,
+    };
+    if let Some(ui_state) = ui_state {
+        if let Err(emit_error) = emit_state(app, ui_state) {
+            eprintln!("Remember could not report the exit failure: {emit_error}");
+        }
+    }
+}
+
 fn prepare_for_administrator_restart(app: &AppHandle) -> Result<Option<PathBuf>, String> {
     let Some(state) = app.try_state::<SharedApp>() else {
         return Ok(None);
@@ -697,6 +780,35 @@ pub(crate) fn restore_administrator_restart_recovery(app: &AppHandle) -> Result<
     }
     let library_dir = recording_library_dir(app)?;
     restore_administrator_restart_recovery_dirs(&recovery_dir, &library_dir)
+}
+
+pub(crate) fn restore_administrator_restart_recovery_in_background(app: AppHandle) {
+    thread::spawn(move || {
+        let result = restore_administrator_restart_recovery(&app);
+        if let Err(error) = emit_recordings_changed(&app) {
+            eprintln!("Remember could not report recovered recordings: {error}");
+        }
+        if let Err(error) = result {
+            eprintln!("Remember could not restore an administrator-restart recovery: {error}");
+            let Some(state) = app.try_state::<SharedApp>() else {
+                return;
+            };
+            let ui_state = match state.lock() {
+                Ok(mut controller) => {
+                    controller.set_error(format!(
+                        "Administrator-restart recovery was preserved but could not be restored: {error}"
+                    ));
+                    Some(controller.ui_state())
+                }
+                Err(_) => None,
+            };
+            if let Some(ui_state) = ui_state {
+                if let Err(emit_error) = emit_state(&app, ui_state) {
+                    eprintln!("Remember could not report the recovery failure: {emit_error}");
+                }
+            }
+        }
+    });
 }
 
 fn restore_administrator_restart_recovery_dirs(

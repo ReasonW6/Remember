@@ -280,7 +280,7 @@ mod platform {
 
                         let app_for_window = app.clone();
                         if let Err(error) = app.run_on_main_thread(move || {
-                            if let Err(error) = crate::tray::show_main_window(&app_for_window) {
+                            if let Err(error) = crate::show_main_window(&app_for_window) {
                                 eprintln!("Remember could not show its main window: {error}");
                             }
                         }) {

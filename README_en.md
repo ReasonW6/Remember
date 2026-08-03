@@ -15,7 +15,8 @@ Remember is an original implementation. It does not copy TinyTask code, icons, n
 - Use the same hotkey for recording and stopping. The default record/stop toggle is `F8`; during playback, both the play and stop hotkeys can stop the run.
 - Play feedback tones when recording or playback starts and stops.
 - Starting a recording from the main window does not minimize it automatically. Keyboard and mouse input inside Remember's own windows is filtered out of recordings.
-- Closing the main window hides the application in the system tray, where it can be restored or exited safely.
+- Start in a compact floating window with only recording selection, record, and play controls; use the titlebar button to switch to the full interface.
+- Closing the main window safely stops any active recording or playback, then exits completely without staying in the background.
 - Use a custom titlebar and localized Chinese interface.
 
 ## Default Hotkeys

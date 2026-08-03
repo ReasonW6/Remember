@@ -52,7 +52,12 @@ export function stopPlayback() {
   return invoke<UiState>("stop_playback");
 }
 
-export async function openRecording(): Promise<UiState | null> {
+export interface OpenedRecording {
+  path: string;
+  state: UiState;
+}
+
+export async function openRecording(): Promise<OpenedRecording | null> {
   const selected = await open({
     multiple: false,
     filters: [{ name: "Remember 录制文件", extensions: ["remember.json", "json"] }]
@@ -62,7 +67,10 @@ export async function openRecording(): Promise<UiState | null> {
     return null;
   }
 
-  return invoke<UiState>("open_recording", { path: selected });
+  return {
+    path: selected,
+    state: await invoke<UiState>("open_recording", { path: selected })
+  };
 }
 
 export function loadRecording(path: string) {

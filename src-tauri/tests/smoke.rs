@@ -45,6 +45,43 @@ fn main_window_uses_custom_titlebar() {
 }
 
 #[test]
+fn main_window_starts_in_compact_mode() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let config = std::fs::read_to_string(format!("{manifest_dir}/tauri.conf.json"))
+        .expect("read tauri config");
+    let config: serde_json::Value = serde_json::from_str(&config).expect("parse tauri config");
+    let main = config["app"]["windows"]
+        .as_array()
+        .expect("windows should be an array")
+        .iter()
+        .find(|window| window["label"] == "main")
+        .expect("main window");
+
+    assert_eq!(main["width"], 360);
+    assert_eq!(main["height"], 134);
+    assert_eq!(main["backgroundColor"], "#eef1f4");
+    assert_eq!(main["resizable"], false);
+}
+
+#[test]
+fn desktop_build_has_no_system_tray_background_mode() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let manifest =
+        std::fs::read_to_string(format!("{manifest_dir}/Cargo.toml")).expect("read Cargo manifest");
+    let app = std::fs::read_to_string(format!("{manifest_dir}/src/lib.rs"))
+        .expect("read application entrypoint");
+
+    assert!(
+        !manifest.contains("tray-icon"),
+        "the desktop build must not enable Tauri's system tray feature"
+    );
+    assert!(
+        !app.contains("tray::setup"),
+        "application startup must not create a system tray icon"
+    );
+}
+
+#[test]
 fn activity_indicator_window_is_non_interactive_and_topmost() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let config = std::fs::read_to_string(format!("{manifest_dir}/tauri.conf.json"))
@@ -58,6 +95,8 @@ fn activity_indicator_window_is_non_interactive_and_topmost() {
         .expect("activity indicator window");
 
     assert_eq!(indicator["visible"], false);
+    assert_eq!(indicator["create"], false);
+    assert_eq!(indicator["url"], "activity-indicator.html");
     assert_eq!(indicator["focus"], false);
     assert_eq!(indicator["focusable"], false);
     assert_eq!(indicator["transparent"], true);
@@ -100,6 +139,8 @@ fn advanced_settings_window_starts_hidden_with_narrow_permissions() {
         .expect("advanced settings window");
 
     assert_eq!(settings["visible"], false);
+    assert_eq!(settings["create"], false);
+    assert_eq!(settings["url"], "advanced-settings.html");
     assert_eq!(settings["focus"], false);
     assert_eq!(settings["decorations"], false);
     assert_eq!(settings["resizable"], false);
@@ -174,6 +215,7 @@ fn main_window_capability_uses_only_required_events_windows_and_dialogs() {
         "core:window:allow-minimize",
         "core:window:allow-unminimize",
         "core:window:allow-set-focus",
+        "core:window:allow-set-size",
         "core:window:allow-close",
         "dialog:allow-open",
         "dialog:allow-save",
@@ -182,5 +224,5 @@ fn main_window_capability_uses_only_required_events_windows_and_dialogs() {
     ] {
         assert!(has(required), "missing {required}");
     }
-    assert_eq!(permissions.len(), 11);
+    assert_eq!(permissions.len(), 12);
 }

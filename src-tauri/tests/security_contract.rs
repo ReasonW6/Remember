@@ -141,6 +141,7 @@ fn each_window_has_only_its_required_application_commands() {
             "core:window:allow-minimize".to_string(),
             "core:window:allow-unminimize".to_string(),
             "core:window:allow-set-focus".to_string(),
+            "core:window:allow-set-size".to_string(),
             "core:window:allow-close".to_string(),
             "dialog:allow-open".to_string(),
             "dialog:allow-save".to_string(),

@@ -2,12 +2,44 @@
 use crate::app_state::AppController;
 use crate::model::{ButtonState, KeyState, MouseButton};
 use crate::player::StepExecutor;
+use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(not(target_os = "windows"))]
 use std::sync::{Arc, Mutex};
 #[cfg(not(target_os = "windows"))]
 use tauri::AppHandle;
 
 pub const REMEMBER_INPUT_EXTRA_INFO: usize = 0x524d_4d42;
+
+#[derive(Debug, Default)]
+pub struct OwnWindowHandles {
+    main: AtomicUsize,
+    advanced_settings: AtomicUsize,
+}
+
+impl OwnWindowHandles {
+    pub fn set_main(&self, hwnd: usize) {
+        self.main.store(hwnd, Ordering::Release);
+    }
+
+    pub fn set_advanced_settings(&self, hwnd: usize) {
+        self.advanced_settings.store(hwnd, Ordering::Release);
+    }
+
+    pub fn clear_advanced_settings(&self) {
+        self.advanced_settings.store(0, Ordering::Release);
+    }
+
+    fn snapshot(&self) -> [Option<usize>; 2] {
+        [
+            nonzero(self.main.load(Ordering::Acquire)),
+            nonzero(self.advanced_settings.load(Ordering::Acquire)),
+        ]
+    }
+}
+
+fn nonzero(value: usize) -> Option<usize> {
+    (value != 0).then_some(value)
+}
 
 #[cfg(test)]
 mod tests {
@@ -16,6 +48,19 @@ mod tests {
     #[test]
     fn remember_input_extra_info_fits_32_bit_windows_pointer() {
         assert!(REMEMBER_INPUT_EXTRA_INFO <= u32::MAX as usize);
+    }
+
+    #[test]
+    fn own_window_handles_update_without_locking_the_hook() {
+        let handles = OwnWindowHandles::default();
+        assert_eq!(handles.snapshot(), [None, None]);
+
+        handles.set_main(0x11);
+        handles.set_advanced_settings(0x22);
+        assert_eq!(handles.snapshot(), [Some(0x11), Some(0x22)]);
+
+        handles.clear_advanced_settings();
+        assert_eq!(handles.snapshot(), [Some(0x11), None]);
     }
 }
 
@@ -67,7 +112,7 @@ pub struct InputCaptureRuntime;
 pub fn start_capture(
     _shared: Arc<Mutex<AppController>>,
     _app_handle: AppHandle,
-    _own_window_hwnds: [Option<usize>; 2],
+    _own_windows: Arc<OwnWindowHandles>,
 ) -> Result<InputCaptureRuntime, String> {
     Err("Remember input capture is Windows-only".to_string())
 }
@@ -88,7 +133,7 @@ mod capture {
         },
         clock::now_ms,
         commands,
-        input::REMEMBER_INPUT_EXTRA_INFO,
+        input::{OwnWindowHandles, REMEMBER_INPUT_EXTRA_INFO},
         model::{ButtonState, KeyState, MouseButton},
         recorder::RawInputEvent,
     };
@@ -131,7 +176,7 @@ mod capture {
 
     struct HookContext {
         control_hotkeys: ControlHotkeyRuntime,
-        own_window_hwnds: [Option<usize>; 2],
+        own_windows: Arc<OwnWindowHandles>,
         capture_event_tx: mpsc::Sender<CaptureWorkerMessage>,
     }
 
@@ -193,7 +238,7 @@ mod capture {
     pub fn start_capture(
         shared: Arc<Mutex<AppController>>,
         app_handle: AppHandle,
-        own_window_hwnds: [Option<usize>; 2],
+        own_windows: Arc<OwnWindowHandles>,
     ) -> Result<InputCaptureRuntime, String> {
         let control_hotkey_runtime = shared
             .lock()
@@ -203,7 +248,7 @@ mod capture {
         set_capture_control_sender(capture_tx.clone())?;
         let hook_context = HookContext {
             control_hotkeys: control_hotkey_runtime,
-            own_window_hwnds,
+            own_windows,
             capture_event_tx: capture_tx,
         };
         let capture_shared = shared.clone();
@@ -266,7 +311,7 @@ mod capture {
             current
                 .borrow()
                 .as_ref()
-                .map(|context| context.own_window_hwnds)
+                .map(|context| context.own_windows.snapshot())
                 .unwrap_or([None, None])
         })
     }
@@ -1005,9 +1050,12 @@ mod capture {
                 .unwrap();
             let stopped_recording = Arc::new(Mutex::new(None));
             let (tx, rx) = mpsc::channel();
+            let own_windows = Arc::new(OwnWindowHandles::default());
+            own_windows.set_main(0x55);
+            own_windows.set_advanced_settings(0x66);
             let hook_context = HookContext {
                 control_hotkeys: ControlHotkeyRuntime::default(),
-                own_window_hwnds: [Some(0x55), Some(0x66)],
+                own_windows,
                 capture_event_tx: tx,
             };
             let lifecycle_sender_guard = CAPTURE_CONTROL_TX

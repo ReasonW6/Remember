@@ -1,4 +1,11 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render as renderCompact,
+  screen,
+  waitFor
+} from "@testing-library/react";
+import type { ReactElement } from "react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App";
@@ -36,14 +43,33 @@ const soundMocks = vi.hoisted(() => ({
 const windowMocks = vi.hoisted(() => ({
   startDragging: vi.fn(),
   minimize: vi.fn(),
+  setSize: vi.fn(),
   close: vi.fn()
 }));
 
 vi.mock("./lib/rememberApi", () => apiMocks);
 vi.mock("./lib/sounds", () => soundMocks);
 vi.mock("@tauri-apps/api/window", () => ({
-  getCurrentWindow: () => windowMocks
+  getCurrentWindow: () => windowMocks,
+  LogicalSize: class {
+    width: number;
+    height: number;
+
+    constructor(width: number, height: number) {
+      this.width = width;
+      this.height = height;
+    }
+  }
 }));
+
+function render(ui: ReactElement) {
+  const result = renderCompact(ui);
+  const expand = screen.queryByRole("button", { name: "展开完整界面" });
+  if (expand) {
+    fireEvent.click(expand);
+  }
+  return result;
+}
 
 const idleState: UiState = {
   mode: "idle",
@@ -121,6 +147,17 @@ describe("App", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn((callback: FrameRequestCallback) =>
+        window.setTimeout(() => callback(window.performance.now()), 0)
+      )
+    );
+    vi.stubGlobal(
+      "cancelAnimationFrame",
+      vi.fn((handle: number) => window.clearTimeout(handle))
+    );
+    window.localStorage.clear();
     stateListener = undefined;
     recordingsChangedListener = undefined;
     hotkeysChangedListener = undefined;
@@ -173,7 +210,146 @@ describe("App", () => {
     apiMocks.saveCurrentRecording.mockResolvedValue(undefined);
     windowMocks.startDragging.mockResolvedValue(undefined);
     windowMocks.minimize.mockResolvedValue(undefined);
+    windowMocks.setSize.mockResolvedValue(undefined);
     windowMocks.close.mockResolvedValue(undefined);
+  });
+
+  it("starts with a compact file, record, and play interface", async () => {
+    const { container } = renderCompact(<App />);
+
+    expect(container.querySelector(".window-titlebar")).toHaveTextContent("Remember");
+    expect(container.querySelector(".window-titlebar")?.textContent).toBe("Remember");
+    expect(screen.getByRole("button", { name: "展开完整界面" })).toBeEnabled();
+    expect(screen.getByRole("combobox", { name: "选择录制文件" })).toBeDisabled();
+    expect(await screen.findByRole("button", { name: "录制" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "播放" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "以管理员身份重启" })).toBeEnabled();
+    for (const button of [
+      screen.getByRole("button", { name: "录制" }),
+      screen.getByRole("button", { name: "播放" }),
+      screen.getByRole("button", { name: "以管理员身份重启" })
+    ]) {
+      expect(button).toHaveClass("compact-action-button");
+    }
+    expect(screen.queryByRole("button", { name: "高级设置" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "录制文件" })).not.toBeInTheDocument();
+  });
+
+  it("starts state synchronization immediately and defers non-critical initialization", async () => {
+    let runDeferredInitialization: FrameRequestCallback | undefined;
+    vi.mocked(window.requestAnimationFrame).mockImplementation((callback) => {
+      runDeferredInitialization = callback;
+      return 17;
+    });
+    renderCompact(<App />);
+
+    await waitFor(() => expect(apiMocks.subscribeToState).toHaveBeenCalledTimes(1));
+    expect(apiMocks.subscribeToRecordingsChanged).not.toHaveBeenCalled();
+    expect(apiMocks.subscribeToHotkeysChanged).not.toHaveBeenCalled();
+    expect(apiMocks.subscribeToAdvancedSettingsChanged).not.toHaveBeenCalled();
+    expect(apiMocks.listRecordings).not.toHaveBeenCalled();
+    expect(apiMocks.getHotkeys).not.toHaveBeenCalled();
+    expect(apiMocks.getAdvancedSettings).not.toHaveBeenCalled();
+    expect(apiMocks.getPrivilegeState).not.toHaveBeenCalled();
+
+    act(() => runDeferredInitialization?.(window.performance.now()));
+
+    await waitFor(() => expect(apiMocks.listRecordings).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(apiMocks.getHotkeys).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(apiMocks.getAdvancedSettings).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(apiMocks.getPrivilegeState).toHaveBeenCalledTimes(1));
+    expect(apiMocks.subscribeToRecordingsChanged.mock.invocationCallOrder[0]).toBeLessThan(
+      apiMocks.listRecordings.mock.invocationCallOrder[0]
+    );
+    expect(apiMocks.subscribeToHotkeysChanged.mock.invocationCallOrder[0]).toBeLessThan(
+      apiMocks.getHotkeys.mock.invocationCallOrder[0]
+    );
+    expect(apiMocks.subscribeToAdvancedSettingsChanged.mock.invocationCallOrder[0]).toBeLessThan(
+      apiMocks.getAdvancedSettings.mock.invocationCallOrder[0]
+    );
+  });
+
+  it("cancels deferred initialization when the app unmounts before the next frame", () => {
+    let deferredInitialization: FrameRequestCallback | undefined;
+    vi.mocked(window.requestAnimationFrame).mockImplementation((callback) => {
+      deferredInitialization = callback;
+      return 23;
+    });
+    const { unmount } = renderCompact(<App />);
+
+    unmount();
+
+    expect(window.cancelAnimationFrame).toHaveBeenCalledWith(23);
+    act(() => deferredInitialization?.(window.performance.now()));
+    expect(apiMocks.subscribeToRecordingsChanged).not.toHaveBeenCalled();
+    expect(apiMocks.subscribeToHotkeysChanged).not.toHaveBeenCalled();
+    expect(apiMocks.subscribeToAdvancedSettingsChanged).not.toHaveBeenCalled();
+    expect(apiMocks.getPrivilegeState).not.toHaveBeenCalled();
+  });
+
+  it("switches between compact and full window sizes", async () => {
+    const user = userEvent.setup();
+    renderCompact(<App />);
+
+    await user.click(screen.getByRole("button", { name: "展开完整界面" }));
+    await waitFor(() =>
+      expect(windowMocks.setSize).toHaveBeenLastCalledWith(
+        expect.objectContaining({ width: 420, height: 520 })
+      )
+    );
+    expect(screen.getByRole("button", { name: "切换到小悬浮窗" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "高级设置" })).toBeEnabled();
+
+    await user.click(screen.getByRole("button", { name: "切换到小悬浮窗" }));
+    await waitFor(() =>
+      expect(windowMocks.setSize).toHaveBeenLastCalledWith(
+        expect.objectContaining({ width: 360, height: 134 })
+      )
+    );
+    expect(screen.getByRole("combobox", { name: "选择录制文件" })).toBeInTheDocument();
+  });
+
+  it("restores the last selected recording in the compact selector", async () => {
+    window.localStorage.setItem("remember:last-recording-path", recordingFile.path);
+    apiMocks.listRecordings.mockResolvedValue([recordingFile]);
+    apiMocks.loadRecording.mockResolvedValue({
+      ...stoppedState,
+      recording_name: recordingFile.name,
+      revision: 3
+    });
+    renderCompact(<App />);
+
+    const selector = await screen.findByRole("combobox", { name: "选择录制文件" });
+    await waitFor(() => expect(selector).toHaveValue(recordingFile.path));
+    expect(apiMocks.loadRecording).toHaveBeenCalledWith(recordingFile.path);
+  });
+
+  it("removes the recording prompt after a compact selection", async () => {
+    apiMocks.listRecordings.mockResolvedValue([recordingFile]);
+    apiMocks.loadRecording.mockResolvedValue({
+      ...stoppedState,
+      recording_name: recordingFile.name,
+      revision: 3
+    });
+    const user = userEvent.setup();
+    renderCompact(<App />);
+
+    const selector = await screen.findByRole("combobox", { name: "选择录制文件" });
+    expect(screen.getByRole("option", { name: "选择录制文件" })).toBeDisabled();
+    await user.selectOptions(selector, recordingFile.path);
+
+    await waitFor(() => expect(selector).toHaveValue(recordingFile.path));
+    expect(screen.queryByRole("option", { name: "选择录制文件" })).not.toBeInTheDocument();
+    expect(screen.getByRole("option", { name: recordingFile.name })).toBeInTheDocument();
+  });
+
+  it("restarts as administrator from the compact window", async () => {
+    const user = userEvent.setup();
+    renderCompact(<App />);
+
+    await user.click(await screen.findByRole("button", { name: "以管理员身份重启" }));
+
+    expect(apiMocks.restartAsAdministrator).toHaveBeenCalledTimes(1);
   });
 
   it("renders idle controls and moves hotkeys into advanced settings", async () => {
@@ -221,13 +397,18 @@ describe("App", () => {
 
   it("handles custom titlebar window controls", async () => {
     const user = userEvent.setup();
-    render(<App />);
+    const { container } = render(<App />);
+
+    const dragRegion = container.querySelector(".window-titlebar-drag");
+    expect(dragRegion).toHaveAttribute("data-tauri-drag-region");
+    fireEvent.mouseDown(dragRegion as Element, { button: 0 });
+    expect(windowMocks.startDragging).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "最小化" }));
     await user.click(screen.getByRole("button", { name: "关闭" }));
 
-    expect(windowMocks.minimize).toHaveBeenCalledTimes(1);
-    expect(windowMocks.close).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(windowMocks.minimize).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(windowMocks.close).toHaveBeenCalledTimes(1));
   });
 
   it("opens advanced settings from the main control bar", async () => {
@@ -466,7 +647,10 @@ describe("App", () => {
       revision: 2,
       message_is_error: false
     };
-    apiMocks.openRecording.mockResolvedValue(loadedState);
+    apiMocks.openRecording.mockResolvedValue({
+      path: "C:\\Recordings\\loaded.remember.json",
+      state: loadedState
+    });
     const user = userEvent.setup();
     render(<App />);
 

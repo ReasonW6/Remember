@@ -114,7 +114,7 @@ export function AdvancedSettings() {
 
   return (
     <main className="app-shell advanced-settings-shell">
-      <WindowTitlebar subtitle="高级设置" showMinimize={false} />
+      <WindowTitlebar showMinimize={false} />
       <div className="app-content advanced-settings-content">
         <header className="advanced-settings-header">
           <div>

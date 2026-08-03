@@ -12,11 +12,10 @@ pub mod recorder;
 mod settings_bundle;
 mod single_instance;
 pub mod storage;
-pub mod tray;
 
 use app_state::AppController;
 use std::sync::{Arc, Mutex};
-use tauri::Manager;
+use tauri::{AppHandle, Manager};
 
 pub fn product_name() -> &'static str {
     "Remember"
@@ -59,28 +58,38 @@ pub fn run() {
             commands::stop_playback,
         ])
         .on_window_event(|window, event| {
-            if hide_instead_of_close(window.label()) {
-                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    api.prevent_close();
-                    if let Err(error) = window.hide() {
-                        eprintln!("Remember could not hide window {}: {error}", window.label());
+            if window.label() == "advanced-settings"
+                && matches!(event, tauri::WindowEvent::Destroyed)
+            {
+                if let Some(handles) = window
+                    .app_handle()
+                    .try_state::<Arc<input::OwnWindowHandles>>()
+                {
+                    handles.clear_advanced_settings();
+                }
+            }
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                match close_behavior(window.label()) {
+                    CloseBehavior::ExitApplication => {
+                        api.prevent_close();
+                        let app = window.app_handle();
+                        match commands::prepare_for_exit(app) {
+                            Ok(()) => app.exit(0),
+                            Err(error) => commands::report_exit_failure(app, error),
+                        }
                     }
+                    CloseBehavior::HideWindow => {
+                        api.prevent_close();
+                        if let Err(error) = window.hide() {
+                            eprintln!("Remember could not hide window {}: {error}", window.label());
+                        }
+                    }
+                    CloseBehavior::Default => {}
                 }
             }
         })
         .setup(move |app| {
             single_instance.listen_for_activation(app.handle().clone())?;
-            if let Err(error) = commands::restore_administrator_restart_recovery(app.handle()) {
-                eprintln!("Remember could not restore an administrator-restart recovery: {error}");
-                if let Some(state) = app.try_state::<commands::SharedApp>() {
-                    if let Ok(mut controller) = state.lock() {
-                        controller.set_error(format!(
-                            "Administrator-restart recovery was preserved but could not be restored: {error}"
-                        ));
-                    }
-                }
-            }
-            tray::setup(app.handle()).map_err(std::io::Error::other)?;
             let loaded_settings =
                 settings_bundle::load(app.handle()).map_err(std::io::Error::other)?;
             advanced_settings::replace(app.handle(), loaded_settings.advanced)
@@ -90,48 +99,69 @@ pub fn run() {
             hotkeys::apply_to_controller(app.handle(), &hotkey_config)
                 .map_err(std::io::Error::other)?;
             hotkeys::register(app.handle(), &hotkey_config, true).map_err(std::io::Error::other)?;
+            let own_windows = Arc::new(input::OwnWindowHandles::default());
             #[cfg(target_os = "windows")]
             let main_window_hwnd = app
                 .get_webview_window("main")
                 .and_then(|window| window.hwnd().ok())
                 .map(|hwnd| hwnd.0 as usize);
-            #[cfg(target_os = "windows")]
-            let advanced_settings_hwnd = app
-                .get_webview_window("advanced-settings")
-                .and_then(|window| window.hwnd().ok())
-                .map(|hwnd| hwnd.0 as usize);
             #[cfg(not(target_os = "windows"))]
             let main_window_hwnd = None;
-            #[cfg(not(target_os = "windows"))]
-            let advanced_settings_hwnd = None;
+            if let Some(hwnd) = main_window_hwnd {
+                own_windows.set_main(hwnd);
+            }
+            if !app.manage(own_windows.clone()) {
+                return Err(std::io::Error::other("own-window handles already managed").into());
+            }
 
-            let capture_runtime = input::start_capture(
-                capture_shared.clone(),
-                app.handle().clone(),
-                [main_window_hwnd, advanced_settings_hwnd],
-            )
-            .map_err(std::io::Error::other)?;
+            let capture_runtime =
+                input::start_capture(capture_shared.clone(), app.handle().clone(), own_windows)
+                    .map_err(std::io::Error::other)?;
             if !app.manage(Mutex::new(capture_runtime)) {
                 return Err(std::io::Error::other("input capture runtime already managed").into());
             }
+            commands::restore_administrator_restart_recovery_in_background(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())
         .expect("failed to run Remember");
 }
 
-fn hide_instead_of_close(label: &str) -> bool {
-    matches!(label, "main" | "advanced-settings")
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CloseBehavior {
+    ExitApplication,
+    HideWindow,
+    Default,
+}
+
+fn close_behavior(label: &str) -> CloseBehavior {
+    match label {
+        "main" => CloseBehavior::ExitApplication,
+        "advanced-settings" => CloseBehavior::HideWindow,
+        _ => CloseBehavior::Default,
+    }
+}
+
+pub(crate) fn show_main_window(app: &AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window is unavailable".to_string())?;
+    window.unminimize().map_err(|error| error.to_string())?;
+    window.show().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::hide_instead_of_close;
+    use super::{close_behavior, CloseBehavior};
 
     #[test]
-    fn interactive_windows_hide_instead_of_being_destroyed() {
-        assert!(hide_instead_of_close("main"));
-        assert!(hide_instead_of_close("advanced-settings"));
-        assert!(!hide_instead_of_close("activity-indicator"));
+    fn main_window_exits_while_child_window_only_hides() {
+        assert_eq!(close_behavior("main"), CloseBehavior::ExitApplication);
+        assert_eq!(
+            close_behavior("advanced-settings"),
+            CloseBehavior::HideWindow
+        );
+        assert_eq!(close_behavior("activity-indicator"), CloseBehavior::Default);
     }
 }

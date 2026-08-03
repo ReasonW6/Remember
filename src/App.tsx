@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AdministratorControl } from "./components/AdministratorControl";
+import { CompactControls } from "./components/CompactControls";
 import { Controls } from "./components/Controls";
 import { PlaybackSettings } from "./components/PlaybackSettings";
 import { RecordingList } from "./components/RecordingList";
@@ -9,7 +10,6 @@ import { shortcutFromEvent } from "./lib/hotkeys";
 import * as rememberApi from "./lib/rememberApi";
 import { playFeedbackTone } from "./lib/sounds";
 import { displayErrorMessage, displayMessage, displayMode } from "./localization";
-import "./styles.css";
 import type {
   AdvancedSettingsConfig,
   AppMode,
@@ -43,6 +43,9 @@ const defaultAdvancedSettings: AdvancedSettingsConfig = {
 const maxLoopCount = 0xffffffff;
 const loopCountError = `循环次数必须是 1 到 ${maxLoopCount} 之间的整数。`;
 const speedError = "速度必须是大于 0 的有效数字。";
+const lastRecordingPathKey = "remember:last-recording-path";
+const compactWindowSize = { width: 360, height: 134 };
+const expandedWindowSize = { width: 420, height: 520 };
 
 interface PlaybackSettingsValue {
   loopCount: number | null;
@@ -55,6 +58,8 @@ const defaultPlaybackSettings: PlaybackSettingsValue = {
 };
 
 export function App() {
+  const [compactMode, setCompactMode] = useState(true);
+  const [windowResizePending, setWindowResizePending] = useState(false);
   const [state, setState] = useState<UiState>(idleState);
   const [loopCount, setLoopCount] = useState<number | null>(1);
   const [speedMultiplier, setSpeedMultiplier] = useState(1);
@@ -101,6 +106,7 @@ export function App() {
     let unsubscribeRecordings: (() => void) | undefined;
     let unsubscribeHotkeys: (() => void) | undefined;
     let unsubscribeAdvancedSettings: (() => void) | undefined;
+    let deferredInitializationFrame: number | undefined;
 
     async function initializeState() {
       try {
@@ -243,25 +249,50 @@ export function App() {
       }
     }
 
+    async function restoreLastRecording() {
+      const path = readLastRecordingPath();
+      if (!path) {
+        return;
+      }
+      try {
+        const loadedState = await rememberApi.loadRecording(path);
+        if (!disposed && applyUiState(loadedState)) {
+          setSelectedRecordingPath(path);
+        }
+      } catch {
+        clearLastRecordingPath();
+      }
+    }
+
     void initializeState();
-    void initializeRecordings();
-    void initializeHotkeys();
-    void initializeAdvancedSettings();
-    void rememberApi
-      .getPrivilegeState()
-      .then((privilegeState) => {
-        if (!disposed) {
-          setIsElevated(privilegeState.is_elevated);
-        }
-      })
-      .catch((loadError: unknown) => {
-        if (!disposed) {
-          addInitializationError(loadError);
-        }
-      });
+    deferredInitializationFrame = window.requestAnimationFrame(() => {
+      deferredInitializationFrame = undefined;
+      if (disposed) {
+        return;
+      }
+      void initializeRecordings();
+      void initializeHotkeys();
+      void initializeAdvancedSettings();
+      void restoreLastRecording();
+      void rememberApi
+        .getPrivilegeState()
+        .then((privilegeState) => {
+          if (!disposed) {
+            setIsElevated(privilegeState.is_elevated);
+          }
+        })
+        .catch((loadError: unknown) => {
+          if (!disposed) {
+            addInitializationError(loadError);
+          }
+        });
+    });
 
     return () => {
       disposed = true;
+      if (deferredInitializationFrame !== undefined) {
+        window.cancelAnimationFrame(deferredInitializationFrame);
+      }
       unsubscribeState?.();
       unsubscribeRecordings?.();
       unsubscribeHotkeys?.();
@@ -311,6 +342,19 @@ export function App() {
       setSelectedRecordingPath(null);
     }
   }, [state.mode]);
+
+  useEffect(() => {
+    if (state.mode !== "idle" || selectedRecordingPath || !state.recording_name) {
+      return;
+    }
+    const recording = recordings.find(
+      (candidate) => !candidate.load_error && candidate.name === state.recording_name
+    );
+    if (recording) {
+      setSelectedRecordingPath(recording.path);
+      writeLastRecordingPath(recording.path);
+    }
+  }, [recordings, selectedRecordingPath, state.mode, state.recording_name]);
 
   function addInitializationError(error: unknown) {
     const message = displayErrorMessage(error);
@@ -472,9 +516,10 @@ export function App() {
 
   function handleOpen() {
     void applyCommand(async () => {
-      const loadedState = await rememberApi.openRecording();
-      if (loadedState && applyUiState(loadedState)) {
-        setSelectedRecordingPath(null);
+      const opened = await rememberApi.openRecording();
+      if (opened && applyUiState(opened.state)) {
+        setSelectedRecordingPath(opened.path);
+        writeLastRecordingPath(opened.path);
       }
     });
   }
@@ -484,8 +529,33 @@ export function App() {
       const loadedState = await rememberApi.loadRecording(path);
       if (applyUiState(loadedState)) {
         setSelectedRecordingPath(path);
+        writeLastRecordingPath(path);
       }
     });
+  }
+
+  function handleToggleWindowSize() {
+    if (windowResizePending) {
+      return;
+    }
+    const nextCompactMode = !compactMode;
+    const size = nextCompactMode ? compactWindowSize : expandedWindowSize;
+    setCompactMode(nextCompactMode);
+    setWindowResizePending(true);
+    void import("@tauri-apps/api/window")
+      .then(({ getCurrentWindow, LogicalSize }) =>
+        getCurrentWindow().setSize(new LogicalSize(size.width, size.height))
+      )
+      .then(() => {
+        setActionError("");
+      })
+      .catch((resizeError: unknown) => {
+        setCompactMode(!nextCompactMode);
+        setActionError(displayErrorMessage(resizeError));
+      })
+      .finally(() => {
+        setWindowResizePending(false);
+      });
   }
 
   function handleRefreshRecordings() {
@@ -509,6 +579,7 @@ export function App() {
       await rememberApi.deleteRecording(recording.path);
       if (selectedRecordingPath === recording.path) {
         setSelectedRecordingPath(null);
+        clearLastRecordingPath();
       }
       await refreshRecordings();
     });
@@ -521,6 +592,7 @@ export function App() {
         const loadedState = await rememberApi.loadRecording(renamedPath);
         if (applyUiState(loadedState)) {
           setSelectedRecordingPath(renamedPath);
+          writeLastRecordingPath(renamedPath);
         }
       }
       await refreshRecordings();
@@ -594,9 +666,32 @@ export function App() {
     : displayMessage(state.message);
 
   return (
-    <main className="app-shell">
-      <WindowTitlebar />
-      <div className="app-content">
+    <main className={compactMode ? "app-shell compact-shell" : "app-shell"}>
+      <WindowTitlebar
+        compact={compactMode}
+        resizePending={windowResizePending}
+        onToggleSize={handleToggleWindowSize}
+      />
+      {compactMode ? (
+        <CompactControls
+          state={state}
+          recordings={recordings}
+          selectedPath={selectedRecordingPath}
+          selectedName={state.recording_name}
+          hasRecording={hasRecording}
+          playbackValid={!validationError && playbackSettingsReady}
+          pendingCommand={pendingCommand}
+          isElevated={isElevated}
+          message={displayedStateMessage}
+          error={displayedError}
+          onSelect={handleSelectRecording}
+          onRecord={handleRecord}
+          onPlay={handlePlay}
+          onStop={handleStop}
+          onRestartAsAdministrator={handleRestartAsAdministrator}
+        />
+      ) : (
+        <div className="app-content">
         <header className="app-header">
           <div className="brand-block">
             <img className="app-icon" src="/remember-icon.svg" alt="Remember 图标" />
@@ -656,9 +751,34 @@ export function App() {
             <StatusPanel state={state} error={displayedError} />
           </div>
         </div>
-      </div>
+        </div>
+      )}
     </main>
   );
+}
+
+function readLastRecordingPath() {
+  try {
+    return window.localStorage.getItem(lastRecordingPathKey);
+  } catch {
+    return null;
+  }
+}
+
+function writeLastRecordingPath(path: string) {
+  try {
+    window.localStorage.setItem(lastRecordingPathKey, path);
+  } catch {
+    // The selector still works for the current session when storage is unavailable.
+  }
+}
+
+function clearLastRecordingPath() {
+  try {
+    window.localStorage.removeItem(lastRecordingPathKey);
+  } catch {
+    // Ignore unavailable storage; there is no persistent state to clear.
+  }
 }
 
 function shouldIgnoreAppHotkey(event: KeyboardEvent) {
