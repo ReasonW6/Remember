@@ -47,6 +47,7 @@ const windowMocks = vi.hoisted(() => ({
   startDragging: vi.fn(),
   minimize: vi.fn(),
   setSize: vi.fn(),
+  show: vi.fn(),
   close: vi.fn()
 }));
 
@@ -156,10 +157,14 @@ describe("App", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    let animationTimestamp = 0;
     vi.stubGlobal(
       "requestAnimationFrame",
       vi.fn((callback: FrameRequestCallback) =>
-        window.setTimeout(() => callback(window.performance.now()), 0)
+        window.setTimeout(() => {
+          animationTimestamp += 20;
+          callback(animationTimestamp);
+        }, 0)
       )
     );
     vi.stubGlobal(
@@ -237,6 +242,7 @@ describe("App", () => {
     windowMocks.startDragging.mockResolvedValue(undefined);
     windowMocks.minimize.mockResolvedValue(undefined);
     windowMocks.setSize.mockResolvedValue(undefined);
+    windowMocks.show.mockResolvedValue(undefined);
     windowMocks.close.mockResolvedValue(undefined);
   });
 
@@ -317,18 +323,45 @@ describe("App", () => {
     const user = userEvent.setup();
     renderCompact(<App />);
 
-    await user.click(screen.getByRole("button", { name: "展开完整界面" }));
+    const expandButton = screen.getByRole("button", { name: "展开完整界面" });
+    await user.click(expandButton);
+    expect(screen.getByRole("button", { name: "切换到小悬浮窗" })).toBeDisabled();
+    expect(document.querySelector(".window-mode-expanding")).toBeInTheDocument();
     await waitFor(() =>
       expect(apiMocks.setMainWindowCompactMode).toHaveBeenLastCalledWith(false)
+    );
+    expect(windowMocks.setSize).toHaveBeenLastCalledWith(
+      expect.objectContaining({ width: 420, height: 520 })
     );
     expect(screen.getByRole("button", { name: "切换到小悬浮窗" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "高级设置" })).toBeEnabled();
 
     await user.click(screen.getByRole("button", { name: "切换到小悬浮窗" }));
+    expect(document.querySelector(".window-mode-collapsing")).toBeInTheDocument();
     await waitFor(() =>
       expect(apiMocks.setMainWindowCompactMode).toHaveBeenLastCalledWith(true)
     );
+    expect(windowMocks.setSize).toHaveBeenLastCalledWith(
+      expect.objectContaining({ width: 360, height: 134 })
+    );
     expect(screen.getByRole("combobox", { name: "选择录制文件" })).toBeInTheDocument();
+  });
+
+  it("restores the previous window mode when the resize animation fails", async () => {
+    const user = userEvent.setup();
+    windowMocks.setSize.mockRejectedValueOnce(new Error("resize failed"));
+    renderCompact(<App />);
+
+    await user.click(screen.getByRole("button", { name: "展开完整界面" }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "展开完整界面" })).toBeEnabled()
+    );
+    expect(apiMocks.setMainWindowCompactMode).not.toHaveBeenCalled();
+    expect(windowMocks.setSize).toHaveBeenLastCalledWith(
+      expect.objectContaining({ width: 360, height: 134 })
+    );
+    expect(screen.getByText("resize failed")).toBeInTheDocument();
   });
 
   it("restores the expanded main interface preference on startup", async () => {
@@ -343,6 +376,25 @@ describe("App", () => {
       await screen.findByRole("button", { name: "切换到小悬浮窗" })
     ).toBeEnabled();
     expect(screen.getByRole("button", { name: "高级设置" })).toBeEnabled();
+  });
+
+  it("shows the main window only after the saved interface mode is rendered", async () => {
+    let resolvePreferences!: (preferences: { compact: boolean; position: null }) => void;
+    apiMocks.getMainWindowPreferences.mockReturnValue(
+      new Promise((resolve) => {
+        resolvePreferences = resolve;
+      })
+    );
+    windowMocks.show.mockImplementation(async () => {
+      expect(screen.getByRole("button", { name: "切换到小悬浮窗" })).toBeEnabled();
+    });
+
+    renderCompact(<App />);
+    expect(windowMocks.show).not.toHaveBeenCalled();
+
+    act(() => resolvePreferences({ compact: false, position: null }));
+
+    await waitFor(() => expect(windowMocks.show).toHaveBeenCalledTimes(1));
   });
 
   it("restores the enabled window-relative preference in both window sizes", async () => {
@@ -480,7 +532,9 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "播放" })).toBeDisabled();
     expect(screen.queryByRole("button", { name: "停止" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "高级设置" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "以管理员身份重启" })).toBeEnabled();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "以管理员身份重启" })).toBeEnabled()
+    );
     const administratorHelp = screen.getByLabelText("管理员模式说明");
     expect(administratorHelp).toHaveAttribute(
       "data-tooltip",
@@ -540,7 +594,9 @@ describe("App", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(await screen.findByRole("button", { name: "以管理员身份重启" }));
+    const restart = await screen.findByRole("button", { name: "以管理员身份重启" });
+    await waitFor(() => expect(restart).toBeEnabled());
+    await user.click(restart);
 
     expect(apiMocks.restartAsAdministrator).toHaveBeenCalledTimes(1);
   });
@@ -659,7 +715,7 @@ describe("App", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(
       "循环次数必须是 1 到 4294967295 之间的整数。"
     );
-    expect(apiMocks.setPlaybackSettings).not.toHaveBeenCalledWith(4294967296, 1);
+    expect(apiMocks.setPlaybackSettings).not.toHaveBeenCalledWith(4294967296, 1, 0);
   });
 
   it("does not start playback with a non-finite speed", async () => {
@@ -677,6 +733,49 @@ describe("App", () => {
     expect(apiMocks.startPlayback).not.toHaveBeenCalled();
   });
 
+  it("enables loop delay only for repeated or infinite playback", async () => {
+    apiMocks.getState.mockResolvedValue(stoppedState);
+    const user = userEvent.setup();
+    render(<App />);
+
+    const loopDelay = await screen.findByLabelText("循环间延迟（毫秒）");
+    expect(loopDelay).toBeDisabled();
+    expect(loopDelay).toHaveAccessibleDescription("仅在循环次数大于 1 或无限循环时可以设置。");
+
+    fireEvent.change(screen.getByLabelText("循环次数"), { target: { value: "2" } });
+    expect(loopDelay).toBeEnabled();
+    await user.clear(loopDelay);
+    await user.type(loopDelay, "275");
+
+    await waitFor(() =>
+      expect(apiMocks.setPlaybackSettings).toHaveBeenCalledWith(2, 1, 275)
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "播放" })).toBeEnabled());
+    await user.click(screen.getByRole("button", { name: "播放" }));
+    await waitFor(() => expect(apiMocks.startPlayback).toHaveBeenCalledWith(2, 1, 275));
+
+    fireEvent.change(screen.getByLabelText("循环次数"), { target: { value: "1" } });
+    expect(loopDelay).toBeDisabled();
+    await waitFor(() => expect(apiMocks.setPlaybackSettings).toHaveBeenCalledWith(1, 1, 0));
+  });
+
+  it("rejects fractional and negative loop delays", async () => {
+    render(<App />);
+    await waitFor(() => expect(apiMocks.setPlaybackSettings).toHaveBeenCalledWith(1, 1, 0));
+    fireEvent.change(await screen.findByLabelText("循环次数"), { target: { value: "2" } });
+    const loopDelay = screen.getByLabelText("循环间延迟（毫秒）");
+    await waitFor(() => expect(apiMocks.setPlaybackSettings).toHaveBeenCalledWith(2, 1, 0));
+
+    fireEvent.change(loopDelay, { target: { value: "1.5" } });
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "循环间延迟必须是 0 到 9007199254740991 之间的整数毫秒数。"
+    );
+    expect(screen.getByRole("button", { name: "播放" })).toBeDisabled();
+
+    fireEvent.change(loopDelay, { target: { value: "-1" } });
+    expect(screen.getByRole("alert")).toHaveTextContent("循环间延迟必须是");
+  });
+
   it("syncs playback settings and uses them for focused app playback hotkey", async () => {
     apiMocks.getState.mockResolvedValue(stoppedState);
     const user = userEvent.setup();
@@ -688,11 +787,11 @@ describe("App", () => {
     const speed = screen.getByLabelText("速度");
     await user.clear(speed);
     await user.type(speed, "2");
-    await waitFor(() => expect(apiMocks.setPlaybackSettings).toHaveBeenCalledWith(3, 2));
+    await waitFor(() => expect(apiMocks.setPlaybackSettings).toHaveBeenCalledWith(3, 2, 0));
 
     await user.keyboard("{F12}");
 
-    await waitFor(() => expect(apiMocks.startPlayback).toHaveBeenCalledWith(3, 2));
+    await waitFor(() => expect(apiMocks.startPlayback).toHaveBeenCalledWith(3, 2, 0));
   });
 
   it("blocks UI and focused hotkey playback until settings synchronization is acknowledged", async () => {
@@ -716,7 +815,7 @@ describe("App", () => {
 
     await waitFor(() => expect(play).toBeEnabled());
     fireEvent.keyDown(window, { key: "F12" });
-    await waitFor(() => expect(apiMocks.startPlayback).toHaveBeenCalledWith(1, 1));
+    await waitFor(() => expect(apiMocks.startPlayback).toHaveBeenCalledWith(1, 1, 0));
   });
 
   it("serializes playback setting writes and exposes only acknowledged values", async () => {
@@ -735,17 +834,17 @@ describe("App", () => {
 
     expect(apiMocks.setPlaybackSettings).toHaveBeenCalledTimes(1);
     expect(screen.getByText(/正在应用新设置/, { selector: ".playback-settings-status" }))
-      .toHaveTextContent("已应用：循环 1 次，速度 1 倍。");
+      .toHaveTextContent("已应用：循环 1 次，速度 1 倍，循环间延迟 0 毫秒。");
 
     act(() => acknowledgements[0]());
     await waitFor(() => expect(apiMocks.setPlaybackSettings).toHaveBeenCalledTimes(2));
-    expect(apiMocks.setPlaybackSettings).toHaveBeenNthCalledWith(2, 3, 1);
+    expect(apiMocks.setPlaybackSettings).toHaveBeenNthCalledWith(2, 3, 1, 0);
     expect(screen.getByRole("button", { name: "播放" })).toBeDisabled();
 
     act(() => acknowledgements[1]());
     await waitFor(() =>
       expect(
-        screen.getByText("已应用：循环 3 次，速度 1 倍。", {
+        screen.getByText("已应用：循环 3 次，速度 1 倍，循环间延迟 0 毫秒。", {
           selector: ".playback-settings-status"
         })
       ).toBeInTheDocument()
@@ -936,10 +1035,11 @@ describe("App", () => {
     await user.click(await screen.findByRole("radio", { name: "无限循环" }));
 
     expect(screen.getByLabelText("循环次数")).toBeDisabled();
-    await waitFor(() => expect(apiMocks.setPlaybackSettings).toHaveBeenCalledWith(null, 1));
+    expect(screen.getByLabelText("循环间延迟（毫秒）")).toBeEnabled();
+    await waitFor(() => expect(apiMocks.setPlaybackSettings).toHaveBeenCalledWith(null, 1, 0));
 
     await user.click(screen.getByRole("button", { name: "播放" }));
-    await waitFor(() => expect(apiMocks.startPlayback).toHaveBeenCalledWith(null, 1));
+    await waitFor(() => expect(apiMocks.startPlayback).toHaveBeenCalledWith(null, 1, 0));
   });
 
   it("uses the playback hotkey as stop while playback is active", async () => {

@@ -36,17 +36,27 @@ export function renameRecording(path: string, newName: string) {
   return invoke<string>("rename_recording", { path, newName });
 }
 
-export function setPlaybackSettings(loopCount: number | null, speedMultiplier: number) {
+export function setPlaybackSettings(
+  loopCount: number | null,
+  speedMultiplier: number,
+  loopDelayMs: number
+) {
   return invoke<void>("set_playback_settings", {
     loopCount,
-    speedMultiplier
+    speedMultiplier,
+    loopDelayMs
   });
 }
 
-export function startPlayback(loopCount: number | null, speedMultiplier: number) {
+export function startPlayback(
+  loopCount: number | null,
+  speedMultiplier: number,
+  loopDelayMs: number
+) {
   return invoke<UiState>("start_playback", {
     loopCount,
-    speedMultiplier
+    speedMultiplier,
+    loopDelayMs
   });
 }
 

@@ -40,14 +40,17 @@ const volumeAdjustmentKeys = new Set([
   "PageDown"
 ]);
 
+async function closeCurrentWindow() {
+  const { getCurrentWindow } = await import("@tauri-apps/api/window");
+  await getCurrentWindow().close();
+}
+
 export function AdvancedSettings() {
   const [settings, setSettings] = useState(defaultSettings);
   const [hotkeys, setHotkeys] = useState(defaultHotkeys);
   const [pending, setPending] = useState(true);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState("");
-  const [showSavedNotice, setShowSavedNotice] = useState(false);
-  const savedNoticeTimerRef = useRef<number | undefined>();
   const mainWindowPreferencesRef = useRef(defaultMainWindowPreferences);
 
   useEffect(() => {
@@ -75,7 +78,6 @@ export function AdvancedSettings() {
 
     return () => {
       disposed = true;
-      window.clearTimeout(savedNoticeTimerRef.current);
     };
   }, []);
 
@@ -92,21 +94,12 @@ export function AdvancedSettings() {
     previewVolume(settings.feedback_volume_percent, nextMuted);
   }
 
-  function showSavedToast() {
-    window.clearTimeout(savedNoticeTimerRef.current);
-    setShowSavedNotice(true);
-    savedNoticeTimerRef.current = window.setTimeout(() => {
-      setShowSavedNotice(false);
-    }, 1800);
-  }
-
   async function saveAllSettings() {
     if (pending || !loaded) {
       return;
     }
     setPending(true);
     setError("");
-    setShowSavedNotice(false);
     try {
       const savedBundle = await rememberApi.setSettingsBundle({
         advanced: settings,
@@ -116,7 +109,11 @@ export function AdvancedSettings() {
       setSettings(savedBundle.advanced);
       setHotkeys(savedBundle.hotkeys);
       mainWindowPreferencesRef.current = savedBundle.main_window;
-      showSavedToast();
+      try {
+        await closeCurrentWindow();
+      } catch (closeError) {
+        setError(`设置已保存，但窗口无法关闭。${displayErrorMessage(closeError)}`);
+      }
     } catch (saveError) {
       setError(displayErrorMessage(saveError));
     } finally {
@@ -142,15 +139,10 @@ export function AdvancedSettings() {
             onClick={() => void saveAllSettings()}
           >
             <Save size={15} aria-hidden="true" />
-            <span>保存</span>
+            <span>保存并退出</span>
           </button>
         </header>
 
-        {showSavedNotice ? (
-          <div className="settings-toast" role="status">
-            已保存
-          </div>
-        ) : null}
         {error ? (
           <p className="alert" role="alert">
             {error}

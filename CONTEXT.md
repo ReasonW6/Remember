@@ -32,6 +32,10 @@ _Avoid_: Drifting drag, scaled pointer path, ordinary content drag
 A recorded boundary where pointer movement changes between screen-relative and window-relative meaning. Playback may jump directly at this boundary and does not synthesize a smoothing path.
 _Avoid_: Interpolated transition, corrected desktop path
 
+**Loop interval delay**:
+A user-selected wall-clock pause after one playback loop has fully ended and before the next loop begins. It applies only when another loop will run, is independent of playback speed, and is never added after the final loop.
+_Avoid_: Start delay, step delay, trailing duration
+
 **Target window**:
 An operating-system window associated with targeted pointer or keyboard input in a window-relative recording. A recording may contain more than one target window.
 _Avoid_: Application, screen, target coordinate
@@ -89,7 +93,7 @@ Restoring and activating a minimized or hidden target window immediately before 
 _Avoid_: Preflight wake-up, continuous focus enforcement
 
 **Window binding**:
-The automatically selected association between a recorded target window and one compatible target window currently available for playback. Every target is bound just before its first targeted action, with a bounded wait for the window to appear; binding never asks the user to choose a window.
+The automatically selected association between a recorded target window and one compatible target window currently available for playback. Every target is bound just before its first targeted action. With no held input, binding may wait a bounded time for the window; while input is held, it may only bind an already available compatible window without waiting, restoring, or changing focus, and otherwise stops playback. Binding never asks the user to choose a window.
 _Avoid_: Manual binding, window guess, handle reuse
 
 **Compatible target window**:

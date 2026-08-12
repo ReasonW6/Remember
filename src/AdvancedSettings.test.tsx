@@ -38,7 +38,9 @@ const hotkeys = {
 };
 
 async function waitForSettingsLoaded() {
-  await waitFor(() => expect(screen.getByRole("button", { name: "保存" })).toBeEnabled());
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "保存并退出" })).toBeEnabled()
+  );
 }
 
 describe("AdvancedSettings", () => {
@@ -75,7 +77,7 @@ describe("AdvancedSettings", () => {
     ).not.toBeInTheDocument();
     expect(screen.getByText("快捷键")).toBeInTheDocument();
     expect(screen.getAllByText("F8", { selector: "kbd" })).toHaveLength(2);
-    expect(screen.getAllByRole("button", { name: "保存" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "保存并退出" })).toHaveLength(1);
     expect(screen.queryByRole("button", { name: "保存快捷键" })).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "保存声音和提示设置" })
@@ -122,7 +124,7 @@ describe("AdvancedSettings", () => {
     expect(volume).toBeEnabled();
   });
 
-  it("saves sound, indicator, and hotkey settings with the single save button", async () => {
+  it("saves sound, indicator, and hotkey settings before exiting", async () => {
     const nextHotkeys = {
       record: "Ctrl+Shift+R",
       playback: "F12",
@@ -144,7 +146,7 @@ describe("AdvancedSettings", () => {
     await user.keyboard("{Control>}{Shift>}r{/Shift}{/Control}");
 
     expect(apiMocks.setSettingsBundle).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "保存" }));
+    await user.click(screen.getByRole("button", { name: "保存并退出" }));
 
     await waitFor(() =>
       expect(apiMocks.setSettingsBundle).toHaveBeenCalledWith({
@@ -158,27 +160,27 @@ describe("AdvancedSettings", () => {
         main_window: { compact: true, position: null }
       })
     );
-    expect(await screen.findByText("已保存")).toBeInTheDocument();
+    await waitFor(() => expect(windowMocks.close).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText("已保存")).not.toBeInTheDocument();
   });
 
-  it("automatically hides the saved notice", async () => {
+  it("discards unsaved edits when the window closes and opens again", async () => {
+    const user = userEvent.setup();
+    const firstWindow = render(<AdvancedSettings />);
+    await waitForSettingsLoaded();
+    fireEvent.change(screen.getByRole("slider", { name: "提示音音量" }), {
+      target: { value: "75" }
+    });
+    expect(screen.getByRole("slider", { name: "提示音音量" })).toHaveValue("75");
+
+    await user.click(screen.getByRole("button", { name: "关闭" }));
+    await waitFor(() => expect(windowMocks.close).toHaveBeenCalledTimes(1));
+    expect(apiMocks.setSettingsBundle).not.toHaveBeenCalled();
+
+    firstWindow.unmount();
     render(<AdvancedSettings />);
     await waitForSettingsLoaded();
-    const save = await screen.findByRole("button", { name: "保存" });
-    vi.useFakeTimers();
-
-    await act(async () => {
-      fireEvent.click(save);
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    expect(screen.getByText("已保存")).toBeInTheDocument();
-
-    act(() => vi.advanceTimersByTime(1799));
-    expect(screen.getByText("已保存")).toBeInTheDocument();
-    act(() => vi.advanceTimersByTime(1));
-    expect(screen.queryByText("已保存")).not.toBeInTheDocument();
-    vi.useRealTimers();
+    expect(screen.getByRole("slider", { name: "提示音音量" })).toHaveValue("50");
   });
 
   it("rejects unsafe single-key shortcuts and allows capture cancellation", async () => {
@@ -219,7 +221,7 @@ describe("AdvancedSettings", () => {
 
     const volume = await screen.findByRole("slider", { name: "提示音音量" });
     fireEvent.change(volume, { target: { value: "75" } });
-    await user.click(screen.getByRole("button", { name: "保存" }));
+    await user.click(screen.getByRole("button", { name: "保存并退出" }));
 
     await waitFor(() => expect(apiMocks.setSettingsBundle).toHaveBeenCalledTimes(1));
     expect(apiMocks.setSettingsBundle).toHaveBeenCalledWith({
@@ -234,6 +236,7 @@ describe("AdvancedSettings", () => {
       "这个快捷键已被其他程序占用，请换一个键。"
     );
     expect(volume).toHaveValue("75");
+    expect(windowMocks.close).not.toHaveBeenCalled();
     expect(screen.queryByText("已保存")).not.toBeInTheDocument();
   });
 
@@ -245,9 +248,9 @@ describe("AdvancedSettings", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "设置加载失败，保存已禁用。settings unavailable"
     );
-    expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "保存并退出" })).toBeDisabled();
     expect(screen.getByRole("slider", { name: "提示音音量" })).toBeDisabled();
-    await user.click(screen.getByRole("button", { name: "保存" }));
+    await user.click(screen.getByRole("button", { name: "保存并退出" }));
     expect(apiMocks.setSettingsBundle).not.toHaveBeenCalled();
   });
 });

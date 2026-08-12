@@ -53,11 +53,17 @@ fn window_target(id: u32, availability: TargetWindowAvailability) -> WindowTarge
 }
 
 #[test]
-fn validates_loop_count_and_speed() {
+fn validates_loop_count_speed_and_loop_delay() {
     assert!(PlaybackSettings::new(Some(1), 1.0).is_ok());
     assert!(PlaybackSettings::new(None, 1.0).is_ok());
     assert!(PlaybackSettings::new(Some(0), 1.0).is_err());
     assert!(PlaybackSettings::new(Some(1), 0.0).is_err());
+    assert_eq!(
+        PlaybackSettings::new_with_loop_delay(Some(2), 1.0, 250)
+            .expect("settings")
+            .loop_delay_ms,
+        250
+    );
 }
 
 #[test]
@@ -429,6 +435,71 @@ fn looped_playback_preserves_recorded_trailing_duration() {
     play_recording(&recording, settings, &fake, &StopToken::default()).expect("play");
 
     assert!(started.elapsed() >= Duration::from_millis(70));
+}
+
+#[test]
+fn loop_delay_is_unscaled_and_waits_between_repeated_loops() {
+    let fake = FakeExecutor::default();
+    let calls = fake.calls.clone();
+    let recording = Recording::new(
+        "loop delay",
+        "2026-06-29T00:00:00Z",
+        vec![MacroStep::MouseMove {
+            elapsed_ms: 0,
+            x: 1,
+            y: 2,
+        }],
+    );
+    let settings = PlaybackSettings::new_with_loop_delay(Some(2), 1000.0, 35).expect("settings");
+    let started = Instant::now();
+
+    play_recording(&recording, settings, &fake, &StopToken::default()).expect("play");
+
+    assert!(
+        started.elapsed() >= Duration::from_millis(30),
+        "the configured wall-clock delay must not be divided by playback speed"
+    );
+    assert_eq!(calls.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn loop_delay_can_be_stopped_without_waiting_for_the_next_loop() {
+    let fake = FakeExecutor::default();
+    let calls = fake.calls.clone();
+    let recording = Recording::new(
+        "stoppable loop delay",
+        "2026-06-29T00:00:00Z",
+        vec![MacroStep::MouseMove {
+            elapsed_ms: 0,
+            x: 1,
+            y: 2,
+        }],
+    );
+    let token = StopToken::default();
+    let play_token = token.clone();
+    let handle = thread::spawn(move || {
+        play_recording(
+            &recording,
+            PlaybackSettings::new_with_loop_delay(Some(2), 1.0, 30_000).expect("settings"),
+            &fake,
+            &play_token,
+        )
+    });
+
+    let first_loop_deadline = Instant::now() + Duration::from_secs(1);
+    while calls.lock().unwrap().is_empty() && Instant::now() < first_loop_deadline {
+        thread::yield_now();
+    }
+    assert_eq!(calls.lock().unwrap().len(), 1);
+
+    let stop_requested = Instant::now();
+    token.request_stop();
+    assert_eq!(handle.join().unwrap(), Err("playback stopped".to_string()));
+    assert!(
+        stop_requested.elapsed() < Duration::from_millis(250),
+        "stop should interrupt the delay before the next loop"
+    );
+    assert_eq!(calls.lock().unwrap().len(), 1);
 }
 
 #[test]

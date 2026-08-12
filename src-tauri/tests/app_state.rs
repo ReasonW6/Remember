@@ -919,13 +919,15 @@ fn starts_playback_with_current_settings() {
         ],
     ))
     .expect("load");
-    app.set_playback_settings(3, 2.0).expect("settings");
+    app.set_playback_settings_with_loop_delay(3, 2.0, 450)
+        .expect("settings");
 
     let run = app.start_playback_with_current_settings().expect("play");
 
     assert_eq!(run.recording.steps.len(), 2);
     assert_eq!(run.settings.loop_count, Some(3));
     assert_eq!(run.settings.speed_multiplier, 2.0);
+    assert_eq!(run.settings.loop_delay_ms, 450);
     assert_eq!(app.mode(), AppMode::Playing);
 }
 

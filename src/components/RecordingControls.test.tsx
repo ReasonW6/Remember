@@ -159,5 +159,13 @@ describe("RecordingList", () => {
     expect(screen.getByText("V1", { selector: ".recording-version" })).toBeInTheDocument();
     expect(screen.getByText("V2", { selector: ".recording-version" })).toBeInTheDocument();
     expect(screen.queryByText(/个目标|窗口相对/)).not.toBeInTheDocument();
+    const versionHelp = screen.getByLabelText("V1 和 V2 录制文件区别");
+    expect(versionHelp).toHaveAccessibleDescription(
+      expect.stringMatching(/V1.*屏幕绝对坐标.*V2.*目标窗口客户区相对坐标/)
+    );
+    expect(versionHelp).toHaveAttribute(
+      "data-tooltip",
+      expect.stringMatching(/不会适配任意缩放.*DPI.*明文保存/)
+    );
   });
 });

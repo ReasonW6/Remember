@@ -198,6 +198,7 @@ impl AppController {
             playback_settings: PlaybackSettings {
                 loop_count: Some(1),
                 speed_multiplier: 1.0,
+                loop_delay_ms: 0,
             },
             recording: None,
             recording_needs_save: false,
@@ -525,7 +526,20 @@ impl AppController {
         loop_count: impl Into<Option<u32>>,
         speed_multiplier: f64,
     ) -> Result<PlaybackRun, String> {
-        let settings = PlaybackSettings::new(loop_count.into(), speed_multiplier)?;
+        self.start_playback_with_loop_delay(loop_count, speed_multiplier, 0)
+    }
+
+    pub fn start_playback_with_loop_delay(
+        &mut self,
+        loop_count: impl Into<Option<u32>>,
+        speed_multiplier: f64,
+        loop_delay_ms: u64,
+    ) -> Result<PlaybackRun, String> {
+        let settings = PlaybackSettings::new_with_loop_delay(
+            loop_count.into(),
+            speed_multiplier,
+            loop_delay_ms,
+        )?;
         self.start_playback_with_settings(settings)
     }
 
@@ -534,7 +548,20 @@ impl AppController {
         loop_count: impl Into<Option<u32>>,
         speed_multiplier: f64,
     ) -> Result<(), String> {
-        self.playback_settings = PlaybackSettings::new(loop_count.into(), speed_multiplier)?;
+        self.set_playback_settings_with_loop_delay(loop_count, speed_multiplier, 0)
+    }
+
+    pub fn set_playback_settings_with_loop_delay(
+        &mut self,
+        loop_count: impl Into<Option<u32>>,
+        speed_multiplier: f64,
+        loop_delay_ms: u64,
+    ) -> Result<(), String> {
+        self.playback_settings = PlaybackSettings::new_with_loop_delay(
+            loop_count.into(),
+            speed_multiplier,
+            loop_delay_ms,
+        )?;
         Ok(())
     }
 

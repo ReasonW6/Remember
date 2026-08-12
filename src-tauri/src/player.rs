@@ -14,10 +14,19 @@ const MIN_REPEATED_LOOP_DURATION: Duration = Duration::from_millis(10);
 pub struct PlaybackSettings {
     pub loop_count: Option<u32>,
     pub speed_multiplier: f64,
+    pub loop_delay_ms: u64,
 }
 
 impl PlaybackSettings {
     pub fn new(loop_count: Option<u32>, speed_multiplier: f64) -> Result<Self, String> {
+        Self::new_with_loop_delay(loop_count, speed_multiplier, 0)
+    }
+
+    pub fn new_with_loop_delay(
+        loop_count: Option<u32>,
+        speed_multiplier: f64,
+        loop_delay_ms: u64,
+    ) -> Result<Self, String> {
         if loop_count == Some(0) {
             return Err("循环次数必须至少为 1。".to_string());
         }
@@ -27,6 +36,7 @@ impl PlaybackSettings {
         Ok(Self {
             loop_count,
             speed_multiplier,
+            loop_delay_ms,
         })
     }
 }
@@ -253,16 +263,15 @@ pub fn play_recording<E: StepExecutor + ?Sized>(
 
         let duration_ms = scaled_delay_ms(recording.duration_ms, settings.speed_multiplier);
         let next_completed_loops = completed_loops.saturating_add(1);
-        let repeats_after_this_loop = settings
-            .loop_count
-            .is_none_or(|loop_count| next_completed_loops < loop_count);
+        let repeats_after_this_loop = repeats_after_loop(settings, next_completed_loops);
         let minimum_repeat_ms = MIN_REPEATED_LOOP_DURATION.as_millis() as u64;
-        let loop_duration_ms = if duration_ms == 0 && repeats_after_this_loop {
-            minimum_repeat_ms
-        } else {
-            duration_ms
-        }
-        .saturating_add(timeline_pause_ms);
+        let loop_duration_ms =
+            if duration_ms == 0 && repeats_after_this_loop && settings.loop_delay_ms == 0 {
+                minimum_repeat_ms
+            } else {
+                duration_ms
+            }
+            .saturating_add(timeline_pause_ms);
         if let Err(error) = sleep_until(loop_started, loop_duration_ms, stop_token) {
             return cleanup_and_return(&mut pressed_inputs, executor, error);
         }
@@ -270,6 +279,40 @@ pub fn play_recording<E: StepExecutor + ?Sized>(
             return Err(format!("回放循环结束时释放残留输入失败：{error}"));
         }
         completed_loops = next_completed_loops;
+        let loop_delay_ms = loop_delay_after_loop(settings, completed_loops);
+        if loop_delay_ms > 0 {
+            sleep_with_stop(loop_delay_ms, stop_token)?;
+        }
+    }
+}
+
+fn repeats_after_loop(settings: PlaybackSettings, completed_loops: u32) -> bool {
+    settings
+        .loop_count
+        .is_none_or(|loop_count| completed_loops < loop_count)
+}
+
+fn loop_delay_after_loop(settings: PlaybackSettings, completed_loops: u32) -> u64 {
+    if repeats_after_loop(settings, completed_loops) {
+        settings.loop_delay_ms
+    } else {
+        0
+    }
+}
+
+#[cfg(test)]
+mod playback_settings_tests {
+    use super::*;
+
+    #[test]
+    fn loop_delay_is_only_inserted_before_another_loop() {
+        let finite = PlaybackSettings::new_with_loop_delay(Some(3), 4.0, 250).unwrap();
+        assert_eq!(loop_delay_after_loop(finite, 1), 250);
+        assert_eq!(loop_delay_after_loop(finite, 2), 250);
+        assert_eq!(loop_delay_after_loop(finite, 3), 0);
+
+        let infinite = PlaybackSettings::new_with_loop_delay(None, 0.5, 125).unwrap();
+        assert_eq!(loop_delay_after_loop(infinite, u32::MAX), 125);
     }
 }
 

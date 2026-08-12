@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { Check, Pencil, RefreshCw, X } from "lucide-react";
+import { Check, CircleHelp, Pencil, RefreshCw, X } from "lucide-react";
 import { displayErrorMessage } from "../localization";
 import type { RecordingFile } from "../types";
 
@@ -12,6 +12,9 @@ interface RecordingListProps {
   onRename: (recording: RecordingFile, newName: string) => void;
   onRefresh: () => void;
 }
+
+const recordingVersionHelp =
+  "V1 使用屏幕绝对坐标，回放依赖窗口保持原位置。V2 使用目标窗口客户区相对坐标，可跟随窗口移动并记录窗口调整；不会适配任意缩放、DPI 或内部布局变化。V2 还会明文保存目标窗口的程序路径、类名和标题。";
 
 function formatUpdatedTime(updatedAtMs: number) {
   if (!updatedAtMs) {
@@ -59,7 +62,21 @@ export function RecordingList({
   return (
     <section className="panel recording-list-panel" aria-labelledby="recordings-title">
       <div className="section-heading">
-        <h2 id="recordings-title">录制文件</h2>
+        <div className="section-heading-title">
+          <h2 id="recordings-title">录制文件</h2>
+          <span
+            className="recording-version-help"
+            tabIndex={0}
+            aria-label="V1 和 V2 录制文件区别"
+            aria-describedby="recording-version-help-text"
+            data-tooltip={recordingVersionHelp}
+          >
+            <CircleHelp size={15} aria-hidden="true" />
+          </span>
+          <span id="recording-version-help-text" className="sr-only">
+            {recordingVersionHelp}
+          </span>
+        </div>
         <button
           className="icon-button"
           type="button"

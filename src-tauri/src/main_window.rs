@@ -47,7 +47,7 @@ pub fn restore(app: &tauri::AppHandle, preferences: MainWindowPreferences) -> Re
             .set_position(position)
             .map_err(|error| error.to_string())?;
     }
-    window.show().map_err(|error| error.to_string())
+    Ok(())
 }
 
 pub fn set_compact(app: &tauri::AppHandle, compact: bool) -> Result<(), String> {

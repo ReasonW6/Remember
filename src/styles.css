@@ -166,6 +166,47 @@ button {
   padding: 9px 12px 8px;
 }
 
+.window-mode-expanding .app-content {
+  transform-origin: top center;
+  animation: expand-window-content 160ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.window-mode-collapsing .app-content {
+  transform-origin: top center;
+  animation: collapse-window-content 160ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes expand-window-content {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes collapse-window-content {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  to {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .window-mode-expanding .app-content,
+  .window-mode-collapsing .app-content {
+    animation: none;
+  }
+}
+
 .compact-controls {
   display: grid;
   min-width: 0;
@@ -316,7 +357,8 @@ button {
   min-width: 0;
 }
 
-.administrator-help {
+.administrator-help,
+.recording-version-help {
   position: relative;
   display: inline-flex;
   width: 26px;
@@ -331,12 +373,15 @@ button {
 }
 
 .administrator-help:hover,
-.administrator-help:focus-visible {
+.administrator-help:focus-visible,
+.recording-version-help:hover,
+.recording-version-help:focus-visible {
   background: #e8eef3;
   color: #344a5a;
 }
 
-.administrator-help::after {
+.administrator-help::after,
+.recording-version-help::after {
   position: absolute;
   top: calc(100% + 7px);
   right: 0;
@@ -360,10 +405,17 @@ button {
 }
 
 .administrator-help:hover::after,
-.administrator-help:focus-visible::after {
+.administrator-help:focus-visible::after,
+.recording-version-help:hover::after,
+.recording-version-help:focus-visible::after {
   opacity: 1;
   transform: translateY(0);
   visibility: visible;
+}
+
+.recording-version-help::after {
+  right: auto;
+  left: 0;
 }
 
 .action-button {
@@ -499,6 +551,16 @@ button {
   opacity: 1;
 }
 
+.loop-delay-field {
+  grid-column: 1 / -1;
+}
+
+.field-hint {
+  color: #737b82;
+  font-size: 0.75rem;
+  line-height: 1.35;
+}
+
 select {
   width: 100%;
   min-width: 0;
@@ -519,6 +581,13 @@ select {
 
 .section-heading h2 {
   margin: 0;
+}
+
+.section-heading-title {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
 }
 
 .mode-pill {
@@ -932,21 +1001,6 @@ kbd {
 .indicator-setting input {
   margin-top: 3px;
   accent-color: #4b7798;
-}
-
-.settings-toast {
-  position: fixed;
-  top: 54px;
-  right: 18px;
-  z-index: 20;
-  border: 1px solid #b7d8c2;
-  border-radius: 7px;
-  padding: 8px 12px;
-  background: #edf8f0;
-  box-shadow: 0 4px 14px rgb(31 64 43 / 18%);
-  color: #25613d;
-  font-weight: 600;
-  pointer-events: none;
 }
 
 @media (max-width: 560px) {

@@ -93,12 +93,6 @@ pub fn run() {
                             Err(error) => commands::report_exit_failure(app, error),
                         }
                     }
-                    CloseBehavior::HideWindow => {
-                        api.prevent_close();
-                        if let Err(error) = window.hide() {
-                            eprintln!("Remember could not hide window {}: {error}", window.label());
-                        }
-                    }
                     CloseBehavior::Default => {}
                 }
             }
@@ -149,14 +143,12 @@ pub fn run() {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CloseBehavior {
     ExitApplication,
-    HideWindow,
     Default,
 }
 
 fn close_behavior(label: &str) -> CloseBehavior {
     match label {
         "main" => CloseBehavior::ExitApplication,
-        "advanced-settings" => CloseBehavior::HideWindow,
         _ => CloseBehavior::Default,
     }
 }
@@ -175,12 +167,9 @@ mod tests {
     use super::{close_behavior, CloseBehavior};
 
     #[test]
-    fn main_window_exits_while_child_window_only_hides() {
+    fn main_window_exits_while_child_windows_close_normally() {
         assert_eq!(close_behavior("main"), CloseBehavior::ExitApplication);
-        assert_eq!(
-            close_behavior("advanced-settings"),
-            CloseBehavior::HideWindow
-        );
+        assert_eq!(close_behavior("advanced-settings"), CloseBehavior::Default);
         assert_eq!(close_behavior("activity-indicator"), CloseBehavior::Default);
     }
 }

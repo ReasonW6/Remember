@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AdministratorControl } from "./components/AdministratorControl";
 import { CompactControls } from "./components/CompactControls";
 import { Controls } from "./components/Controls";
@@ -44,24 +45,36 @@ const defaultAdvancedSettings: AdvancedSettingsConfig = {
 const maxLoopCount = 0xffffffff;
 const loopCountError = `循环次数必须是 1 到 ${maxLoopCount} 之间的整数。`;
 const speedError = "速度必须是大于 0 的有效数字。";
+const loopDelayError = `循环间延迟必须是 0 到 ${Number.MAX_SAFE_INTEGER} 之间的整数毫秒数。`;
 const lastRecordingPathKey = "remember:last-recording-path";
+const compactWindowSize = { width: 360, height: 134 };
+const expandedWindowSize = { width: 420, height: 520 };
+const windowResizeDurationMs = 160;
+
+type WindowModeTransition = "expanding" | "collapsing";
 
 interface PlaybackSettingsValue {
   loopCount: number | null;
   speedMultiplier: number;
+  loopDelayMs: number;
 }
 
 const defaultPlaybackSettings: PlaybackSettingsValue = {
   loopCount: 1,
-  speedMultiplier: 1
+  speedMultiplier: 1,
+  loopDelayMs: 0
 };
 
 export function App() {
   const [compactMode, setCompactMode] = useState(true);
+  const [mainWindowPreferencesReady, setMainWindowPreferencesReady] = useState(false);
   const [windowResizePending, setWindowResizePending] = useState(false);
+  const [windowModeTransition, setWindowModeTransition] =
+    useState<WindowModeTransition | null>(null);
   const [state, setState] = useState<UiState>(idleState);
   const [loopCount, setLoopCount] = useState<number | null>(1);
   const [speedMultiplier, setSpeedMultiplier] = useState(1);
+  const [loopDelayMs, setLoopDelayMs] = useState(0);
   const [actionError, setActionError] = useState("");
   const [initializationErrors, setInitializationErrors] = useState<string[]>([]);
   const [recordings, setRecordings] = useState<RecordingFile[]>([]);
@@ -86,8 +99,13 @@ export function App() {
   const hotkeysChangeVersionRef = useRef(0);
   const advancedSettingsChangeVersionRef = useRef(0);
   const mainWindowPreferencesVersionRef = useRef(0);
+  const mainWindowShownRef = useRef(false);
   const hasRecording = state.step_count > 0;
   const isBusy = state.mode === "recording" || state.mode === "playing";
+  const loopDelayEnabled =
+    loopCount === null ||
+    (Number.isInteger(loopCount) && loopCount > 1 && loopCount <= maxLoopCount);
+  const effectiveLoopDelayMs = loopDelayEnabled ? loopDelayMs : 0;
   const validationError = useMemo(() => {
     if (
       loopCount !== null &&
@@ -98,8 +116,14 @@ export function App() {
     if (!Number.isFinite(speedMultiplier) || speedMultiplier <= 0) {
       return speedError;
     }
+    if (
+      loopDelayEnabled &&
+      (!Number.isSafeInteger(loopDelayMs) || loopDelayMs < 0)
+    ) {
+      return loopDelayError;
+    }
     return "";
-  }, [loopCount, speedMultiplier]);
+  }, [loopCount, speedMultiplier, loopDelayEnabled, loopDelayMs]);
 
   useEffect(() => {
     let disposed = false;
@@ -263,6 +287,10 @@ export function App() {
         if (!disposed) {
           addInitializationError(loadError);
         }
+      } finally {
+        if (!disposed) {
+          setMainWindowPreferencesReady(true);
+        }
       }
     }
 
@@ -318,6 +346,18 @@ export function App() {
     };
   }, []);
 
+  useLayoutEffect(() => {
+    if (!mainWindowPreferencesReady || mainWindowShownRef.current) {
+      return;
+    }
+    mainWindowShownRef.current = true;
+    void getCurrentWindow()
+      .show()
+      .catch((showError: unknown) => {
+        setActionError(displayErrorMessage(showError));
+      });
+  }, [mainWindowPreferencesReady]);
+
   useEffect(() => {
     const syncRevision = ++playbackSettingsSyncRef.current;
     if (validationError) {
@@ -327,14 +367,19 @@ export function App() {
       return;
     }
 
-    const requestedSettings = { loopCount, speedMultiplier };
+    const requestedSettings = {
+      loopCount,
+      speedMultiplier,
+      loopDelayMs: effectiveLoopDelayMs
+    };
     setPlaybackSettingsReady(false);
     setPlaybackSettingsPending(true);
     setPlaybackSettingsError("");
     const synchronization = playbackSettingsQueueRef.current.then(() =>
       rememberApi.setPlaybackSettings(
         requestedSettings.loopCount,
-        requestedSettings.speedMultiplier
+        requestedSettings.speedMultiplier,
+        requestedSettings.loopDelayMs
       )
     );
     playbackSettingsQueueRef.current = synchronization.catch(() => undefined);
@@ -353,7 +398,7 @@ export function App() {
           setPlaybackSettingsError(displayErrorMessage(settingsError));
         }
       });
-  }, [loopCount, speedMultiplier, validationError]);
+  }, [loopCount, speedMultiplier, effectiveLoopDelayMs, validationError]);
 
   useEffect(() => {
     if (state.mode === "recording") {
@@ -514,7 +559,8 @@ export function App() {
     void applyState(() =>
       rememberApi.startPlayback(
         appliedPlaybackSettings.loopCount,
-        appliedPlaybackSettings.speedMultiplier
+        appliedPlaybackSettings.speedMultiplier,
+        appliedPlaybackSettings.loopDelayMs
       )
     );
   }
@@ -556,23 +602,33 @@ export function App() {
     if (windowResizePending) {
       return;
     }
+    const previousCompactMode = compactMode;
     const nextCompactMode = !compactMode;
     mainWindowPreferencesVersionRef.current += 1;
-    setCompactMode(nextCompactMode);
+    setActionError("");
     setWindowResizePending(true);
-    void rememberApi
-      .setMainWindowCompactMode(nextCompactMode)
-      .then((preferences) => {
+    setWindowModeTransition(nextCompactMode ? "collapsing" : "expanding");
+    if (!nextCompactMode) {
+      setCompactMode(false);
+    }
+    void (async () => {
+      try {
+        await animateMainWindowSize(previousCompactMode, nextCompactMode);
+        const preferences = await rememberApi.setMainWindowCompactMode(nextCompactMode);
         setCompactMode(preferences.compact);
-        setActionError("");
-      })
-      .catch((resizeError: unknown) => {
-        setCompactMode(!nextCompactMode);
+      } catch (resizeError: unknown) {
+        setCompactMode(previousCompactMode);
+        try {
+          await setMainWindowSize(previousCompactMode);
+        } catch {
+          // Keep the original resize error because it best explains the failed transition.
+        }
         setActionError(displayErrorMessage(resizeError));
-      })
-      .finally(() => {
+      } finally {
+        setWindowModeTransition(null);
         setWindowResizePending(false);
-      });
+      }
+    })();
   }
 
   function handleRefreshRecordings() {
@@ -690,8 +746,16 @@ export function App() {
     ? displayErrorMessage(state.message)
     : displayMessage(state.message);
 
+  const appShellClassName = [
+    "app-shell",
+    compactMode ? "compact-shell" : "",
+    windowModeTransition ? `window-mode-${windowModeTransition}` : ""
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   return (
-    <main className={compactMode ? "app-shell compact-shell" : "app-shell"}>
+    <main className={appShellClassName}>
       <WindowTitlebar
         compact={compactMode}
         resizePending={windowResizePending}
@@ -772,13 +836,16 @@ export function App() {
             <PlaybackSettings
               loopCount={loopCount}
               speedMultiplier={speedMultiplier}
+              loopDelayMs={loopDelayMs}
               appliedLoopCount={appliedPlaybackSettings.loopCount}
               appliedSpeedMultiplier={appliedPlaybackSettings.speedMultiplier}
+              appliedLoopDelayMs={appliedPlaybackSettings.loopDelayMs}
               syncPending={playbackSettingsPending}
               syncReady={playbackSettingsReady}
               playbackHotkey={hotkeys.playback}
               onLoopCountChange={setLoopCount}
               onSpeedMultiplierChange={setSpeedMultiplier}
+              onLoopDelayChange={setLoopDelayMs}
             />
             <StatusPanel state={state} error={displayedError} />
           </div>
@@ -786,6 +853,47 @@ export function App() {
         </div>
       )}
     </main>
+  );
+}
+
+async function animateMainWindowSize(fromCompact: boolean, toCompact: boolean) {
+  const from = fromCompact ? compactWindowSize : expandedWindowSize;
+  const to = toCompact ? compactWindowSize : expandedWindowSize;
+  if (prefersReducedMotion()) {
+    await setMainWindowSize(toCompact);
+    return;
+  }
+
+  const appWindow = getCurrentWindow();
+  let startedAt: number | null = null;
+  let progress = 0;
+  while (progress < 1) {
+    const timestamp = await nextAnimationFrame();
+    startedAt ??= timestamp;
+    progress = Math.min(1, (timestamp - startedAt) / windowResizeDurationMs);
+    const easedProgress = 1 - Math.pow(1 - progress, 3);
+    await appWindow.setSize(
+      new LogicalSize(
+        Math.round(from.width + (to.width - from.width) * easedProgress),
+        Math.round(from.height + (to.height - from.height) * easedProgress)
+      )
+    );
+  }
+}
+
+function setMainWindowSize(compact: boolean) {
+  const size = compact ? compactWindowSize : expandedWindowSize;
+  return getCurrentWindow().setSize(new LogicalSize(size.width, size.height));
+}
+
+function nextAnimationFrame() {
+  return new Promise<number>((resolve) => window.requestAnimationFrame(resolve));
+}
+
+function prefersReducedMotion() {
+  return (
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
   );
 }
 

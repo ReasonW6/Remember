@@ -591,8 +591,15 @@ pub fn start_playback(
     state: State<'_, SharedApp>,
     loop_count: Option<u32>,
     speed_multiplier: f64,
+    loop_delay_ms: u64,
 ) -> Result<UiState, String> {
-    start_playback_shared(app, state.inner().clone(), loop_count, speed_multiplier)
+    start_playback_shared(
+        app,
+        state.inner().clone(),
+        loop_count,
+        speed_multiplier,
+        loop_delay_ms,
+    )
 }
 
 #[tauri::command]
@@ -600,11 +607,12 @@ pub fn set_playback_settings(
     state: State<'_, SharedApp>,
     loop_count: Option<u32>,
     speed_multiplier: f64,
+    loop_delay_ms: u64,
 ) -> Result<(), String> {
     let mut controller = state
         .lock()
         .map_err(|_| "state lock poisoned".to_string())?;
-    controller.set_playback_settings(loop_count, speed_multiplier)
+    controller.set_playback_settings_with_loop_delay(loop_count, speed_multiplier, loop_delay_ms)
 }
 
 pub(crate) fn start_playback_shared(
@@ -612,9 +620,10 @@ pub(crate) fn start_playback_shared(
     state: SharedApp,
     loop_count: Option<u32>,
     speed_multiplier: f64,
+    loop_delay_ms: u64,
 ) -> Result<UiState, String> {
     start_playback_impl(app, state, |controller| {
-        controller.start_playback(loop_count, speed_multiplier)
+        controller.start_playback_with_loop_delay(loop_count, speed_multiplier, loop_delay_ms)
     })
 }
 
@@ -789,7 +798,7 @@ pub(crate) fn report_exit_failure(app: &AppHandle, error: String) {
     };
     let ui_state = match state.lock() {
         Ok(mut controller) => {
-            controller.set_error(format!("Could not close Remember safely: {error}"));
+            controller.set_error(format!("Remember 无法安全关闭：{error}"));
             Some(controller.ui_state())
         }
         Err(_) => None,
@@ -836,9 +845,7 @@ fn prepare_for_administrator_restart(app: &AppHandle) -> Result<Option<PathBuf>,
                     break;
                 }
                 if Instant::now() >= deadline {
-                    return Err(
-                        "playback cleanup did not finish before administrator restart".to_string(),
-                    );
+                    return Err("管理员重启前未能及时完成回放清理。".to_string());
                 }
                 thread::sleep(Duration::from_millis(5));
             }
@@ -919,9 +926,7 @@ pub(crate) fn restore_administrator_restart_recovery_in_background(app: AppHandl
             };
             let ui_state = match state.lock() {
                 Ok(mut controller) => {
-                    controller.set_error(format!(
-                        "Administrator-restart recovery was preserved but could not be restored: {error}"
-                    ));
+                    controller.set_error(format!("管理员重启恢复文件已保留，但无法恢复：{error}"));
                     Some(controller.ui_state())
                 }
                 Err(_) => None,

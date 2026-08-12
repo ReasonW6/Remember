@@ -216,7 +216,7 @@ fn rejects_unsupported_version() {
 
     let error = recording_from_json(json).expect_err("unsupported version must fail");
 
-    assert!(error.to_string().contains("unsupported recording version"));
+    assert!(error.to_string().contains("不支持录制文件版本"));
 }
 
 #[test]
@@ -229,7 +229,7 @@ fn rejects_v1_content_that_would_change_the_legacy_format() {
         recording_to_json(&targets_in_v1).expect_err("v1 targets must not serialize");
     assert!(target_error
         .to_string()
-        .contains("version 1 recordings cannot contain window targets"));
+        .contains("版本 1 录制文件不能包含目标窗口"));
 
     let mut v2_step_in_v1 = sample_recording();
     v2_step_in_v1.steps = vec![MacroStep::PointerMove {
@@ -240,7 +240,7 @@ fn rejects_v1_content_that_would_change_the_legacy_format() {
         recording_to_json(&v2_step_in_v1).expect_err("v2 steps must not serialize as v1");
     assert!(step_error
         .to_string()
-        .contains("version 1 recordings cannot contain version 2 steps"));
+        .contains("版本 1 录制文件不能包含版本 2 步骤"));
 }
 
 #[test]
@@ -256,7 +256,7 @@ fn rejects_v2_legacy_input_steps_without_an_explicit_coordinate_model() {
 
     assert!(error
         .to_string()
-        .contains("version 2 recordings must use explicit version 2 input steps"));
+        .contains("版本 2 录制文件必须使用明确的版本 2 输入步骤"));
 }
 
 #[test]
@@ -265,9 +265,7 @@ fn rejects_duplicate_and_unknown_v2_target_ids() {
     duplicate.targets[1].id = duplicate.targets[0].id;
     let duplicate_error =
         recording_to_json(&duplicate).expect_err("duplicate target IDs must fail");
-    assert!(duplicate_error
-        .to_string()
-        .contains("duplicate target window id 1"));
+    assert!(duplicate_error.to_string().contains("目标窗口 ID 1 重复"));
 
     let mut unknown = sample_window_relative_recording();
     unknown.steps.push(MacroStep::PointerMove {
@@ -282,9 +280,7 @@ fn rejects_duplicate_and_unknown_v2_target_ids() {
     unknown.duration_ms = 125;
     let unknown_error =
         recording_to_json(&unknown).expect_err("unknown target reference must fail");
-    assert!(unknown_error
-        .to_string()
-        .contains("unknown target window id 99"));
+    assert!(unknown_error.to_string().contains("未知的目标窗口 ID 99"));
 }
 
 #[test]
@@ -293,12 +289,12 @@ fn rejects_pointer_button_intents_with_the_wrong_button_edge() {
         (
             WindowPointerIntent::ActivationClick,
             ButtonState::Released,
-            "activation-click intent requires a pressed button",
+            "窗口相对激活点击意图只能用于鼠标按钮按下",
         ),
         (
             WindowPointerIntent::DropRelease,
             ButtonState::Pressed,
-            "drop-release intent requires a released button",
+            "窗口相对拖放释放意图只能用于鼠标按钮松开",
         ),
     ] {
         let mut recording = sample_window_relative_recording();
@@ -361,7 +357,7 @@ fn targeted_keyboard_sequence_rejects_an_initial_release_and_target_changes() {
     let release_error = recording_to_json(&initial_release).expect_err("initial release must fail");
     assert!(release_error
         .to_string()
-        .contains("must start with a pressed key"));
+        .contains("目标键盘序列必须从按键按下开始"));
 
     let mut changed_target = sample_window_relative_recording();
     changed_target.steps = vec![
@@ -373,7 +369,7 @@ fn targeted_keyboard_sequence_rejects_an_initial_release_and_target_changes() {
         recording_to_json(&changed_target).expect_err("held sequence target must stay locked");
     assert!(target_error
         .to_string()
-        .contains("keep the same target until all keys are released"));
+        .contains("所有按键松开前必须保持同一目标窗口"));
 
     let mut changed_from_screen = sample_window_relative_recording();
     changed_from_screen.steps = vec![
@@ -384,7 +380,7 @@ fn targeted_keyboard_sequence_rejects_an_initial_release_and_target_changes() {
     assert!(recording_to_json(&changed_from_screen)
         .expect_err("None is also a locked sequence target")
         .to_string()
-        .contains("keep the same target"));
+        .contains("保持同一目标窗口"));
 }
 
 #[test]
@@ -409,30 +405,24 @@ fn rejects_unusable_v2_target_identity_metadata() {
     let mut missing_path = sample_window_relative_recording();
     missing_path.targets[0].executable_path = "  ".to_string();
     let path_error = recording_to_json(&missing_path).expect_err("empty path must fail");
-    assert!(path_error
-        .to_string()
-        .contains("executable_path cannot be empty"));
+    assert!(path_error.to_string().contains("可执行文件路径不能为空"));
 
     let mut missing_class = sample_window_relative_recording();
     missing_class.targets[0].window_class.clear();
     let class_error = recording_to_json(&missing_class).expect_err("empty class must fail");
-    assert!(class_error
-        .to_string()
-        .contains("window_class cannot be empty"));
+    assert!(class_error.to_string().contains("窗口类名不能为空"));
 
     let mut zero_dpi = sample_window_relative_recording();
     zero_dpi.targets[0].dpi = 0;
     let dpi_error = recording_to_json(&zero_dpi).expect_err("zero DPI must fail");
-    assert!(dpi_error
-        .to_string()
-        .contains("dpi must be greater than zero"));
+    assert!(dpi_error.to_string().contains("DPI 必须大于零"));
 
     let mut zero_width = sample_window_relative_recording();
     zero_width.targets[0].client_size.width = 0;
     let size_error = recording_to_json(&zero_width).expect_err("zero client size must fail");
     assert!(size_error
         .to_string()
-        .contains("client size must be greater than zero"));
+        .contains("客户区宽度和高度必须大于零"));
 }
 
 #[test]
@@ -465,9 +455,7 @@ fn rejects_step_timestamps_that_move_backward() {
 
     let error = recording_to_json(&recording).expect_err("non-monotonic steps must fail");
 
-    assert!(error
-        .to_string()
-        .contains("step timestamps must be monotonic"));
+    assert!(error.to_string().contains("步骤时间戳不得倒退"));
 }
 
 #[test]

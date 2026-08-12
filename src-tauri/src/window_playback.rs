@@ -53,7 +53,11 @@ impl WindowPlaybackExecutor {
         Ok(())
     }
 
-    fn ensure_binding(&self, target: &WindowTarget) -> Result<BindingOutcome, String> {
+    fn ensure_binding(
+        &self,
+        target: &WindowTarget,
+        input_held: bool,
+    ) -> Result<BindingOutcome, String> {
         let mut session = self.session()?;
         if let Some(binding) = session.binding(target.id) {
             if window_target::window_is_alive(binding.handle) {
@@ -74,6 +78,11 @@ impl WindowPlaybackExecutor {
             }
         }
 
+        if input_held {
+            let choice = discover_candidate_choice(target, &session.assigned_handles)?;
+            require_immediate_candidate_while_input_held(target, &choice)?;
+            return bind_candidate_choice(&mut session, target, choice);
+        }
         bind_target_with_wait(&mut session, target, &self.stop_token)
     }
 
@@ -83,14 +92,17 @@ impl WindowPlaybackExecutor {
         relative_x: i32,
         relative_y: i32,
         intent: WindowPointerIntent,
-        _input_held: bool,
+        input_held: bool,
     ) -> Result<(WindowHandle, ScreenPoint, ScreenPoint, u64), String> {
-        let outcome = self.ensure_binding(target)?;
+        let outcome = self.ensure_binding(target, input_held)?;
         let adjustment = self.session()?.pointer_adjustment(target.id);
         let adjustment_active = intent == WindowPointerIntent::WindowAdjustment
             && adjustment.is_some_and(|active| active.handle == outcome.binding.handle);
         let snapshot = prepare_compatible_target(target, &outcome.binding, !adjustment_active)?;
         let restore_needed = !snapshot.visible || snapshot.minimized;
+        if restore_needed {
+            require_no_held_input_for_target_transition(input_held, target, "恢复并激活")?;
+        }
         let restore_started = Instant::now();
         let mut snapshot = restore_if_needed(target, &outcome.binding, snapshot)?;
         let mut pause_ms = outcome.pause_ms;
@@ -104,6 +116,7 @@ impl WindowPlaybackExecutor {
             ForegroundPreparation::None => {}
             ForegroundPreparation::Establish => {
                 if !target_is_foreground(outcome.binding.handle)? {
+                    require_no_held_input_for_target_transition(input_held, target, "切换到前台")?;
                     let foreground_started = Instant::now();
                     snapshot = restore_foreground_target(target, &outcome.binding)?;
                     pause_ms = pause_ms.saturating_add(elapsed_millis(foreground_started));
@@ -141,11 +154,14 @@ impl WindowPlaybackExecutor {
     fn prepare_keyboard_target(
         &self,
         target: &WindowTarget,
-        _input_held: bool,
+        input_held: bool,
     ) -> Result<(WindowHandle, u64), String> {
-        let outcome = self.ensure_binding(target)?;
+        let outcome = self.ensure_binding(target, input_held)?;
         let snapshot = prepare_compatible_target(target, &outcome.binding, true)?;
         let restore_needed = !snapshot.visible || snapshot.minimized;
+        if restore_needed {
+            require_no_held_input_for_target_transition(input_held, target, "恢复并激活")?;
+        }
         let restore_started = Instant::now();
         let _snapshot = restore_if_needed(target, &outcome.binding, snapshot)?;
         let mut pause_ms = outcome.pause_ms;
@@ -159,6 +175,7 @@ impl WindowPlaybackExecutor {
             ForegroundPreparation::None => unreachable!("keyboard input always needs foreground"),
             ForegroundPreparation::Establish => {
                 if !target_is_foreground(outcome.binding.handle)? {
+                    require_no_held_input_for_target_transition(input_held, target, "切换到前台")?;
                     let foreground_started = Instant::now();
                     let _snapshot = restore_foreground_target(target, &outcome.binding)?;
                     pause_ms = pause_ms.saturating_add(elapsed_millis(foreground_started));
@@ -172,6 +189,35 @@ impl WindowPlaybackExecutor {
         }
         ensure_playback_running(&self.stop_token)?;
         Ok((outcome.binding.handle, pause_ms))
+    }
+}
+
+fn require_no_held_input_for_target_transition(
+    input_held: bool,
+    target: &WindowTarget,
+    transition: &str,
+) -> Result<(), String> {
+    if input_held {
+        Err(format!(
+            "仍有按键或鼠标按钮处于按下状态，不能为目标窗口 {} 执行{transition}；已停止回放以避免输入被卡住。",
+            target.id.0
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn require_immediate_candidate_while_input_held(
+    target: &WindowTarget,
+    choice: &CandidateChoice,
+) -> Result<(), String> {
+    if matches!(choice, CandidateChoice::Unique(_)) {
+        Ok(())
+    } else {
+        Err(format!(
+            "仍有按键或鼠标按钮处于按下状态，不能等待目标窗口 {} 出现或变为可用；已停止回放以避免输入被卡住。",
+            target.id.0
+        ))
     }
 }
 
@@ -398,6 +444,7 @@ impl PlaybackSession {
     fn begin_loop(&mut self) {
         self.remove_expired_lifetimes();
         self.foreground_established = false;
+        self.pointer_adjustment = None;
     }
 
     fn remove_expired_lifetimes(&mut self) {
@@ -1084,6 +1131,53 @@ mod tests {
             ensure_playback_running(&stop_token),
             Err("playback stopped".to_string())
         );
+    }
+
+    #[test]
+    fn held_input_blocks_restore_and_focus_transitions_immediately() {
+        let target = target(7);
+
+        for transition in ["恢复并激活", "切换到前台"] {
+            let error = require_no_held_input_for_target_transition(true, &target, transition)
+                .expect_err("held input must reject a target transition");
+            assert!(error.contains("仍有按键或鼠标按钮处于按下状态"));
+            assert!(error.contains(transition));
+        }
+        assert_eq!(
+            require_no_held_input_for_target_transition(false, &target, "恢复并激活"),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn held_input_allows_only_an_already_available_binding_candidate() {
+        let target = target(7);
+        assert_eq!(
+            require_immediate_candidate_while_input_held(
+                &target,
+                &CandidateChoice::Unique(snapshot(10))
+            ),
+            Ok(())
+        );
+        let error =
+            require_immediate_candidate_while_input_held(&target, &CandidateChoice::Missing)
+                .expect_err("held input must not wait for a missing target");
+        assert!(error.contains("不能等待目标窗口 7"));
+    }
+
+    #[test]
+    fn each_loop_discards_an_incomplete_window_adjustment() {
+        let mut session = PlaybackSession::default();
+        session.begin_pointer_adjustment(
+            TargetWindowId(7),
+            WindowHandle::from_raw(10),
+            ScreenPoint { x: 100, y: 200 },
+        );
+        assert!(session.pointer_adjustment(TargetWindowId(7)).is_some());
+
+        session.begin_loop();
+
+        assert!(session.pointer_adjustment(TargetWindowId(7)).is_none());
     }
 
     #[test]

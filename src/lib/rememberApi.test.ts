@@ -141,27 +141,30 @@ describe("rememberApi", () => {
   it("saves playback settings for hotkey playback", async () => {
     tauriMocks.invoke.mockResolvedValue(undefined);
 
-    await expect(setPlaybackSettings(3, 2)).resolves.toBeUndefined();
+    await expect(setPlaybackSettings(3, 2, 250)).resolves.toBeUndefined();
 
     expect(tauriMocks.invoke).toHaveBeenCalledWith("set_playback_settings", {
       loopCount: 3,
-      speedMultiplier: 2
+      speedMultiplier: 2,
+      loopDelayMs: 250
     });
   });
 
   it("uses null loop counts for infinite playback", async () => {
     tauriMocks.invoke.mockResolvedValue(undefined);
 
-    await expect(setPlaybackSettings(null, 2)).resolves.toBeUndefined();
-    await expect(startPlayback(null, 2)).resolves.toBeUndefined();
+    await expect(setPlaybackSettings(null, 2, 500)).resolves.toBeUndefined();
+    await expect(startPlayback(null, 2, 500)).resolves.toBeUndefined();
 
     expect(tauriMocks.invoke).toHaveBeenNthCalledWith(1, "set_playback_settings", {
       loopCount: null,
-      speedMultiplier: 2
+      speedMultiplier: 2,
+      loopDelayMs: 500
     });
     expect(tauriMocks.invoke).toHaveBeenNthCalledWith(2, "start_playback", {
       loopCount: null,
-      speedMultiplier: 2
+      speedMultiplier: 2,
+      loopDelayMs: 500
     });
   });
 

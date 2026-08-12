@@ -311,6 +311,7 @@ fn main_window_capability_uses_only_required_events_windows_and_dialogs() {
         "core:window:allow-unminimize",
         "core:window:allow-set-focus",
         "core:window:allow-set-size",
+        "core:window:allow-show",
         "core:window:allow-close",
         "dialog:allow-open",
         "dialog:allow-save",
@@ -319,5 +320,5 @@ fn main_window_capability_uses_only_required_events_windows_and_dialogs() {
     ] {
         assert!(has(required), "missing {required}");
     }
-    assert_eq!(permissions.len(), 12);
+    assert_eq!(permissions.len(), 13);
 }

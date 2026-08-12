@@ -368,6 +368,14 @@ mod capture {
         let lifetimes = window_lifetimes()
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        event_window_context_with_lifetimes(pointed_root_hwnd, foreground_root_hwnd, &lifetimes)
+    }
+
+    fn event_window_context_with_lifetimes(
+        pointed_root_hwnd: Option<usize>,
+        foreground_root_hwnd: Option<usize>,
+        lifetimes: &WindowLifetimeRegistry,
+    ) -> EventWindowContext {
         let capture = |root_hwnd| EventWindow {
             root_hwnd,
             lifetime_token: lifetimes.token(root_hwnd),
@@ -380,8 +388,9 @@ mod capture {
 
     fn ensure_event_window_lifetime(
         window: EventWindow,
+        lifetimes: &WindowLifetimeRegistry,
     ) -> Result<(), window_target::WindowTargetError> {
-        if event_window_lifetime_matches(window, window_lifetime_token(window.root_hwnd)) {
+        if event_window_lifetime_matches(window, lifetimes.token(window.root_hwnd)) {
             Ok(())
         } else {
             Err(window_target::WindowTargetError::WindowLifetimeChanged {
@@ -399,12 +408,13 @@ mod capture {
 
     fn ensure_event_context_lifetimes(
         context: EventWindowContext,
+        lifetimes: &WindowLifetimeRegistry,
     ) -> Result<(), window_target::WindowTargetError> {
         if let Some(pointed) = context.pointed_root {
-            ensure_event_window_lifetime(pointed)?;
+            ensure_event_window_lifetime(pointed, lifetimes)?;
         }
         if let Some(foreground) = context.foreground_root {
-            ensure_event_window_lifetime(foreground)?;
+            ensure_event_window_lifetime(foreground, lifetimes)?;
         }
         Ok(())
     }
@@ -638,6 +648,7 @@ mod capture {
         const BATCH_SIZE: usize = 256;
         let mut messages = Vec::with_capacity(BATCH_SIZE);
         let mut window_generations = WindowGenerationTracker::default();
+        let mut ordered_window_lifetimes = WindowLifetimeRegistry::default();
         let mut pointer_snapshots = PointerSnapshotCache::default();
         let mut tracking_window_relative_recording = false;
 
@@ -674,6 +685,7 @@ mod capture {
                         let mut surface = resolve_capture_surface(
                             queued,
                             &mut window_generations,
+                            &ordered_window_lifetimes,
                             &mut pointer_snapshots,
                         );
                         if controller.is_none() {
@@ -719,6 +731,7 @@ mod capture {
                         }
                     }
                     CaptureWorkerMessage::WindowLifecycle(event) => {
+                        ordered_window_lifetimes.apply_lifecycle(event);
                         if controller.is_none() {
                             controller = shared.lock().ok();
                         }
@@ -873,8 +886,9 @@ mod capture {
             key: PointerSnapshotKey,
             at_ms: u64,
             force_full_identity: bool,
+            lifetimes: &WindowLifetimeRegistry,
         ) -> Result<Option<WindowSnapshot>, window_target::WindowTargetError> {
-            ensure_event_context_lifetimes(window_context)?;
+            ensure_event_context_lifetimes(window_context, lifetimes)?;
             let refresh = pointer_snapshot_refresh(
                 self.cached.as_ref().map(|cached| cached.key),
                 key,
@@ -888,7 +902,7 @@ mod capture {
             match refresh {
                 PointerSnapshotRefresh::FullIdentity => {
                     let result = window_target::snapshot_pointed_window(key.normalized_handle);
-                    if let Err(error) = ensure_event_context_lifetimes(window_context) {
+                    if let Err(error) = ensure_event_context_lifetimes(window_context, lifetimes) {
                         self.clear();
                         return Err(error);
                     }
@@ -919,7 +933,7 @@ mod capture {
                         .snapshot
                         .handle;
                     let result = window_target::refresh_window_geometry(handle);
-                    if let Err(error) = ensure_event_context_lifetimes(window_context) {
+                    if let Err(error) = ensure_event_context_lifetimes(window_context, lifetimes) {
                         self.clear();
                         return Err(error);
                     }
@@ -1059,6 +1073,7 @@ mod capture {
     fn resolve_capture_surface(
         queued: QueuedInputEvent,
         generations: &mut WindowGenerationTracker,
+        lifetimes: &WindowLifetimeRegistry,
         pointer_snapshots: &mut PointerSnapshotCache,
     ) -> CaptureSurface {
         let event = queued.event;
@@ -1067,23 +1082,33 @@ mod capture {
             | RawInputEvent::MouseButton { x, y, .. }
             | RawInputEvent::MouseWheel { x, y, .. } => {
                 let window_context = queued.window_context.unwrap_or_else(|| {
-                    event_window_context(root_window_from_point(x, y), foreground_root_window())
+                    event_window_context_with_lifetimes(
+                        root_window_from_point(x, y),
+                        foreground_root_window(),
+                        lifetimes,
+                    )
                 });
-                resolve_pointer_surface(event, window_context, generations, pointer_snapshots)
+                resolve_pointer_surface(
+                    event,
+                    window_context,
+                    generations,
+                    lifetimes,
+                    pointer_snapshots,
+                )
             }
             RawInputEvent::Key { .. } => {
                 let foreground_root =
-                    event_foreground_root(queued.window_context, foreground_root_window);
+                    event_foreground_root(queued.window_context, foreground_root_window, lifetimes);
                 let Some(foreground_root) = foreground_root else {
                     return CaptureSurface::Screen;
                 };
-                if let Err(error) = ensure_event_window_lifetime(foreground_root) {
+                if let Err(error) = ensure_event_window_lifetime(foreground_root, lifetimes) {
                     return unreadable_surface(error);
                 }
                 let result = window_target::snapshot_foreground_window(WindowHandle::from_raw(
                     foreground_root.root_hwnd,
                 ));
-                if let Err(error) = ensure_event_window_lifetime(foreground_root) {
+                if let Err(error) = ensure_event_window_lifetime(foreground_root, lifetimes) {
                     return unreadable_surface(error);
                 }
                 match result {
@@ -1101,10 +1126,14 @@ mod capture {
     fn event_foreground_root(
         window_context: Option<EventWindowContext>,
         query_current: impl FnOnce() -> Option<usize>,
+        lifetimes: &WindowLifetimeRegistry,
     ) -> Option<EventWindow> {
         match window_context {
             Some(context) => context.foreground_root,
-            None => event_window_context(None, query_current()).foreground_root,
+            None => {
+                event_window_context_with_lifetimes(None, query_current(), lifetimes)
+                    .foreground_root
+            }
         }
     }
 
@@ -1116,11 +1145,12 @@ mod capture {
 
     fn normalize_event_window_context(
         context: EventWindowContext,
+        lifetimes: &WindowLifetimeRegistry,
     ) -> Result<NormalizedWindowContext, window_target::WindowTargetError> {
-        ensure_event_context_lifetimes(context)?;
+        ensure_event_context_lifetimes(context, lifetimes)?;
         let normalized =
             normalize_event_window_handles(context, window_target::normalize_window_handle)?;
-        ensure_event_context_lifetimes(context)?;
+        ensure_event_context_lifetimes(context, lifetimes)?;
         Ok(normalized)
     }
 
@@ -1191,9 +1221,10 @@ mod capture {
         event: RawInputEvent,
         window_context: EventWindowContext,
         generations: &mut WindowGenerationTracker,
+        lifetimes: &WindowLifetimeRegistry,
         pointer_snapshots: &mut PointerSnapshotCache,
     ) -> CaptureSurface {
-        let normalized_context = match normalize_event_window_context(window_context) {
+        let normalized_context = match normalize_event_window_context(window_context, lifetimes) {
             Ok(context) => context,
             Err(error) => return unreadable_surface(error),
         };
@@ -1220,6 +1251,7 @@ mod capture {
             },
             raw_event_at_ms(event),
             force_full_identity,
+            lifetimes,
         ) {
             Ok(Some(window)) => window,
             Ok(None) => return CaptureSurface::Screen,
@@ -1889,6 +1921,28 @@ mod capture {
         }
 
         #[test]
+        fn queued_input_is_validated_before_a_later_window_destroy() {
+            let mut ordered_lifetimes = WindowLifetimeRegistry::default();
+            ordered_lifetimes.seed(&HashSet::from([10]));
+            let captured = event_window(10);
+
+            assert_eq!(
+                ensure_event_window_lifetime(captured, &ordered_lifetimes),
+                Ok(()),
+                "an input message ahead of destroy in the queue must remain valid"
+            );
+
+            ordered_lifetimes.apply_lifecycle(WindowLifecycleEvent {
+                hwnd: 10,
+                kind: WindowLifecycleKind::Destroyed,
+            });
+            assert!(matches!(
+                ensure_event_window_lifetime(captured, &ordered_lifetimes),
+                Err(window_target::WindowTargetError::WindowLifetimeChanged { .. })
+            ));
+        }
+
+        #[test]
         fn pointer_snapshot_cache_key_includes_event_time_lifetime() {
             let original = PointerSnapshotKey {
                 event_window: EventWindow {
@@ -2128,12 +2182,14 @@ mod capture {
 
         #[test]
         fn keyboard_target_uses_hook_time_foreground_without_a_later_query() {
+            let lifetimes = WindowLifetimeRegistry::default();
             let root = event_foreground_root(
                 Some(EventWindowContext {
                     pointed_root: None,
                     foreground_root: Some(event_window(10)),
                 }),
                 || panic!("worker must not query foreground after the key event"),
+                &lifetimes,
             );
 
             assert_eq!(root, Some(event_window(10)));

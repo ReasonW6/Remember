@@ -11,13 +11,14 @@ Remember is an original implementation. It does not copy TinyTask code, icons, n
 - Record keyboard and mouse actions.
 - Record in V1 screen coordinates by default for legacy behavior, or enable Window-relative recording before capture to create a V2 file that follows whole-window movement across multiple windows.
 - Replay the current recording or choose a saved recording from the in-app list.
-- Configure finite or infinite playback loops and playback speed.
+- Configure finite or infinite playback loops, playback speed, and an inter-loop delay.
 - Customize hotkeys. Unmodified single-key shortcuts are limited to `F1`–`F24`; character, editing, and navigation keys require `Ctrl`, `Alt`, `Shift`, or `Win`.
 - Remember the main window's compact or expanded interface and desktop position. Ordinary launch and “Restart as administrator” restore the same state; if the original monitor is gone, the window returns to a visible display.
 - Use the same hotkey for recording and stopping. The default record/stop toggle is `F8`; during playback, both the play and stop hotkeys can stop the run.
 - Play feedback tones when recording or playback starts and stops.
 - Starting a recording from the main window does not minimize it automatically. Keyboard and mouse input inside Remember's own windows is filtered out of recordings.
-- Start in a compact floating window on first use, with only recording selection, record, and play controls; use the titlebar button to switch to the full interface, and later launches restore the last choice.
+- Start in a compact floating window on first use, with only recording selection, record, and play controls; use the titlebar button for a smooth transition to the full interface, and later launches restore the last choice. The transition is skipped when the system requests reduced motion.
+- Save Advanced Settings with “Save and exit.” Closing the window directly discards unsaved edits, and the next open reloads persisted settings.
 - Closing the main window safely stops any active recording or playback, then exits completely without staying in the background.
 - Use a custom titlebar and localized Chinese interface.
 
@@ -62,6 +63,7 @@ Recording files are unencrypted JSON. They contain virtual key codes, scan codes
 ## Playback Safety
 
 - Loop count can be a finite integer of at least 1 or an explicitly selected infinite loop.
+- Inter-loop delay is available only when the loop count is greater than 1 or infinite. It runs only between iterations, never after the final iteration, and can be interrupted with the play or stop hotkey.
 - Infinite playback does not end by itself and must be stopped with the play or stop hotkey.
 - V1 does not validate target-window identity and sends real input at absolute screen coordinates. V2 matches windows and checks client-area size and DPI, but this is not control-level safety validation: pop-ups, changed window content, or another program taking focus can still redirect real input.
 - A non-elevated Remember process cannot reliably inspect or control an elevated window. After an explicit access-denied warning, the user may choose to restart as administrator; Remember does not automatically bypass the Windows privilege boundary.

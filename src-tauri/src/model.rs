@@ -226,33 +226,33 @@ impl Recording {
         match self.version {
             RECORDING_VERSION_V1 => self.validate_v1_contents()?,
             RECORDING_VERSION_V2 => self.validate_v2_contents()?,
-            version => return Err(format!("unsupported recording version {version}")),
+            version => return Err(format!("不支持录制文件版本 {version}。")),
         }
         if self.name.trim().is_empty() {
-            return Err("recording name cannot be empty".to_string());
+            return Err("录制名称不能为空。".to_string());
         }
         if self.created_at.trim().is_empty() {
-            return Err("created_at cannot be empty".to_string());
+            return Err("录制创建时间不能为空。".to_string());
         }
         if self
             .steps
             .windows(2)
             .any(|pair| pair[1].elapsed_ms() < pair[0].elapsed_ms())
         {
-            return Err("step timestamps must be monotonic".to_string());
+            return Err("步骤时间戳不得倒退。".to_string());
         }
         if self.duration_ms < self.steps.last().map(MacroStep::elapsed_ms).unwrap_or(0) {
-            return Err("duration_ms cannot be shorter than the final step".to_string());
+            return Err("录制总时长不能短于最后一个步骤的时间。".to_string());
         }
         Ok(())
     }
 
     fn validate_v1_contents(&self) -> Result<(), String> {
         if !self.targets.is_empty() {
-            return Err("version 1 recordings cannot contain window targets".to_string());
+            return Err("版本 1 录制文件不能包含目标窗口。".to_string());
         }
         if self.steps.iter().any(MacroStep::is_v2_only) {
-            return Err("version 1 recordings cannot contain version 2 steps".to_string());
+            return Err("版本 1 录制文件不能包含版本 2 步骤。".to_string());
         }
         Ok(())
     }
@@ -261,29 +261,23 @@ impl Recording {
         let mut target_ids = HashSet::with_capacity(self.targets.len());
         for target in &self.targets {
             if !target_ids.insert(target.id) {
-                return Err(format!("duplicate target window id {}", target.id.0));
+                return Err(format!("目标窗口 ID {} 重复。", target.id.0));
             }
             if target.executable_path.trim().is_empty() {
                 return Err(format!(
-                    "target window {} executable_path cannot be empty",
+                    "目标窗口 {} 的可执行文件路径不能为空。",
                     target.id.0
                 ));
             }
             if target.window_class.trim().is_empty() {
-                return Err(format!(
-                    "target window {} window_class cannot be empty",
-                    target.id.0
-                ));
+                return Err(format!("目标窗口 {} 的窗口类名不能为空。", target.id.0));
             }
             if target.dpi == 0 {
-                return Err(format!(
-                    "target window {} dpi must be greater than zero",
-                    target.id.0
-                ));
+                return Err(format!("目标窗口 {} 的 DPI 必须大于零。", target.id.0));
             }
             if target.client_size.width == 0 || target.client_size.height == 0 {
                 return Err(format!(
-                    "target window {} client size must be greater than zero",
+                    "目标窗口 {} 的客户区宽度和高度必须大于零。",
                     target.id.0
                 ));
             }
@@ -297,9 +291,7 @@ impl Recording {
                 | MacroStep::MouseButton { .. }
                 | MacroStep::MouseWheel { .. }
                 | MacroStep::Key { .. } => {
-                    return Err(
-                        "version 2 recordings must use explicit version 2 input steps".to_string(),
-                    );
+                    return Err("版本 2 录制文件必须使用明确的版本 2 输入步骤。".to_string());
                 }
                 MacroStep::PointerMove { position, .. }
                 | MacroStep::PointerButton { position, .. }
@@ -345,10 +337,7 @@ fn validate_pointer_intent(step: &MacroStep) -> Result<(), String> {
                 intent,
                 WindowPointerIntent::Foreground | WindowPointerIntent::WindowAdjustment
             ) {
-                return Err(
-                    "window-relative pointer movement must use foreground or window-adjustment intent"
-                        .to_string(),
-                );
+                return Err("窗口相对鼠标移动必须使用前台或窗口调整意图。".to_string());
             }
             Ok(())
         }
@@ -361,13 +350,13 @@ fn validate_pointer_intent(step: &MacroStep) -> Result<(), String> {
             (WindowPointerIntent::ActivationClick, ButtonState::Pressed) => Ok(()),
             (WindowPointerIntent::DropRelease, ButtonState::Released) => Ok(()),
             (WindowPointerIntent::ActivationClick, ButtonState::Released) => {
-                Err("window-relative activation-click intent requires a pressed button".to_string())
+                Err("窗口相对激活点击意图只能用于鼠标按钮按下。".to_string())
             }
             (WindowPointerIntent::DropRelease, ButtonState::Pressed) => {
-                Err("window-relative drop-release intent requires a released button".to_string())
+                Err("窗口相对拖放释放意图只能用于鼠标按钮松开。".to_string())
             }
             (WindowPointerIntent::BackgroundWheel, _) => {
-                Err("window-relative pointer button cannot use background-wheel intent".to_string())
+                Err("窗口相对鼠标按钮不能使用后台滚轮意图。".to_string())
             }
         },
         MacroStep::PointerWheel {
@@ -380,10 +369,7 @@ fn validate_pointer_intent(step: &MacroStep) -> Result<(), String> {
             ) {
                 return Ok(());
             }
-            Err(
-                "window-relative pointer wheel must use foreground or background-wheel intent"
-                    .to_string(),
-            )
+            Err("窗口相对鼠标滚轮必须使用前台或后台滚轮意图。".to_string())
         }
         _ => Ok(()),
     }
@@ -398,14 +384,11 @@ fn validate_targeted_key_sequence(
 ) -> Result<(), String> {
     if pressed_keys.is_empty() {
         if state == KeyState::Released {
-            return Err("targeted keyboard sequence must start with a pressed key".to_string());
+            return Err("目标键盘序列必须从按键按下开始。".to_string());
         }
         *sequence_target = Some(target_id);
     } else if *sequence_target != Some(target_id) {
-        return Err(
-            "targeted keyboard sequence must keep the same target until all keys are released"
-                .to_string(),
-        );
+        return Err("目标键盘序列在所有按键松开前必须保持同一目标窗口。".to_string());
     }
 
     match state {
@@ -443,9 +426,6 @@ fn validate_target_reference(
     if target_ids.contains(&target_id) {
         Ok(())
     } else {
-        Err(format!(
-            "step references unknown target window id {}",
-            target_id.0
-        ))
+        Err(format!("步骤引用了未知的目标窗口 ID {}。", target_id.0))
     }
 }
