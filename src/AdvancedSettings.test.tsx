@@ -27,7 +27,8 @@ vi.mock("@tauri-apps/api/window", () => ({
 const settings = {
   feedback_volume_percent: 50,
   feedback_muted: false,
-  show_activity_indicator: true
+  show_activity_indicator: true,
+  window_relative_recording_enabled: false
 };
 
 const hotkeys = {
@@ -43,7 +44,11 @@ async function waitForSettingsLoaded() {
 describe("AdvancedSettings", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    apiMocks.getSettingsBundle.mockResolvedValue({ advanced: settings, hotkeys });
+    apiMocks.getSettingsBundle.mockResolvedValue({
+      advanced: settings,
+      hotkeys,
+      main_window: { compact: true, position: null }
+    });
     apiMocks.setSettingsBundle.mockImplementation(async (bundle) => bundle);
     windowMocks.startDragging.mockResolvedValue(undefined);
     windowMocks.minimize.mockResolvedValue(undefined);
@@ -146,9 +151,11 @@ describe("AdvancedSettings", () => {
         advanced: {
           feedback_volume_percent: 75,
           feedback_muted: true,
-          show_activity_indicator: false
+          show_activity_indicator: false,
+          window_relative_recording_enabled: false
         },
-        hotkeys: nextHotkeys
+        hotkeys: nextHotkeys,
+        main_window: { compact: true, position: null }
       })
     );
     expect(await screen.findByText("已保存")).toBeInTheDocument();
@@ -220,7 +227,8 @@ describe("AdvancedSettings", () => {
         ...settings,
         feedback_volume_percent: 75
       },
-      hotkeys
+      hotkeys,
+      main_window: { compact: true, position: null }
     });
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "这个快捷键已被其他程序占用，请换一个键。"

@@ -5,18 +5,28 @@ import { WindowTitlebar } from "./components/WindowTitlebar";
 import * as rememberApi from "./lib/rememberApi";
 import { playFeedbackTone } from "./lib/sounds";
 import { displayErrorMessage } from "./localization";
-import type { AdvancedSettingsConfig, HotkeyConfig } from "./types";
+import type {
+  AdvancedSettingsConfig,
+  HotkeyConfig,
+  MainWindowPreferences
+} from "./types";
 
 const defaultSettings: AdvancedSettingsConfig = {
   feedback_volume_percent: 50,
   feedback_muted: false,
-  show_activity_indicator: true
+  show_activity_indicator: true,
+  window_relative_recording_enabled: false
 };
 
 const defaultHotkeys: HotkeyConfig = {
   record: "F8",
   playback: "F12",
   stop: "F8"
+};
+
+const defaultMainWindowPreferences: MainWindowPreferences = {
+  compact: true,
+  position: null
 };
 
 const volumeAdjustmentKeys = new Set([
@@ -38,6 +48,7 @@ export function AdvancedSettings() {
   const [error, setError] = useState("");
   const [showSavedNotice, setShowSavedNotice] = useState(false);
   const savedNoticeTimerRef = useRef<number | undefined>();
+  const mainWindowPreferencesRef = useRef(defaultMainWindowPreferences);
 
   useEffect(() => {
     let disposed = false;
@@ -47,6 +58,7 @@ export function AdvancedSettings() {
         if (!disposed) {
           setSettings(bundle.advanced);
           setHotkeys(bundle.hotkeys);
+          mainWindowPreferencesRef.current = bundle.main_window;
           setLoaded(true);
         }
       })
@@ -98,10 +110,12 @@ export function AdvancedSettings() {
     try {
       const savedBundle = await rememberApi.setSettingsBundle({
         advanced: settings,
-        hotkeys
+        hotkeys,
+        main_window: mainWindowPreferencesRef.current
       });
       setSettings(savedBundle.advanced);
       setHotkeys(savedBundle.hotkeys);
+      mainWindowPreferencesRef.current = savedBundle.main_window;
       showSavedToast();
     } catch (saveError) {
       setError(displayErrorMessage(saveError));

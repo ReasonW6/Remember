@@ -1,4 +1,7 @@
-use crate::model::{ButtonState, KeyState, MacroStep, MouseButton, Recording};
+use crate::model::{
+    ButtonState, KeyState, MacroStep, MouseButton, PointerPosition, Recording, TargetWindowId,
+    WindowPointerIntent, WindowTarget,
+};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Condvar, Mutex,
@@ -16,10 +19,10 @@ pub struct PlaybackSettings {
 impl PlaybackSettings {
     pub fn new(loop_count: Option<u32>, speed_multiplier: f64) -> Result<Self, String> {
         if loop_count == Some(0) {
-            return Err("loop count must be at least 1".to_string());
+            return Err("循环次数必须至少为 1。".to_string());
         }
         if !speed_multiplier.is_finite() || speed_multiplier <= 0.0 {
-            return Err("speed multiplier must be positive".to_string());
+            return Err("回放速度必须为正数。".to_string());
         }
         Ok(Self {
             loop_count,
@@ -37,6 +40,14 @@ pub struct PlaybackAction {
 }
 
 pub trait StepExecutor {
+    fn prepare_window_relative_playback(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn begin_window_relative_loop(&self, _targets: &[WindowTarget]) -> Result<(), String> {
+        Ok(())
+    }
+
     fn mouse_move(&self, x: i32, y: i32) -> Result<(), String>;
 
     fn mouse_button(
@@ -56,6 +67,57 @@ pub trait StepExecutor {
         extended: bool,
         state: KeyState,
     ) -> Result<(), String>;
+
+    fn window_mouse_move(
+        &self,
+        _target: &WindowTarget,
+        _x: i32,
+        _y: i32,
+        _intent: WindowPointerIntent,
+        _input_held: bool,
+    ) -> Result<u64, String> {
+        Err("当前输入执行器不支持窗口相对回放。".to_string())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn window_mouse_button(
+        &self,
+        _target: &WindowTarget,
+        _x: i32,
+        _y: i32,
+        _intent: WindowPointerIntent,
+        _button: MouseButton,
+        _state: ButtonState,
+        _input_held: bool,
+    ) -> Result<u64, String> {
+        Err("当前输入执行器不支持窗口相对回放。".to_string())
+    }
+
+    fn window_mouse_wheel(
+        &self,
+        _target: &WindowTarget,
+        _x: i32,
+        _y: i32,
+        _intent: WindowPointerIntent,
+        _delta: i32,
+        _input_held: bool,
+    ) -> Result<u64, String> {
+        Err("当前输入执行器不支持窗口相对回放。".to_string())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn targeted_key(
+        &self,
+        _target: &WindowTarget,
+        _vk_code: u16,
+        _scan_code: u16,
+        _extended: bool,
+        _state: KeyState,
+        _sequence_start: bool,
+        _input_held: bool,
+    ) -> Result<u64, String> {
+        Err("当前输入执行器不支持窗口相对回放。".to_string())
+    }
 
     fn release_mouse_button(&self, button: MouseButton) -> Result<(), String>;
 }
@@ -139,6 +201,10 @@ pub fn play_recording<E: StepExecutor + ?Sized>(
 ) -> Result<(), String> {
     recording.validate()?;
 
+    if recording.is_window_relative() {
+        executor.prepare_window_relative_playback()?;
+    }
+
     if recording.steps.is_empty() && recording.duration_ms == 0 {
         return match settings.loop_count {
             Some(_) => Ok(()),
@@ -162,15 +228,26 @@ pub fn play_recording<E: StepExecutor + ?Sized>(
             return Err("playback stopped".to_string());
         }
 
+        if recording.is_window_relative() {
+            executor.begin_window_relative_loop(&recording.targets)?;
+        }
+
         let mut pressed_inputs = PressedInputs::default();
         let loop_started = Instant::now();
+        let mut timeline_pause_ms = 0_u64;
         for step in &recording.steps {
-            let target_ms = scaled_delay_ms(step.elapsed_ms(), settings.speed_multiplier);
+            let target_ms = scaled_delay_ms(step.elapsed_ms(), settings.speed_multiplier)
+                .saturating_add(timeline_pause_ms);
             if let Err(error) = sleep_until(loop_started, target_ms, stop_token) {
                 return cleanup_and_return(&mut pressed_inputs, executor, error);
             }
-            if let Err(error) = execute_step(step, executor, &mut pressed_inputs) {
-                return cleanup_and_return(&mut pressed_inputs, executor, error);
+            match execute_step(step, &recording.targets, executor, &mut pressed_inputs) {
+                Ok(pause_ms) => {
+                    timeline_pause_ms = timeline_pause_ms.saturating_add(pause_ms);
+                }
+                Err(error) => {
+                    return cleanup_and_return(&mut pressed_inputs, executor, error);
+                }
             }
         }
 
@@ -184,14 +261,13 @@ pub fn play_recording<E: StepExecutor + ?Sized>(
             minimum_repeat_ms
         } else {
             duration_ms
-        };
+        }
+        .saturating_add(timeline_pause_ms);
         if let Err(error) = sleep_until(loop_started, loop_duration_ms, stop_token) {
             return cleanup_and_return(&mut pressed_inputs, executor, error);
         }
         if let Err(error) = pressed_inputs.release_all(executor) {
-            return Err(format!(
-                "input cleanup failed at playback loop boundary: {error}"
-            ));
+            return Err(format!("回放循环结束时释放残留输入失败：{error}"));
         }
         completed_loops = next_completed_loops;
     }
@@ -225,7 +301,7 @@ pub fn play_actions<E: StepExecutor + ?Sized>(
             );
         }
 
-        if let Err(err) = execute_step(&action.step, executor, &mut pressed_inputs) {
+        if let Err(err) = execute_step(&action.step, &[], executor, &mut pressed_inputs) {
             return cleanup_and_return(&mut pressed_inputs, executor, err);
         }
     }
@@ -276,11 +352,15 @@ fn sleep_until(started: Instant, target_ms: u64, stop_token: &StopToken) -> Resu
 
 fn execute_step<E: StepExecutor + ?Sized>(
     step: &MacroStep,
+    targets: &[WindowTarget],
     executor: &E,
     pressed_inputs: &mut PressedInputs,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     match step {
-        MacroStep::MouseMove { x, y, .. } => executor.mouse_move(*x, *y),
+        MacroStep::MouseMove { x, y, .. } => {
+            executor.mouse_move(*x, *y)?;
+            Ok(0)
+        }
         MacroStep::MouseButton {
             x,
             y,
@@ -293,9 +373,12 @@ fn execute_step<E: StepExecutor + ?Sized>(
                 ButtonState::Pressed => pressed_inputs.add_mouse_button(*button, *x, *y),
                 ButtonState::Released => pressed_inputs.remove_mouse_button(*button),
             }
-            Ok(())
+            Ok(0)
         }
-        MacroStep::MouseWheel { x, y, delta, .. } => executor.mouse_wheel(*x, *y, *delta),
+        MacroStep::MouseWheel { x, y, delta, .. } => {
+            executor.mouse_wheel(*x, *y, *delta)?;
+            Ok(0)
+        }
         MacroStep::Key {
             vk_code,
             scan_code,
@@ -308,10 +391,124 @@ fn execute_step<E: StepExecutor + ?Sized>(
                 KeyState::Pressed => pressed_inputs.add_key(*vk_code, *scan_code, *extended),
                 KeyState::Released => pressed_inputs.remove_key(*vk_code, *scan_code, *extended),
             }
-            Ok(())
+            Ok(0)
         }
-        MacroStep::Wait { .. } => Ok(()),
+        MacroStep::PointerMove { position, .. } => match *position {
+            PointerPosition::ScreenRelative { x, y } => {
+                executor.mouse_move(x, y)?;
+                Ok(0)
+            }
+            PointerPosition::WindowRelative {
+                target_id,
+                x,
+                y,
+                intent,
+            } => executor.window_mouse_move(
+                find_target(targets, target_id)?,
+                x,
+                y,
+                intent,
+                pressed_inputs.any_held(),
+            ),
+        },
+        MacroStep::PointerButton {
+            position,
+            button,
+            state,
+            ..
+        } => {
+            let pause_ms = match *position {
+                PointerPosition::ScreenRelative { x, y } => {
+                    executor.mouse_button(x, y, *button, *state)?;
+                    0
+                }
+                PointerPosition::WindowRelative {
+                    target_id,
+                    x,
+                    y,
+                    intent,
+                } => executor.window_mouse_button(
+                    find_target(targets, target_id)?,
+                    x,
+                    y,
+                    intent,
+                    *button,
+                    *state,
+                    pressed_inputs.any_held(),
+                )?,
+            };
+            match state {
+                ButtonState::Pressed => pressed_inputs.add_mouse_button(*button, 0, 0),
+                ButtonState::Released => pressed_inputs.remove_mouse_button(*button),
+            }
+            Ok(pause_ms)
+        }
+        MacroStep::PointerWheel {
+            position, delta, ..
+        } => match *position {
+            PointerPosition::ScreenRelative { x, y } => {
+                executor.mouse_wheel(x, y, *delta)?;
+                Ok(0)
+            }
+            PointerPosition::WindowRelative {
+                target_id,
+                x,
+                y,
+                intent,
+            } => executor.window_mouse_wheel(
+                find_target(targets, target_id)?,
+                x,
+                y,
+                intent,
+                *delta,
+                pressed_inputs.any_held(),
+            ),
+        },
+        MacroStep::TargetedKey {
+            target_id,
+            vk_code,
+            scan_code,
+            extended,
+            state,
+            ..
+        } => {
+            let sequence_start = *state == KeyState::Pressed && pressed_inputs.keys.is_empty();
+            let target = target_id
+                .map(|target_id| find_target(targets, target_id))
+                .transpose()?;
+            let pause_ms = match target {
+                Some(target) => executor.targeted_key(
+                    target,
+                    *vk_code,
+                    *scan_code,
+                    *extended,
+                    *state,
+                    sequence_start,
+                    pressed_inputs.any_held(),
+                )?,
+                None => {
+                    executor.key(*vk_code, *scan_code, *extended, *state)?;
+                    0
+                }
+            };
+            match state {
+                KeyState::Pressed => pressed_inputs.add_key(*vk_code, *scan_code, *extended),
+                KeyState::Released => pressed_inputs.remove_key(*vk_code, *scan_code, *extended),
+            }
+            Ok(pause_ms)
+        }
+        MacroStep::Wait { .. } => Ok(0),
     }
+}
+
+fn find_target(
+    targets: &[WindowTarget],
+    target_id: TargetWindowId,
+) -> Result<&WindowTarget, String> {
+    targets
+        .iter()
+        .find(|target| target.id == target_id)
+        .ok_or_else(|| format!("目标窗口 {} 不可用。", target_id.0))
 }
 
 fn cleanup_and_return<E: StepExecutor + ?Sized>(
@@ -321,7 +518,7 @@ fn cleanup_and_return<E: StepExecutor + ?Sized>(
 ) -> Result<(), String> {
     match pressed_inputs.release_all(executor) {
         Ok(()) => Err(err),
-        Err(cleanup_error) => Err(format!("{err}; input cleanup failed: {cleanup_error}")),
+        Err(cleanup_error) => Err(format!("{err}；释放残留输入失败：{cleanup_error}")),
     }
 }
 
@@ -332,6 +529,10 @@ struct PressedInputs {
 }
 
 impl PressedInputs {
+    fn any_held(&self) -> bool {
+        !self.keys.is_empty() || !self.mouse_buttons.is_empty()
+    }
+
     fn add_key(&mut self, vk_code: u16, scan_code: u16, extended: bool) {
         if !self.keys.contains(&(vk_code, scan_code, extended)) {
             self.keys.push((vk_code, scan_code, extended));

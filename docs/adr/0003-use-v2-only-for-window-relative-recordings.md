@@ -1,0 +1,3 @@
+# Use v2 only for window-relative recordings
+
+Remember continues writing version 1 for new screen-only recordings and writes version 2 only when window-relative recording is enabled. Version 1 files remain readable, saveable, and renameable without upgrading, while version 2 adds explicit screen-relative or window-relative pointer positions and target-window metadata. This makes the visible V1/V2 marker also communicate coordinate behavior and preserves the exact legacy format for users who leave the feature disabled, at the cost that older Remember releases cannot open window-relative recordings.

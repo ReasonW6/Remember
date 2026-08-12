@@ -1,9 +1,16 @@
-use remember_lib::model::{ButtonState, KeyState, MacroStep, MouseButton, Recording};
+use remember_lib::model::{
+    ButtonState, ClientSize, KeyState, MacroStep, MouseButton, PointerPosition, Recording,
+    TargetWindowAvailability, TargetWindowId, WindowPointerIntent, WindowTarget,
+};
 use remember_lib::player::{
     play_actions, play_recording, scaled_delay_ms, PlaybackAction, PlaybackSettings, StepExecutor,
     StopToken,
 };
-use std::sync::{Arc, Mutex};
+use std::collections::VecDeque;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -28,6 +35,21 @@ fn recording() -> Recording {
             },
         ],
     )
+}
+
+fn window_target(id: u32, availability: TargetWindowAvailability) -> WindowTarget {
+    WindowTarget {
+        id: TargetWindowId(id),
+        executable_path: format!(r"C:\Apps\Target{id}.exe"),
+        window_class: format!("TargetWindow{id}"),
+        title: format!("Target {id}"),
+        client_size: ClientSize {
+            width: 800,
+            height: 600,
+        },
+        dpi: 96,
+        availability,
+    }
 }
 
 #[test]
@@ -58,6 +80,7 @@ struct FakeExecutor {
     calls: Arc<Mutex<Vec<String>>>,
     fail_on_call: Arc<Mutex<Option<usize>>>,
     stop_on_call: Option<(usize, StopToken)>,
+    window_pauses: Arc<Mutex<VecDeque<u64>>>,
 }
 
 impl FakeExecutor {
@@ -66,6 +89,7 @@ impl FakeExecutor {
             calls: Arc::new(Mutex::new(Vec::new())),
             fail_on_call: Arc::new(Mutex::new(Some(call_number))),
             stop_on_call: None,
+            window_pauses: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -74,6 +98,14 @@ impl FakeExecutor {
             calls: Arc::new(Mutex::new(Vec::new())),
             fail_on_call: Arc::new(Mutex::new(None)),
             stop_on_call: Some((call_number, stop_token)),
+            window_pauses: Arc::new(Mutex::new(VecDeque::new())),
+        }
+    }
+
+    fn with_window_pauses(pauses: impl IntoIterator<Item = u64>) -> Self {
+        Self {
+            window_pauses: Arc::new(Mutex::new(pauses.into_iter().collect())),
+            ..Self::default()
         }
     }
 
@@ -102,9 +134,29 @@ impl FakeExecutor {
             Ok(())
         }
     }
+
+    fn record_window_call(&self, call: String) -> Result<u64, String> {
+        self.record_call(call)?;
+        Ok(self.window_pauses.lock().unwrap().pop_front().unwrap_or(0))
+    }
 }
 
 impl StepExecutor for FakeExecutor {
+    fn prepare_window_relative_playback(&self) -> Result<(), String> {
+        self.record_call("prepare".to_string())
+    }
+
+    fn begin_window_relative_loop(&self, targets: &[WindowTarget]) -> Result<(), String> {
+        self.record_call(format!(
+            "loop:{}",
+            targets
+                .iter()
+                .map(|target| target.id.0.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        ))
+    }
+
     fn mouse_move(&self, x: i32, y: i32) -> Result<(), String> {
         self.record_call(format!("move:{x}:{y}"))
     }
@@ -131,6 +183,69 @@ impl StepExecutor for FakeExecutor {
         state: KeyState,
     ) -> Result<(), String> {
         self.record_call(format!("key:{vk_code}:{scan_code}:{extended}:{state:?}"))
+    }
+
+    fn window_mouse_move(
+        &self,
+        target: &WindowTarget,
+        x: i32,
+        y: i32,
+        intent: WindowPointerIntent,
+        input_held: bool,
+    ) -> Result<u64, String> {
+        self.record_window_call(format!(
+            "window-move:{}:{x}:{y}:{intent:?}:held={input_held}",
+            target.id.0
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn window_mouse_button(
+        &self,
+        target: &WindowTarget,
+        x: i32,
+        y: i32,
+        intent: WindowPointerIntent,
+        button: MouseButton,
+        state: ButtonState,
+        input_held: bool,
+    ) -> Result<u64, String> {
+        self.record_window_call(format!(
+            "window-button:{}:{x}:{y}:{intent:?}:{button:?}:{state:?}:held={input_held}",
+            target.id.0
+        ))
+    }
+
+    fn window_mouse_wheel(
+        &self,
+        target: &WindowTarget,
+        x: i32,
+        y: i32,
+        intent: WindowPointerIntent,
+        delta: i32,
+        input_held: bool,
+    ) -> Result<u64, String> {
+        self.record_window_call(format!(
+            "window-wheel:{}:{x}:{y}:{intent:?}:{delta}:held={input_held}",
+            target.id.0
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn targeted_key(
+        &self,
+        target: &WindowTarget,
+        vk_code: u16,
+        scan_code: u16,
+        extended: bool,
+        state: KeyState,
+        sequence_start: bool,
+        input_held: bool,
+    ) -> Result<u64, String> {
+        self.record_window_call(format!(
+            "target-key:{}:{vk_code}:{scan_code}:{extended}:{state:?}:{sequence_start}:held={input_held}",
+            target.id.0
+        ))
     }
 
     fn release_mouse_button(&self, button: MouseButton) -> Result<(), String> {
@@ -232,7 +347,7 @@ fn loop_boundary_release_failure_is_returned() {
 
     assert_eq!(
         result,
-        Err("input cleanup failed at playback loop boundary: executor failed".to_string())
+        Err("回放循环结束时释放残留输入失败：executor failed".to_string())
     );
 }
 
@@ -305,6 +420,7 @@ fn looped_playback_preserves_recorded_trailing_duration() {
         name: "tail".to_string(),
         created_at: "2026-06-29T00:00:00Z".to_string(),
         duration_ms: 40,
+        targets: Vec::new(),
         steps: vec![MacroStep::Wait { elapsed_ms: 0 }],
     };
     let settings = PlaybackSettings::new(Some(2), 1.0).expect("settings");
@@ -549,5 +665,488 @@ fn stop_after_mouse_button_press_releases_without_moving_cursor() {
     assert_eq!(
         calls.lock().unwrap().as_slice(),
         ["button:42:84:Left:Pressed", "release-button:Left"]
+    );
+}
+
+#[test]
+fn v2_screen_relative_steps_use_legacy_executor_methods() {
+    let fake = FakeExecutor::default();
+    let calls = fake.calls.clone();
+    let recording = Recording::new_window_relative(
+        "screen actions",
+        "2026-06-29T00:00:00Z",
+        Vec::new(),
+        vec![
+            MacroStep::PointerMove {
+                elapsed_ms: 0,
+                position: PointerPosition::ScreenRelative { x: 10, y: 20 },
+            },
+            MacroStep::PointerButton {
+                elapsed_ms: 0,
+                position: PointerPosition::ScreenRelative { x: 11, y: 21 },
+                button: MouseButton::Left,
+                state: ButtonState::Pressed,
+            },
+            MacroStep::PointerButton {
+                elapsed_ms: 0,
+                position: PointerPosition::ScreenRelative { x: 11, y: 21 },
+                button: MouseButton::Left,
+                state: ButtonState::Released,
+            },
+            MacroStep::PointerWheel {
+                elapsed_ms: 0,
+                position: PointerPosition::ScreenRelative { x: 12, y: 22 },
+                delta: 120,
+            },
+            MacroStep::TargetedKey {
+                elapsed_ms: 0,
+                target_id: None,
+                vk_code: 0x41,
+                scan_code: 0x1E,
+                extended: false,
+                state: KeyState::Pressed,
+            },
+            MacroStep::TargetedKey {
+                elapsed_ms: 0,
+                target_id: None,
+                vk_code: 0x41,
+                scan_code: 0x1E,
+                extended: false,
+                state: KeyState::Released,
+            },
+        ],
+    );
+
+    play_recording(
+        &recording,
+        PlaybackSettings::new(Some(1), 1.0).expect("settings"),
+        &fake,
+        &StopToken::default(),
+    )
+    .expect("play");
+
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        [
+            "prepare",
+            "loop:",
+            "move:10:20",
+            "button:11:21:Left:Pressed",
+            "button:11:21:Left:Released",
+            "wheel:12:22:120",
+            "key:65:30:false:Pressed",
+            "key:65:30:false:Released",
+        ]
+    );
+}
+
+#[test]
+fn v2_dispatches_window_actions_with_their_intents() {
+    let fake = FakeExecutor::default();
+    let calls = fake.calls.clone();
+    let target = window_target(7, TargetWindowAvailability::Initial);
+    let recording = Recording::new_window_relative(
+        "window actions",
+        "2026-06-29T00:00:00Z",
+        vec![target],
+        vec![
+            MacroStep::PointerMove {
+                elapsed_ms: 0,
+                position: PointerPosition::WindowRelative {
+                    target_id: TargetWindowId(7),
+                    x: 30,
+                    y: 40,
+                    intent: WindowPointerIntent::Foreground,
+                },
+            },
+            MacroStep::PointerButton {
+                elapsed_ms: 0,
+                position: PointerPosition::WindowRelative {
+                    target_id: TargetWindowId(7),
+                    x: 31,
+                    y: 41,
+                    intent: WindowPointerIntent::ActivationClick,
+                },
+                button: MouseButton::Left,
+                state: ButtonState::Pressed,
+            },
+            MacroStep::PointerButton {
+                elapsed_ms: 0,
+                position: PointerPosition::WindowRelative {
+                    target_id: TargetWindowId(7),
+                    x: 32,
+                    y: 42,
+                    intent: WindowPointerIntent::DropRelease,
+                },
+                button: MouseButton::Left,
+                state: ButtonState::Released,
+            },
+            MacroStep::PointerWheel {
+                elapsed_ms: 0,
+                position: PointerPosition::WindowRelative {
+                    target_id: TargetWindowId(7),
+                    x: 33,
+                    y: 43,
+                    intent: WindowPointerIntent::BackgroundWheel,
+                },
+                delta: -120,
+            },
+        ],
+    );
+
+    play_recording(
+        &recording,
+        PlaybackSettings::new(Some(1), 1.0).expect("settings"),
+        &fake,
+        &StopToken::default(),
+    )
+    .expect("play");
+
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        [
+            "prepare",
+            "loop:7",
+            "window-move:7:30:40:Foreground:held=false",
+            "window-button:7:31:41:ActivationClick:Left:Pressed:held=false",
+            "window-button:7:32:42:DropRelease:Left:Released:held=true",
+            "window-wheel:7:33:43:BackgroundWheel:-120:held=false",
+        ]
+    );
+}
+
+#[test]
+fn v2_prepares_without_prebinding_targets_and_notifies_every_loop() {
+    let fake = FakeExecutor::default();
+    let calls = fake.calls.clone();
+    let recording = Recording::new_window_relative(
+        "target lifecycle",
+        "2026-06-29T00:00:00Z",
+        vec![
+            window_target(1, TargetWindowAvailability::Initial),
+            window_target(2, TargetWindowAvailability::Deferred),
+        ],
+        vec![MacroStep::Wait { elapsed_ms: 0 }],
+    );
+
+    play_recording(
+        &recording,
+        PlaybackSettings::new(Some(2), 1.0).expect("settings"),
+        &fake,
+        &StopToken::default(),
+    )
+    .expect("play");
+
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        ["prepare", "loop:1,2", "loop:1,2"]
+    );
+}
+
+#[test]
+fn targeted_keyboard_marks_only_the_first_press_of_each_sequence() {
+    let fake = FakeExecutor::default();
+    let calls = fake.calls.clone();
+    let target = window_target(3, TargetWindowAvailability::Initial);
+    let key = |elapsed_ms, vk_code, state| MacroStep::TargetedKey {
+        elapsed_ms,
+        target_id: Some(TargetWindowId(3)),
+        vk_code,
+        scan_code: vk_code,
+        extended: false,
+        state,
+    };
+    let recording = Recording::new_window_relative(
+        "keyboard sequences",
+        "2026-06-29T00:00:00Z",
+        vec![target],
+        vec![
+            key(0, 0x41, KeyState::Pressed),
+            key(0, 0x12, KeyState::Pressed),
+            key(0, 0x41, KeyState::Released),
+            key(0, 0x12, KeyState::Released),
+            key(0, 0x42, KeyState::Pressed),
+            key(0, 0x42, KeyState::Released),
+        ],
+    );
+
+    play_recording(
+        &recording,
+        PlaybackSettings::new(Some(1), 1.0).expect("settings"),
+        &fake,
+        &StopToken::default(),
+    )
+    .expect("play");
+
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        [
+            "prepare",
+            "loop:3",
+            "target-key:3:65:65:false:Pressed:true:held=false",
+            "target-key:3:18:18:false:Pressed:false:held=true",
+            "target-key:3:65:65:false:Released:false:held=true",
+            "target-key:3:18:18:false:Released:false:held=true",
+            "target-key:3:66:66:false:Pressed:true:held=false",
+            "target-key:3:66:66:false:Released:false:held=true",
+        ]
+    );
+}
+
+#[test]
+fn window_binding_pause_shifts_the_remaining_loop_timeline() {
+    let fake = FakeExecutor::with_window_pauses([40, 0]);
+    let target = window_target(4, TargetWindowAvailability::Deferred);
+    let recording = Recording::new_window_relative(
+        "binding pause",
+        "2026-06-29T00:00:00Z",
+        vec![target],
+        vec![
+            MacroStep::PointerMove {
+                elapsed_ms: 0,
+                position: PointerPosition::WindowRelative {
+                    target_id: TargetWindowId(4),
+                    x: 1,
+                    y: 2,
+                    intent: WindowPointerIntent::Foreground,
+                },
+            },
+            MacroStep::PointerMove {
+                elapsed_ms: 10,
+                position: PointerPosition::WindowRelative {
+                    target_id: TargetWindowId(4),
+                    x: 3,
+                    y: 4,
+                    intent: WindowPointerIntent::Foreground,
+                },
+            },
+        ],
+    );
+    let started = Instant::now();
+
+    play_recording(
+        &recording,
+        PlaybackSettings::new(Some(1), 1.0).expect("settings"),
+        &fake,
+        &StopToken::default(),
+    )
+    .expect("play");
+
+    assert!(
+        started.elapsed() >= Duration::from_millis(45),
+        "reported binding time must postpone subsequent steps"
+    );
+}
+
+#[test]
+fn v2_executor_error_releases_a_targeted_key_with_safe_generic_cleanup() {
+    let fake = FakeExecutor::failing_on(4);
+    let calls = fake.calls.clone();
+    let target = window_target(5, TargetWindowAvailability::Initial);
+    let recording = Recording::new_window_relative(
+        "targeted cleanup",
+        "2026-06-29T00:00:00Z",
+        vec![target],
+        vec![
+            MacroStep::TargetedKey {
+                elapsed_ms: 0,
+                target_id: Some(TargetWindowId(5)),
+                vk_code: 0x41,
+                scan_code: 0x1E,
+                extended: false,
+                state: KeyState::Pressed,
+            },
+            MacroStep::PointerMove {
+                elapsed_ms: 0,
+                position: PointerPosition::WindowRelative {
+                    target_id: TargetWindowId(5),
+                    x: 9,
+                    y: 10,
+                    intent: WindowPointerIntent::Foreground,
+                },
+            },
+        ],
+    );
+
+    let result = play_recording(
+        &recording,
+        PlaybackSettings::new(Some(1), 1.0).expect("settings"),
+        &fake,
+        &StopToken::default(),
+    );
+
+    assert_eq!(result, Err("executor failed".to_string()));
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        [
+            "prepare",
+            "loop:5",
+            "target-key:5:65:30:false:Pressed:true:held=false",
+            "window-move:5:9:10:Foreground:held=true",
+            "key:65:30:false:Released",
+        ]
+    );
+}
+
+#[derive(Default)]
+struct TargetBindingFailureExecutor {
+    calls: Arc<Mutex<Vec<String>>>,
+    binding_attempts: Arc<AtomicUsize>,
+}
+
+impl TargetBindingFailureExecutor {
+    fn record(&self, call: String) {
+        self.calls.lock().unwrap().push(call);
+    }
+}
+
+impl StepExecutor for TargetBindingFailureExecutor {
+    fn mouse_move(&self, x: i32, y: i32) -> Result<(), String> {
+        self.record(format!("move:{x}:{y}"));
+        Ok(())
+    }
+
+    fn mouse_button(
+        &self,
+        x: i32,
+        y: i32,
+        button: MouseButton,
+        state: ButtonState,
+    ) -> Result<(), String> {
+        self.record(format!("button:{x}:{y}:{button:?}:{state:?}"));
+        Ok(())
+    }
+
+    fn mouse_wheel(&self, x: i32, y: i32, delta: i32) -> Result<(), String> {
+        self.record(format!("wheel:{x}:{y}:{delta}"));
+        Ok(())
+    }
+
+    fn key(
+        &self,
+        vk_code: u16,
+        scan_code: u16,
+        extended: bool,
+        state: KeyState,
+    ) -> Result<(), String> {
+        self.record(format!("key:{vk_code}:{scan_code}:{extended}:{state:?}"));
+        Ok(())
+    }
+
+    fn window_mouse_move(
+        &self,
+        target: &WindowTarget,
+        x: i32,
+        y: i32,
+        _intent: WindowPointerIntent,
+        input_held: bool,
+    ) -> Result<u64, String> {
+        self.record(format!(
+            "window-target-move:{}:{x}:{y}:held={input_held}",
+            target.id.0
+        ));
+        self.binding_attempts.fetch_add(1, Ordering::SeqCst);
+        Err("automatic window binding failed".to_string())
+    }
+
+    fn release_mouse_button(&self, button: MouseButton) -> Result<(), String> {
+        self.record(format!("release-button:{button:?}"));
+        Ok(())
+    }
+}
+
+#[test]
+fn automatic_target_binding_failure_during_drag_releases_the_mouse() {
+    let fake = TargetBindingFailureExecutor::default();
+    let calls = fake.calls.clone();
+    let binding_attempts = fake.binding_attempts.clone();
+    let recording = Recording::new_window_relative(
+        "drag target binding failure",
+        "2026-06-29T00:00:00Z",
+        vec![window_target(8, TargetWindowAvailability::Deferred)],
+        vec![
+            MacroStep::PointerButton {
+                elapsed_ms: 0,
+                position: PointerPosition::ScreenRelative { x: 1, y: 2 },
+                button: MouseButton::Left,
+                state: ButtonState::Pressed,
+            },
+            MacroStep::PointerMove {
+                elapsed_ms: 0,
+                position: PointerPosition::WindowRelative {
+                    target_id: TargetWindowId(8),
+                    x: 3,
+                    y: 4,
+                    intent: WindowPointerIntent::Foreground,
+                },
+            },
+        ],
+    );
+
+    let result = play_recording(
+        &recording,
+        PlaybackSettings::new(Some(1), 1.0).unwrap(),
+        &fake,
+        &StopToken::default(),
+    );
+
+    assert_eq!(result, Err("automatic window binding failed".to_string()));
+    assert_eq!(binding_attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        [
+            "button:1:2:Left:Pressed",
+            "window-target-move:8:3:4:held=true",
+            "release-button:Left",
+        ]
+    );
+}
+
+#[test]
+fn automatic_target_binding_failure_while_a_key_is_held_releases_the_key() {
+    let fake = TargetBindingFailureExecutor::default();
+    let calls = fake.calls.clone();
+    let binding_attempts = fake.binding_attempts.clone();
+    let recording = Recording::new_window_relative(
+        "keyboard target binding failure",
+        "2026-06-29T00:00:00Z",
+        vec![window_target(9, TargetWindowAvailability::Deferred)],
+        vec![
+            MacroStep::TargetedKey {
+                elapsed_ms: 0,
+                target_id: None,
+                vk_code: 0x11,
+                scan_code: 0x1D,
+                extended: false,
+                state: KeyState::Pressed,
+            },
+            MacroStep::PointerMove {
+                elapsed_ms: 0,
+                position: PointerPosition::WindowRelative {
+                    target_id: TargetWindowId(9),
+                    x: 5,
+                    y: 6,
+                    intent: WindowPointerIntent::Foreground,
+                },
+            },
+        ],
+    );
+
+    let result = play_recording(
+        &recording,
+        PlaybackSettings::new(Some(1), 1.0).unwrap(),
+        &fake,
+        &StopToken::default(),
+    );
+
+    assert_eq!(result, Err("automatic window binding failed".to_string()));
+    assert_eq!(binding_attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        [
+            "key:17:29:false:Pressed",
+            "window-target-move:9:5:6:held=true",
+            "key:17:29:false:Released",
+        ]
     );
 }

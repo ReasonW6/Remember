@@ -1,18 +1,24 @@
-import { Circle, Play, Shield, ShieldCheck, Square } from "lucide-react";
+import { Circle, LocateFixed, Play, Shield, ShieldCheck, Square } from "lucide-react";
 import type { RecordingFile, UiState } from "../types";
+
+const WINDOW_RELATIVE_DISCLOSURE =
+  "V2 录制文件会明文保存目标窗口的可执行文件完整路径、类名和标题，应视为敏感文件。";
 
 interface CompactControlsProps {
   state: UiState;
   recordings: RecordingFile[];
   selectedPath: string | null;
   selectedName: string | null;
+  selectedVersion?: number | null;
   hasRecording: boolean;
   playbackValid: boolean;
   pendingCommand: boolean;
   isElevated: boolean;
+  windowRelativeEnabled: boolean;
   message: string;
   error: string;
   onSelect: (path: string) => void;
+  onWindowRelativeChange: (enabled: boolean) => void;
   onRecord: () => void;
   onPlay: () => void;
   onStop: () => void;
@@ -24,13 +30,16 @@ export function CompactControls({
   recordings,
   selectedPath,
   selectedName,
+  selectedVersion,
   hasRecording,
   playbackValid,
   pendingCommand,
   isElevated,
+  windowRelativeEnabled,
   message,
   error,
   onSelect,
+  onWindowRelativeChange,
   onRecord,
   onPlay,
   onStop,
@@ -71,14 +80,37 @@ export function CompactControls({
             </option>
           ) : null}
           {selectedIsExternal ? (
-            <option value={selectedPath}>{selectedName || "外部录制文件"}</option>
+            <option value={selectedPath}>
+              {selectedName || "外部录制文件"}
+              {selectedVersion !== null && selectedVersion !== undefined
+                ? ` [V${selectedVersion}]`
+                : ""}
+            </option>
           ) : null}
           {availableRecordings.map((recording) => (
             <option key={recording.path} value={recording.path}>
               {recording.name}
+              {recording.version !== null && recording.version !== undefined
+                ? ` [V${recording.version}]`
+                : ""}
             </option>
           ))}
         </select>
+        <button
+          className={`action-button coordinate-mode-button compact-action-button compact-coordinate-button ${windowRelativeEnabled ? "enabled" : ""}`}
+          type="button"
+          aria-label={windowRelativeEnabled ? "关闭窗口相对录制" : "启用窗口相对录制"}
+          aria-pressed={windowRelativeEnabled}
+          aria-describedby="compact-window-relative-recording-disclosure"
+          title={`${windowRelativeEnabled ? "窗口相对录制已开启" : "开启窗口相对录制"}；${WINDOW_RELATIVE_DISCLOSURE}`}
+          onClick={() => onWindowRelativeChange(!windowRelativeEnabled)}
+          disabled={pendingCommand || isRecording || isPlaying}
+        >
+          <LocateFixed size={15} aria-hidden="true" />
+        </button>
+        <span id="compact-window-relative-recording-disclosure" className="sr-only">
+          {WINDOW_RELATIVE_DISCLOSURE}
+        </span>
         <button
           id="compact-record-button"
           className="action-button compact-action-button"

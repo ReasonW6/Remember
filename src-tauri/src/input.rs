@@ -10,6 +10,15 @@ use tauri::AppHandle;
 
 pub const REMEMBER_INPUT_EXTRA_INFO: usize = 0x524d_4d42;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WindowLifetimeToken(u64);
+
+impl WindowLifetimeToken {
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct OwnWindowHandles {
     main: AtomicUsize,
@@ -102,7 +111,10 @@ impl StepExecutor for SystemInputExecutor {
 }
 
 #[cfg(target_os = "windows")]
-pub use capture::{pause_capture_events, start_capture, CapturePauseGuard, InputCaptureRuntime};
+pub use capture::{
+    pause_capture_events, start_capture, window_lifetime_token, CapturePauseGuard,
+    InputCaptureRuntime,
+};
 
 #[cfg(not(target_os = "windows"))]
 #[derive(Debug, Default)]
@@ -125,6 +137,11 @@ pub fn pause_capture_events() -> Result<CapturePauseGuard, String> {
     Ok(CapturePauseGuard)
 }
 
+#[cfg(not(target_os = "windows"))]
+pub fn window_lifetime_token(_hwnd: usize) -> WindowLifetimeToken {
+    WindowLifetimeToken::default()
+}
+
 #[cfg(target_os = "windows")]
 mod capture {
     use crate::{
@@ -133,27 +150,38 @@ mod capture {
         },
         clock::now_ms,
         commands,
-        input::{OwnWindowHandles, REMEMBER_INPUT_EXTRA_INFO},
-        model::{ButtonState, KeyState, MouseButton},
-        recorder::RawInputEvent,
+        input::{OwnWindowHandles, WindowLifetimeToken, REMEMBER_INPUT_EXTRA_INFO},
+        model::{
+            ButtonState, KeyState, MouseButton, TargetWindowAvailability, WindowPointerIntent,
+        },
+        recorder::{
+            CaptureOutcome, CaptureSurface, CapturedWindow, RawInputEvent, WindowInstanceId,
+        },
+        window_target::{self, WindowHandle, WindowSnapshot},
     };
     use std::{
         cell::RefCell,
-        sync::{mpsc, Arc, Mutex},
+        collections::{HashMap, HashSet},
+        sync::{mpsc, Arc, Mutex, OnceLock, RwLock},
         thread::{self, JoinHandle},
     };
     use tauri::AppHandle;
     use windows::Win32::{
-        Foundation::{HINSTANCE, LPARAM, LRESULT, POINT, WPARAM},
+        Foundation::{BOOL, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, POINT, WPARAM},
         System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
-        UI::WindowsAndMessaging::{
-            CallNextHookEx, DispatchMessageW, GetAncestor, GetForegroundWindow, GetMessageW,
-            PeekMessageW, PostThreadMessageW, SetWindowsHookExW, TranslateMessage,
-            UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT,
-            LLKHF_EXTENDED, MSG, MSLLHOOKSTRUCT, PM_NOREMOVE, WH_KEYBOARD_LL, WH_MOUSE_LL,
-            WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
-            WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
-            WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
+        UI::{
+            Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK},
+            WindowsAndMessaging::{
+                CallNextHookEx, DispatchMessageW, EnumWindows, GetAncestor, GetForegroundWindow,
+                GetMessageW, PeekMessageW, PostThreadMessageW, SetWindowsHookExW, TranslateMessage,
+                UnhookWindowsHookEx, WindowFromPoint, CHILDID_SELF, EVENT_OBJECT_CREATE,
+                EVENT_OBJECT_DESTROY, GA_ROOT, HC_ACTION, HHOOK, KBDLLHOOKSTRUCT, LLKHF_EXTENDED,
+                MSG, MSLLHOOKSTRUCT, OBJID_WINDOW, PM_NOREMOVE, WH_KEYBOARD_LL, WH_MOUSE_LL,
+                WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_KEYDOWN, WM_KEYUP,
+                WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE,
+                WM_MOUSEWHEEL, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+                WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
+            },
         },
     };
 
@@ -163,8 +191,49 @@ mod capture {
         at_ms: u64,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum WindowLifecycleKind {
+        Created,
+        Destroyed,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct WindowLifecycleEvent {
+        hwnd: usize,
+        kind: WindowLifecycleKind,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct EventWindow {
+        root_hwnd: usize,
+        lifetime_token: WindowLifetimeToken,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct EventWindowContext {
+        pointed_root: Option<EventWindow>,
+        foreground_root: Option<EventWindow>,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct QueuedInputEvent {
+        event: RawInputEvent,
+        window_context: Option<EventWindowContext>,
+    }
+
+    impl QueuedInputEvent {
+        #[cfg(test)]
+        fn without_window_context(event: RawInputEvent) -> Self {
+            Self {
+                event,
+                window_context: None,
+            }
+        }
+    }
+
     enum CaptureWorkerMessage {
-        Input(RawInputEvent),
+        Input(QueuedInputEvent),
+        WindowLifecycle(WindowLifecycleEvent),
         Action(QueuedControlHotkeyAction),
         ResetHotkeyFilter,
         Pause {
@@ -174,10 +243,17 @@ mod capture {
         Shutdown,
     }
 
+    enum CaptureFeedback {
+        ShowUnreadable { message: String, x: i32, y: i32 },
+        HideUnreadable,
+        StopRecording { at_ms: u64, reason: String },
+    }
+
     struct HookContext {
         control_hotkeys: ControlHotkeyRuntime,
         own_windows: Arc<OwnWindowHandles>,
         capture_event_tx: mpsc::Sender<CaptureWorkerMessage>,
+        top_level_windows: RefCell<HashSet<usize>>,
     }
 
     impl HookContext {
@@ -189,9 +265,10 @@ mod capture {
     // Low-level hook callbacks must return within the system hook timeout or
     // Windows silently removes the hook. Windows invokes these low-level hooks
     // on the thread that installed them, so their immutable context can live in
-    // thread-local storage and be read without a shared lock. Input and hotkey
-    // actions share its one ordered queue so a start/stop hotkey remains the
-    // exact capture boundary without doing disk I/O inside the hook.
+    // thread-local storage. The only shared read captures two small lifetime
+    // tokens; no process metadata or geometry is queried here. Input and hotkey
+    // actions share one ordered queue so a start/stop hotkey remains the exact
+    // capture boundary without doing disk I/O inside the hook.
     thread_local! {
         static HOOK_CONTEXT: RefCell<Option<HookContext>> = const { RefCell::new(None) };
     }
@@ -199,6 +276,145 @@ mod capture {
     // Only non-hook lifecycle and command code uses this sender. Hook callbacks
     // dispatch through their thread-local HookContext above.
     static CAPTURE_CONTROL_TX: Mutex<Option<mpsc::Sender<CaptureWorkerMessage>>> = Mutex::new(None);
+    static WINDOW_LIFETIMES: OnceLock<RwLock<WindowLifetimeRegistry>> = OnceLock::new();
+
+    #[derive(Default)]
+    struct WindowLifetimeRegistry {
+        windows: HashMap<usize, ProcessWindowLifetime>,
+    }
+
+    struct ProcessWindowLifetime {
+        token: WindowLifetimeToken,
+        live: bool,
+    }
+
+    impl WindowLifetimeRegistry {
+        fn seed(&mut self, live_windows: &HashSet<usize>) {
+            for hwnd in live_windows {
+                match self.windows.get_mut(hwnd) {
+                    Some(window) if !window.live => {
+                        window.live = true;
+                    }
+                    Some(_) => {}
+                    None => {
+                        self.windows.insert(
+                            *hwnd,
+                            ProcessWindowLifetime {
+                                token: WindowLifetimeToken::default(),
+                                live: true,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
+        fn apply_lifecycle(&mut self, event: WindowLifecycleEvent) {
+            match event.kind {
+                WindowLifecycleKind::Created => match self.windows.get_mut(&event.hwnd) {
+                    Some(window) => window.live = true,
+                    None => {
+                        self.windows.insert(
+                            event.hwnd,
+                            ProcessWindowLifetime {
+                                token: WindowLifetimeToken::default(),
+                                live: true,
+                            },
+                        );
+                    }
+                },
+                WindowLifecycleKind::Destroyed => match self.windows.get_mut(&event.hwnd) {
+                    Some(window) if window.live => {
+                        window.token = WindowLifetimeToken(window.token.0.saturating_add(1));
+                        window.live = false;
+                    }
+                    Some(_) => {}
+                    None => {
+                        self.windows.insert(
+                            event.hwnd,
+                            ProcessWindowLifetime {
+                                token: WindowLifetimeToken(1),
+                                live: false,
+                            },
+                        );
+                    }
+                },
+            }
+        }
+
+        fn token(&self, hwnd: usize) -> WindowLifetimeToken {
+            self.windows
+                .get(&hwnd)
+                .map(|window| window.token)
+                .unwrap_or_default()
+        }
+    }
+
+    fn window_lifetimes() -> &'static RwLock<WindowLifetimeRegistry> {
+        WINDOW_LIFETIMES.get_or_init(|| RwLock::new(WindowLifetimeRegistry::default()))
+    }
+
+    pub fn window_lifetime_token(hwnd: usize) -> WindowLifetimeToken {
+        window_lifetimes()
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .token(hwnd)
+    }
+
+    fn event_window_context(
+        pointed_root_hwnd: Option<usize>,
+        foreground_root_hwnd: Option<usize>,
+    ) -> EventWindowContext {
+        let lifetimes = window_lifetimes()
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let capture = |root_hwnd| EventWindow {
+            root_hwnd,
+            lifetime_token: lifetimes.token(root_hwnd),
+        };
+        EventWindowContext {
+            pointed_root: pointed_root_hwnd.map(capture),
+            foreground_root: foreground_root_hwnd.map(capture),
+        }
+    }
+
+    fn ensure_event_window_lifetime(
+        window: EventWindow,
+    ) -> Result<(), window_target::WindowTargetError> {
+        if event_window_lifetime_matches(window, window_lifetime_token(window.root_hwnd)) {
+            Ok(())
+        } else {
+            Err(window_target::WindowTargetError::WindowLifetimeChanged {
+                handle: WindowHandle::from_raw(window.root_hwnd),
+            })
+        }
+    }
+
+    fn event_window_lifetime_matches(
+        window: EventWindow,
+        current_token: WindowLifetimeToken,
+    ) -> bool {
+        window.lifetime_token == current_token
+    }
+
+    fn ensure_event_context_lifetimes(
+        context: EventWindowContext,
+    ) -> Result<(), window_target::WindowTargetError> {
+        if let Some(pointed) = context.pointed_root {
+            ensure_event_window_lifetime(pointed)?;
+        }
+        if let Some(foreground) = context.foreground_root {
+            ensure_event_window_lifetime(foreground)?;
+        }
+        Ok(())
+    }
+
+    fn apply_process_window_lifecycle(event: WindowLifecycleEvent) {
+        window_lifetimes()
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .apply_lifecycle(event);
+    }
 
     pub struct CapturePauseGuard {
         resume: Option<mpsc::Sender<()>>,
@@ -250,18 +466,53 @@ mod capture {
             control_hotkeys: control_hotkey_runtime,
             own_windows,
             capture_event_tx: capture_tx,
+            top_level_windows: RefCell::new(HashSet::new()),
         };
         let capture_shared = shared.clone();
         let action_shared = shared.clone();
+        let feedback_shared = shared.clone();
+        let action_app = app_handle.clone();
+        let feedback_app = app_handle;
         let capture_worker = thread::spawn(move || {
-            run_capture_worker_with_actions(capture_shared, capture_rx, |queued| {
-                commands::run_control_hotkey_action(
-                    app_handle.clone(),
-                    action_shared.clone(),
-                    queued.action,
-                    queued.at_ms,
-                );
-            });
+            run_capture_worker_with_actions(
+                capture_shared,
+                capture_rx,
+                |queued| {
+                    commands::run_control_hotkey_action(
+                        action_app.clone(),
+                        action_shared.clone(),
+                        queued.action,
+                        queued.at_ms,
+                    );
+                },
+                |feedback| match feedback {
+                    CaptureFeedback::ShowUnreadable { message, x, y } => {
+                        if let Err(error) =
+                            crate::capture_warning::show(&feedback_app, &message, x, y)
+                        {
+                            eprintln!("Remember capture warning could not show: {error}");
+                        }
+                    }
+                    CaptureFeedback::HideUnreadable => {
+                        if let Err(error) = crate::capture_warning::hide(&feedback_app) {
+                            eprintln!("Remember capture warning could not hide: {error}");
+                        }
+                    }
+                    CaptureFeedback::StopRecording { at_ms, reason } => {
+                        if let Err(error) = crate::capture_warning::hide(&feedback_app) {
+                            eprintln!("Remember capture warning could not hide: {error}");
+                        }
+                        if let Err(error) = commands::stop_recording_for_capture_issue(
+                            feedback_app.clone(),
+                            feedback_shared.clone(),
+                            at_ms,
+                            reason,
+                        ) {
+                            eprintln!("Remember could not stop incompatible recording: {error}");
+                        }
+                    }
+                },
+            );
         });
 
         let (installed_tx, installed_rx) = mpsc::channel();
@@ -326,8 +577,14 @@ mod capture {
         }
     }
 
-    fn dispatch_capture_event(event: RawInputEvent) -> bool {
-        dispatch_hook_message(CaptureWorkerMessage::Input(event))
+    fn dispatch_capture_event(
+        event: RawInputEvent,
+        window_context: Option<EventWindowContext>,
+    ) -> bool {
+        dispatch_hook_message(CaptureWorkerMessage::Input(QueuedInputEvent {
+            event,
+            window_context,
+        }))
     }
 
     fn dispatch_hook_message(message: CaptureWorkerMessage) -> bool {
@@ -369,16 +626,20 @@ mod capture {
         shared: Arc<Mutex<AppController>>,
         receiver: mpsc::Receiver<CaptureWorkerMessage>,
     ) {
-        run_capture_worker_with_actions(shared, receiver, |_| {});
+        run_capture_worker_with_actions(shared, receiver, |_| {}, |_| {});
     }
 
     fn run_capture_worker_with_actions(
         shared: Arc<Mutex<AppController>>,
         receiver: mpsc::Receiver<CaptureWorkerMessage>,
         mut run_action: impl FnMut(QueuedControlHotkeyAction),
+        mut report_feedback: impl FnMut(CaptureFeedback),
     ) {
         const BATCH_SIZE: usize = 256;
         let mut messages = Vec::with_capacity(BATCH_SIZE);
+        let mut window_generations = WindowGenerationTracker::default();
+        let mut pointer_snapshots = PointerSnapshotCache::default();
+        let mut tracking_window_relative_recording = false;
 
         while let Ok(message) = receiver.recv() {
             messages.push(message);
@@ -388,17 +649,104 @@ mod capture {
             let mut should_shutdown = false;
             for message in messages.drain(..) {
                 match message {
-                    CaptureWorkerMessage::Input(event) => {
+                    CaptureWorkerMessage::Input(queued) => {
+                        let event = queued.event;
                         if controller.is_none() {
                             controller = shared.lock().ok();
                         }
-                        if let Some(controller) = controller.as_mut() {
-                            controller.capture_input(event);
+                        let window_relative = controller
+                            .as_ref()
+                            .is_some_and(|controller| controller.is_window_relative_recording());
+                        sync_window_generation_tracking(
+                            window_relative,
+                            &mut tracking_window_relative_recording,
+                            &mut window_generations,
+                            &mut pointer_snapshots,
+                        );
+                        if !window_relative {
+                            if let Some(controller) = controller.as_mut() {
+                                controller.capture_input(event);
+                            }
+                            continue;
                         }
+
+                        drop(controller.take());
+                        let mut surface = resolve_capture_surface(
+                            queued,
+                            &mut window_generations,
+                            &mut pointer_snapshots,
+                        );
+                        if controller.is_none() {
+                            controller = shared.lock().ok();
+                        }
+                        let mut feedback = None;
+                        if let Some(locked_controller) = controller.as_mut() {
+                            apply_target_availability(locked_controller, &mut surface);
+                            let unreadable_pointer = unreadable_pointer_feedback(event, &surface);
+                            let outcome =
+                                locked_controller.capture_input_with_surface(event, surface);
+                            match outcome {
+                                CaptureOutcome::StopRecording(reason) => {
+                                    feedback = Some(CaptureFeedback::StopRecording {
+                                        at_ms: raw_event_at_ms(event),
+                                        reason,
+                                    });
+                                }
+                                CaptureOutcome::UnreadableEnded => {
+                                    feedback = Some(CaptureFeedback::HideUnreadable);
+                                }
+                                CaptureOutcome::UnreadableStarted(_) | CaptureOutcome::Continue => {
+                                    if let Some((message, x, y)) = unreadable_pointer {
+                                        feedback =
+                                            Some(CaptureFeedback::ShowUnreadable { message, x, y });
+                                    }
+                                }
+                            }
+                        }
+                        let stopped_automatically =
+                            matches!(feedback, Some(CaptureFeedback::StopRecording { .. }));
+                        if stopped_automatically {
+                            drop(controller.take());
+                        }
+                        if let Some(feedback) = feedback {
+                            report_feedback(feedback);
+                        }
+                        if stopped_automatically {
+                            end_window_generation_tracking(
+                                &mut tracking_window_relative_recording,
+                                &mut pointer_snapshots,
+                            );
+                        }
+                    }
+                    CaptureWorkerMessage::WindowLifecycle(event) => {
+                        if controller.is_none() {
+                            controller = shared.lock().ok();
+                        }
+                        let window_relative = controller
+                            .as_ref()
+                            .is_some_and(|controller| controller.is_window_relative_recording());
+                        sync_window_generation_tracking(
+                            window_relative,
+                            &mut tracking_window_relative_recording,
+                            &mut window_generations,
+                            &mut pointer_snapshots,
+                        );
+                        window_generations.apply_lifecycle(event);
+                        pointer_snapshots.apply_lifecycle(event);
                     }
                     CaptureWorkerMessage::Action(action) => {
                         drop(controller.take());
                         run_action(action);
+                        controller = shared.lock().ok();
+                        let window_relative = controller
+                            .as_ref()
+                            .is_some_and(|controller| controller.is_window_relative_recording());
+                        sync_window_generation_tracking(
+                            window_relative,
+                            &mut tracking_window_relative_recording,
+                            &mut window_generations,
+                            &mut pointer_snapshots,
+                        );
                     }
                     CaptureWorkerMessage::ResetHotkeyFilter => {
                         if controller.is_none() {
@@ -413,6 +761,16 @@ mod capture {
                         if reached.send(()).is_ok() {
                             let _ = resume.recv();
                         }
+                        controller = shared.lock().ok();
+                        let window_relative = controller
+                            .as_ref()
+                            .is_some_and(|controller| controller.is_window_relative_recording());
+                        sync_window_generation_tracking(
+                            window_relative,
+                            &mut tracking_window_relative_recording,
+                            &mut window_generations,
+                            &mut pointer_snapshots,
+                        );
                     }
                     CaptureWorkerMessage::Shutdown => {
                         drop(controller.take());
@@ -424,6 +782,510 @@ mod capture {
             if should_shutdown {
                 break;
             }
+        }
+    }
+
+    fn sync_window_generation_tracking(
+        window_relative: bool,
+        tracking_window_relative: &mut bool,
+        generations: &mut WindowGenerationTracker,
+        pointer_snapshots: &mut PointerSnapshotCache,
+    ) {
+        if window_relative && !*tracking_window_relative {
+            generations.begin_recording();
+            pointer_snapshots.clear();
+        }
+        *tracking_window_relative = window_relative;
+    }
+
+    fn end_window_generation_tracking(
+        tracking_window_relative: &mut bool,
+        pointer_snapshots: &mut PointerSnapshotCache,
+    ) {
+        *tracking_window_relative = false;
+        pointer_snapshots.clear();
+    }
+
+    const POINTER_IDENTITY_REFRESH_INTERVAL_MS: u64 = 16;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum PointerSnapshotRefresh {
+        FullIdentity,
+        GeometryOnly,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct PointerSnapshotKey {
+        event_window: EventWindow,
+        normalized_handle: WindowHandle,
+    }
+
+    fn pointer_snapshot_refresh(
+        cached_key: Option<PointerSnapshotKey>,
+        current_key: PointerSnapshotKey,
+        last_full_snapshot_at_ms: Option<u64>,
+        at_ms: u64,
+        force_full_identity: bool,
+    ) -> PointerSnapshotRefresh {
+        if force_full_identity || cached_key != Some(current_key) {
+            return PointerSnapshotRefresh::FullIdentity;
+        }
+        let Some(last_full_snapshot_at_ms) = last_full_snapshot_at_ms else {
+            return PointerSnapshotRefresh::FullIdentity;
+        };
+        match at_ms.checked_sub(last_full_snapshot_at_ms) {
+            Some(elapsed) if elapsed < POINTER_IDENTITY_REFRESH_INTERVAL_MS => {
+                PointerSnapshotRefresh::GeometryOnly
+            }
+            _ => PointerSnapshotRefresh::FullIdentity,
+        }
+    }
+
+    #[derive(Default)]
+    struct PointerSnapshotCache {
+        cached: Option<CachedPointerSnapshot>,
+    }
+
+    struct CachedPointerSnapshot {
+        key: PointerSnapshotKey,
+        snapshot: WindowSnapshot,
+        last_full_snapshot_at_ms: u64,
+    }
+
+    impl PointerSnapshotCache {
+        fn clear(&mut self) {
+            self.cached = None;
+        }
+
+        fn apply_lifecycle(&mut self, event: WindowLifecycleEvent) {
+            if self.cached.as_ref().is_some_and(|cached| {
+                cached.key.event_window.root_hwnd == event.hwnd
+                    || cached.key.normalized_handle.raw() == event.hwnd
+                    || cached.snapshot.handle.raw() == event.hwnd
+            }) {
+                self.clear();
+            }
+        }
+
+        fn resolve(
+            &mut self,
+            window_context: EventWindowContext,
+            key: PointerSnapshotKey,
+            at_ms: u64,
+            force_full_identity: bool,
+        ) -> Result<Option<WindowSnapshot>, window_target::WindowTargetError> {
+            ensure_event_context_lifetimes(window_context)?;
+            let refresh = pointer_snapshot_refresh(
+                self.cached.as_ref().map(|cached| cached.key),
+                key,
+                self.cached
+                    .as_ref()
+                    .map(|cached| cached.last_full_snapshot_at_ms),
+                at_ms,
+                force_full_identity,
+            );
+
+            match refresh {
+                PointerSnapshotRefresh::FullIdentity => {
+                    let result = window_target::snapshot_pointed_window(key.normalized_handle);
+                    if let Err(error) = ensure_event_context_lifetimes(window_context) {
+                        self.clear();
+                        return Err(error);
+                    }
+                    match result {
+                        Ok(Some(snapshot)) => {
+                            self.cached = Some(CachedPointerSnapshot {
+                                key,
+                                snapshot: snapshot.clone(),
+                                last_full_snapshot_at_ms: at_ms,
+                            });
+                            Ok(Some(snapshot))
+                        }
+                        Ok(None) => {
+                            self.clear();
+                            Ok(None)
+                        }
+                        Err(error) => {
+                            self.clear();
+                            Err(error)
+                        }
+                    }
+                }
+                PointerSnapshotRefresh::GeometryOnly => {
+                    let handle = self
+                        .cached
+                        .as_ref()
+                        .expect("geometry refresh requires a matching cached snapshot")
+                        .snapshot
+                        .handle;
+                    let result = window_target::refresh_window_geometry(handle);
+                    if let Err(error) = ensure_event_context_lifetimes(window_context) {
+                        self.clear();
+                        return Err(error);
+                    }
+                    match result {
+                        Ok(geometry) => {
+                            let cached = self
+                                .cached
+                                .as_mut()
+                                .expect("validated geometry refresh must keep its cache entry");
+                            cached.snapshot.client_origin = geometry.client_origin;
+                            cached.snapshot.client_size = geometry.client_size;
+                            cached.snapshot.dpi = geometry.dpi;
+                            Ok(Some(cached.snapshot.clone()))
+                        }
+                        Err(error) => {
+                            self.clear();
+                            Err(error)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct WindowGenerationTracker {
+        windows: HashMap<usize, TrackedWindowLifetime>,
+    }
+
+    struct TrackedWindowLifetime {
+        identity: Option<ObservedWindowIdentity>,
+        generation: u64,
+        live: bool,
+    }
+
+    #[derive(PartialEq, Eq)]
+    struct ObservedWindowIdentity {
+        process_id: u32,
+        executable_path: String,
+        window_class: String,
+    }
+
+    impl WindowGenerationTracker {
+        fn begin_recording(&mut self) {
+            self.windows.retain(|_, window| window.live);
+            for window in self.windows.values_mut() {
+                window.generation = 0;
+            }
+        }
+
+        fn apply_lifecycle(&mut self, event: WindowLifecycleEvent) {
+            match event.kind {
+                WindowLifecycleKind::Created => self.created(event.hwnd),
+                WindowLifecycleKind::Destroyed => self.destroyed(event.hwnd),
+            }
+        }
+
+        fn created(&mut self, hwnd: usize) {
+            match self.windows.get_mut(&hwnd) {
+                Some(window) if window.live => {
+                    window.generation = window.generation.saturating_add(1);
+                    window.identity = None;
+                }
+                Some(window) => {
+                    window.live = true;
+                    window.identity = None;
+                }
+                None => {
+                    self.windows.insert(
+                        hwnd,
+                        TrackedWindowLifetime {
+                            identity: None,
+                            generation: 0,
+                            live: true,
+                        },
+                    );
+                }
+            }
+        }
+
+        fn destroyed(&mut self, hwnd: usize) {
+            match self.windows.get_mut(&hwnd) {
+                Some(window) if window.live => {
+                    window.generation = window.generation.saturating_add(1);
+                    window.live = false;
+                    window.identity = None;
+                }
+                Some(_) => {}
+                None => {
+                    self.windows.insert(
+                        hwnd,
+                        TrackedWindowLifetime {
+                            identity: None,
+                            generation: 1,
+                            live: false,
+                        },
+                    );
+                }
+            }
+        }
+
+        fn observe(&mut self, window: &WindowSnapshot) -> WindowInstanceId {
+            let hwnd = window.handle.raw();
+            let identity = ObservedWindowIdentity {
+                process_id: window.process_id,
+                executable_path: window.executable_path.clone(),
+                window_class: window.window_class.clone(),
+            };
+            let tracked = self
+                .windows
+                .entry(hwnd)
+                .or_insert_with(|| TrackedWindowLifetime {
+                    identity: None,
+                    generation: 0,
+                    live: true,
+                });
+
+            if !tracked.live {
+                tracked.live = true;
+            } else if tracked
+                .identity
+                .as_ref()
+                .is_some_and(|previous| previous != &identity)
+            {
+                // Identity remains a fallback for a lifecycle notification that Windows
+                // could not deliver. Lifecycle events are authoritative when available.
+                tracked.generation = tracked.generation.saturating_add(1);
+            }
+            tracked.identity = Some(identity);
+            WindowInstanceId {
+                hwnd,
+                generation: tracked.generation,
+            }
+        }
+    }
+
+    fn resolve_capture_surface(
+        queued: QueuedInputEvent,
+        generations: &mut WindowGenerationTracker,
+        pointer_snapshots: &mut PointerSnapshotCache,
+    ) -> CaptureSurface {
+        let event = queued.event;
+        match event {
+            RawInputEvent::MouseMove { x, y, .. }
+            | RawInputEvent::MouseButton { x, y, .. }
+            | RawInputEvent::MouseWheel { x, y, .. } => {
+                let window_context = queued.window_context.unwrap_or_else(|| {
+                    event_window_context(root_window_from_point(x, y), foreground_root_window())
+                });
+                resolve_pointer_surface(event, window_context, generations, pointer_snapshots)
+            }
+            RawInputEvent::Key { .. } => {
+                let foreground_root =
+                    event_foreground_root(queued.window_context, foreground_root_window);
+                let Some(foreground_root) = foreground_root else {
+                    return CaptureSurface::Screen;
+                };
+                if let Err(error) = ensure_event_window_lifetime(foreground_root) {
+                    return unreadable_surface(error);
+                }
+                let result = window_target::snapshot_foreground_window(WindowHandle::from_raw(
+                    foreground_root.root_hwnd,
+                ));
+                if let Err(error) = ensure_event_window_lifetime(foreground_root) {
+                    return unreadable_surface(error);
+                }
+                match result {
+                    Ok(Some(window)) => CaptureSurface::Window {
+                        window: captured_window(&window, generations, true),
+                        intent: WindowPointerIntent::Foreground,
+                    },
+                    Ok(None) => CaptureSurface::Screen,
+                    Err(error) => unreadable_surface(error),
+                }
+            }
+        }
+    }
+
+    fn event_foreground_root(
+        window_context: Option<EventWindowContext>,
+        query_current: impl FnOnce() -> Option<usize>,
+    ) -> Option<EventWindow> {
+        match window_context {
+            Some(context) => context.foreground_root,
+            None => event_window_context(None, query_current()).foreground_root,
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct NormalizedWindowContext {
+        pointed: Option<WindowHandle>,
+        foreground: Option<WindowHandle>,
+    }
+
+    fn normalize_event_window_context(
+        context: EventWindowContext,
+    ) -> Result<NormalizedWindowContext, window_target::WindowTargetError> {
+        ensure_event_context_lifetimes(context)?;
+        let normalized =
+            normalize_event_window_handles(context, window_target::normalize_window_handle)?;
+        ensure_event_context_lifetimes(context)?;
+        Ok(normalized)
+    }
+
+    fn normalize_event_window_handles(
+        context: EventWindowContext,
+        mut normalize: impl FnMut(
+            WindowHandle,
+        )
+            -> Result<Option<WindowHandle>, window_target::WindowTargetError>,
+    ) -> Result<NormalizedWindowContext, window_target::WindowTargetError> {
+        let pointed = context
+            .pointed_root
+            .map(|window| normalize(WindowHandle::from_raw(window.root_hwnd)))
+            .transpose()?
+            .flatten();
+        let foreground = context
+            .foreground_root
+            .map(|window| normalize(WindowHandle::from_raw(window.root_hwnd)))
+            .transpose()?
+            .flatten();
+        Ok(NormalizedWindowContext {
+            pointed,
+            foreground,
+        })
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum PointerSurfaceDecision {
+        Screen,
+        Window(WindowPointerIntent),
+    }
+
+    fn pointer_surface_decision(
+        event: RawInputEvent,
+        window_context: NormalizedWindowContext,
+    ) -> PointerSurfaceDecision {
+        let is_foreground =
+            window_context.pointed.is_some() && window_context.pointed == window_context.foreground;
+        match event {
+            RawInputEvent::MouseMove { .. } if !is_foreground => PointerSurfaceDecision::Screen,
+            RawInputEvent::MouseMove { .. } => {
+                PointerSurfaceDecision::Window(WindowPointerIntent::Foreground)
+            }
+            RawInputEvent::MouseButton {
+                state: ButtonState::Pressed,
+                ..
+            } if !is_foreground => {
+                PointerSurfaceDecision::Window(WindowPointerIntent::ActivationClick)
+            }
+            RawInputEvent::MouseButton {
+                state: ButtonState::Released,
+                ..
+            } if !is_foreground => PointerSurfaceDecision::Window(WindowPointerIntent::DropRelease),
+            RawInputEvent::MouseButton { .. } => {
+                PointerSurfaceDecision::Window(WindowPointerIntent::Foreground)
+            }
+            RawInputEvent::MouseWheel { .. } if !is_foreground => {
+                PointerSurfaceDecision::Window(WindowPointerIntent::BackgroundWheel)
+            }
+            RawInputEvent::MouseWheel { .. } => {
+                PointerSurfaceDecision::Window(WindowPointerIntent::Foreground)
+            }
+            RawInputEvent::Key { .. } => unreachable!("pointer surface received a key event"),
+        }
+    }
+
+    fn resolve_pointer_surface(
+        event: RawInputEvent,
+        window_context: EventWindowContext,
+        generations: &mut WindowGenerationTracker,
+        pointer_snapshots: &mut PointerSnapshotCache,
+    ) -> CaptureSurface {
+        let normalized_context = match normalize_event_window_context(window_context) {
+            Ok(context) => context,
+            Err(error) => return unreadable_surface(error),
+        };
+        let decision = pointer_surface_decision(event, normalized_context);
+        let PointerSurfaceDecision::Window(intent) = decision else {
+            return CaptureSurface::Screen;
+        };
+        let (Some(pointed_root), Some(normalized_handle)) =
+            (window_context.pointed_root, normalized_context.pointed)
+        else {
+            return CaptureSurface::Screen;
+        };
+        let event_window = [window_context.pointed_root, window_context.foreground_root]
+            .into_iter()
+            .flatten()
+            .find(|window| window.root_hwnd == normalized_handle.raw())
+            .unwrap_or(pointed_root);
+        let force_full_identity = !matches!(event, RawInputEvent::MouseMove { .. });
+        let pointed_window = match pointer_snapshots.resolve(
+            window_context,
+            PointerSnapshotKey {
+                event_window,
+                normalized_handle,
+            },
+            raw_event_at_ms(event),
+            force_full_identity,
+        ) {
+            Ok(Some(window)) => window,
+            Ok(None) => return CaptureSurface::Screen,
+            Err(error) => return unreadable_surface(error),
+        };
+
+        CaptureSurface::Window {
+            window: captured_window(
+                &pointed_window,
+                generations,
+                pointed_root.root_hwnd == normalized_handle.raw(),
+            ),
+            intent,
+        }
+    }
+
+    fn captured_window(
+        snapshot: &WindowSnapshot,
+        generations: &mut WindowGenerationTracker,
+        direct_pointer_target: bool,
+    ) -> CapturedWindow {
+        CapturedWindow {
+            instance: generations.observe(snapshot),
+            executable_path: snapshot.executable_path.clone(),
+            window_class: snapshot.window_class.clone(),
+            title: snapshot.title.clone(),
+            client_origin_x: snapshot.client_origin.x,
+            client_origin_y: snapshot.client_origin.y,
+            client_size: snapshot.client_size,
+            dpi: snapshot.dpi,
+            availability: TargetWindowAvailability::Deferred,
+            direct_pointer_target,
+        }
+    }
+
+    fn apply_target_availability(controller: &AppController, surface: &mut CaptureSurface) {
+        if let CaptureSurface::Window { window, .. } = surface {
+            window.availability = controller.target_availability(window.instance);
+        }
+    }
+
+    fn unreadable_surface(error: impl std::fmt::Display) -> CaptureSurface {
+        CaptureSurface::Unreadable(format!("该窗口无法读取：{error}"))
+    }
+
+    fn unreadable_pointer_feedback(
+        event: RawInputEvent,
+        surface: &CaptureSurface,
+    ) -> Option<(String, i32, i32)> {
+        let CaptureSurface::Unreadable(message) = surface else {
+            return None;
+        };
+        match event {
+            RawInputEvent::MouseMove { x, y, .. }
+            | RawInputEvent::MouseButton { x, y, .. }
+            | RawInputEvent::MouseWheel { x, y, .. } => Some((message.clone(), x, y)),
+            RawInputEvent::Key { .. } => None,
+        }
+    }
+
+    fn raw_event_at_ms(event: RawInputEvent) -> u64 {
+        match event {
+            RawInputEvent::MouseMove { at_ms, .. }
+            | RawInputEvent::MouseButton { at_ms, .. }
+            | RawInputEvent::MouseWheel { at_ms, .. }
+            | RawInputEvent::Key { at_ms, .. } => at_ms,
         }
     }
 
@@ -448,16 +1310,19 @@ mod capture {
         }
 
         let hooks = match HookHandles::install() {
-            Ok(hooks) => {
-                let thread_id = unsafe { GetCurrentThreadId() };
-                let _ = installed_tx.send(Ok(thread_id));
-                hooks
-            }
+            Ok(hooks) => hooks,
             Err(error) => {
                 let _ = installed_tx.send(Err(error));
                 return;
             }
         };
+        if let Err(error) = seed_top_level_windows() {
+            hooks.unhook();
+            let _ = installed_tx.send(Err(error));
+            return;
+        }
+        let thread_id = unsafe { GetCurrentThreadId() };
+        let _ = installed_tx.send(Ok(thread_id));
 
         loop {
             let result = unsafe { GetMessageW(&mut message, None, 0, 0) }.0;
@@ -476,6 +1341,7 @@ mod capture {
     struct HookHandles {
         mouse: HHOOK,
         keyboard: HHOOK,
+        window_lifecycle: HWINEVENTHOOK,
     }
 
     impl HookHandles {
@@ -500,14 +1366,130 @@ mod capture {
                 }
             };
 
-            Ok(Self { mouse, keyboard })
+            let window_lifecycle = unsafe {
+                SetWinEventHook(
+                    EVENT_OBJECT_CREATE,
+                    EVENT_OBJECT_DESTROY,
+                    HMODULE::default(),
+                    Some(window_lifecycle_hook_proc),
+                    0,
+                    0,
+                    WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+                )
+            };
+            if window_lifecycle.is_invalid() {
+                let error = windows::core::Error::from_win32();
+                unsafe {
+                    let _ = UnhookWindowsHookEx(mouse);
+                    let _ = UnhookWindowsHookEx(keyboard);
+                }
+                return Err(format!(
+                    "SetWinEventHook window lifecycle hook failed: {error}"
+                ));
+            }
+
+            Ok(Self {
+                mouse,
+                keyboard,
+                window_lifecycle,
+            })
         }
 
         fn unhook(self) {
             unsafe {
+                let _ = UnhookWinEvent(self.window_lifecycle);
                 let _ = UnhookWindowsHookEx(self.mouse);
                 let _ = UnhookWindowsHookEx(self.keyboard);
             }
+        }
+    }
+
+    fn seed_top_level_windows() -> Result<(), String> {
+        let mut windows = HashSet::new();
+        unsafe {
+            EnumWindows(
+                Some(collect_top_level_window),
+                LPARAM((&mut windows as *mut HashSet<usize>) as isize),
+            )
+        }
+        .map_err(|error| format!("EnumWindows lifecycle seed failed: {error}"))?;
+        window_lifetimes()
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .seed(&windows);
+        HOOK_CONTEXT.with(|current| {
+            if let Some(context) = current.borrow().as_ref() {
+                *context.top_level_windows.borrow_mut() = windows;
+            }
+        });
+        Ok(())
+    }
+
+    unsafe extern "system" fn collect_top_level_window(hwnd: HWND, context: LPARAM) -> BOOL {
+        let windows = (context.0 as *mut HashSet<usize>).as_mut();
+        if let Some(windows) = windows {
+            windows.insert(hwnd.0 as usize);
+        }
+        BOOL(1)
+    }
+
+    fn lifecycle_kind(event: u32, id_object: i32, id_child: i32) -> Option<WindowLifecycleKind> {
+        if id_object != OBJID_WINDOW.0 || id_child != CHILDID_SELF as i32 {
+            return None;
+        }
+        match event {
+            EVENT_OBJECT_CREATE => Some(WindowLifecycleKind::Created),
+            EVENT_OBJECT_DESTROY => Some(WindowLifecycleKind::Destroyed),
+            _ => None,
+        }
+    }
+
+    fn accept_top_level_lifecycle(
+        kind: WindowLifecycleKind,
+        hwnd: usize,
+        is_top_level_create: bool,
+        top_level_windows: &mut HashSet<usize>,
+    ) -> Option<WindowLifecycleEvent> {
+        if hwnd == 0 {
+            return None;
+        }
+        let accepted = match kind {
+            WindowLifecycleKind::Created => is_top_level_create && top_level_windows.insert(hwnd),
+            WindowLifecycleKind::Destroyed => top_level_windows.remove(&hwnd),
+        };
+        accepted.then_some(WindowLifecycleEvent { hwnd, kind })
+    }
+
+    unsafe extern "system" fn window_lifecycle_hook_proc(
+        _hook: HWINEVENTHOOK,
+        event: u32,
+        hwnd: HWND,
+        id_object: i32,
+        id_child: i32,
+        _event_thread: u32,
+        _event_time_ms: u32,
+    ) {
+        let Some(kind) = lifecycle_kind(event, id_object, id_child) else {
+            return;
+        };
+        // EVENT_OBJECT_DESTROY is delivered after the object is no longer queryable,
+        // so destruction is checked against the top-level set captured while alive.
+        let is_top_level_create =
+            kind == WindowLifecycleKind::Created && GetAncestor(hwnd, GA_ROOT) == hwnd;
+        let lifecycle = HOOK_CONTEXT.with(|current| {
+            let current = current.borrow();
+            let context = current.as_ref()?;
+            let mut top_level_windows = context.top_level_windows.borrow_mut();
+            accept_top_level_lifecycle(
+                kind,
+                hwnd.0 as usize,
+                is_top_level_create,
+                &mut top_level_windows,
+            )
+        });
+        if let Some(lifecycle) = lifecycle {
+            apply_process_window_lifecycle(lifecycle);
+            let _ = dispatch_hook_message(CaptureWorkerMessage::WindowLifecycle(lifecycle));
         }
     }
 
@@ -517,8 +1499,15 @@ mod capture {
         l_param: LPARAM,
     ) -> LRESULT {
         if code == HC_ACTION as i32 {
-            if let Some(event) = mouse_event(w_param, l_param) {
-                capture(event);
+            if let Some((event, pointed_root_hwnd)) = mouse_event(w_param, l_param) {
+                let foreground_root_hwnd = foreground_root_window();
+                capture(
+                    event,
+                    Some(event_window_context(
+                        pointed_root_hwnd,
+                        foreground_root_hwnd,
+                    )),
+                );
             }
         }
 
@@ -532,6 +1521,7 @@ mod capture {
     ) -> LRESULT {
         if code == HC_ACTION as i32 {
             let foreground_root_hwnd = foreground_root_window();
+            let window_context = event_window_context(None, foreground_root_hwnd);
             let own_window_hwnds = current_own_window_hwnds();
 
             if same_root_window(foreground_root_hwnd, own_window_hwnds) {
@@ -558,7 +1548,7 @@ mod capture {
                 foreground_root_hwnd,
                 own_window_hwnds,
             ) {
-                capture(event);
+                capture(event, Some(window_context));
             }
         }
 
@@ -587,11 +1577,11 @@ mod capture {
         let _ = dispatch_hook_message(CaptureWorkerMessage::ResetHotkeyFilter);
     }
 
-    fn capture(event: RawInputEvent) {
-        let _ = dispatch_capture_event(event);
+    fn capture(event: RawInputEvent, window_context: Option<EventWindowContext>) {
+        let _ = dispatch_capture_event(event, window_context);
     }
 
-    fn mouse_event(w_param: WPARAM, l_param: LPARAM) -> Option<RawInputEvent> {
+    fn mouse_event(w_param: WPARAM, l_param: LPARAM) -> Option<(RawInputEvent, Option<usize>)> {
         let info = unsafe { (l_param.0 as *const MSLLHOOKSTRUCT).as_ref()? };
         if info.dwExtraInfo == REMEMBER_INPUT_EXTRA_INFO {
             return None;
@@ -600,11 +1590,12 @@ mod capture {
         let at_ms = now_ms();
         let x = info.pt.x;
         let y = info.pt.y;
-        if same_root_window(root_window_from_point(x, y), current_own_window_hwnds()) {
+        let pointed_root_hwnd = root_window_from_point(x, y);
+        if same_root_window(pointed_root_hwnd, current_own_window_hwnds()) {
             return None;
         }
 
-        match w_param.0 as u32 {
+        let event = match w_param.0 as u32 {
             WM_MOUSEMOVE => Some(RawInputEvent::MouseMove { at_ms, x, y }),
             WM_LBUTTONDOWN => Some(mouse_button(
                 at_ms,
@@ -659,7 +1650,8 @@ mod capture {
                 delta: signed_high_word(info.mouseData) as i32,
             }),
             _ => None,
-        }
+        }?;
+        Some((event, pointed_root_hwnd))
     }
 
     fn mouse_button(
@@ -781,7 +1773,10 @@ mod capture {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use crate::model::MacroStep;
+        use crate::{
+            model::{ClientSize, MacroStep},
+            window_target::{ScreenPoint, WindowHandle},
+        };
         use std::sync::mpsc::TryRecvError;
         use std::time::Duration;
         use windows::Win32::Foundation::POINT;
@@ -799,6 +1794,528 @@ mod capture {
             CapturePauseGuard {
                 resume: Some(resume_tx),
             }
+        }
+
+        fn input_message(event: RawInputEvent) -> CaptureWorkerMessage {
+            CaptureWorkerMessage::Input(QueuedInputEvent::without_window_context(event))
+        }
+
+        fn snapshot(
+            hwnd: usize,
+            process_id: u32,
+            executable_path: &str,
+            window_class: &str,
+        ) -> WindowSnapshot {
+            WindowSnapshot {
+                handle: WindowHandle::from_raw(hwnd),
+                executable_path: executable_path.to_string(),
+                window_class: window_class.to_string(),
+                title: "Window".to_string(),
+                client_origin: ScreenPoint { x: 10, y: 20 },
+                client_size: ClientSize {
+                    width: 800,
+                    height: 600,
+                },
+                dpi: 96,
+                process_id,
+                visible: true,
+                minimized: false,
+            }
+        }
+
+        fn event_window(hwnd: usize) -> EventWindow {
+            EventWindow {
+                root_hwnd: hwnd,
+                lifetime_token: WindowLifetimeToken::default(),
+            }
+        }
+
+        fn pointer_snapshot_key(hwnd: usize) -> PointerSnapshotKey {
+            PointerSnapshotKey {
+                event_window: event_window(hwnd),
+                normalized_handle: WindowHandle::from_raw(hwnd),
+            }
+        }
+
+        #[test]
+        fn process_window_lifetime_token_changes_once_per_destroy_recreate_cycle() {
+            let mut registry = WindowLifetimeRegistry::default();
+            registry.seed(&HashSet::from([10]));
+            assert_eq!(registry.token(10).value(), 0);
+
+            registry.apply_lifecycle(WindowLifecycleEvent {
+                hwnd: 10,
+                kind: WindowLifecycleKind::Destroyed,
+            });
+            assert_eq!(registry.token(10).value(), 1);
+            registry.apply_lifecycle(WindowLifecycleEvent {
+                hwnd: 10,
+                kind: WindowLifecycleKind::Destroyed,
+            });
+            assert_eq!(
+                registry.token(10).value(),
+                1,
+                "duplicate destroy is ignored"
+            );
+
+            registry.apply_lifecycle(WindowLifecycleEvent {
+                hwnd: 10,
+                kind: WindowLifecycleKind::Created,
+            });
+            assert_eq!(registry.token(10).value(), 1);
+            registry.seed(&HashSet::from([10]));
+            assert_eq!(
+                registry.token(10).value(),
+                1,
+                "reseeding capture must not reset the process lifetime token"
+            );
+        }
+
+        #[test]
+        fn event_window_rejects_a_reused_hwnd_token() {
+            let captured = EventWindow {
+                root_hwnd: 10,
+                lifetime_token: WindowLifetimeToken(4),
+            };
+
+            assert!(event_window_lifetime_matches(
+                captured,
+                WindowLifetimeToken(4)
+            ));
+            assert!(!event_window_lifetime_matches(
+                captured,
+                WindowLifetimeToken(5)
+            ));
+        }
+
+        #[test]
+        fn pointer_snapshot_cache_key_includes_event_time_lifetime() {
+            let original = PointerSnapshotKey {
+                event_window: EventWindow {
+                    root_hwnd: 10,
+                    lifetime_token: WindowLifetimeToken(4),
+                },
+                normalized_handle: WindowHandle::from_raw(10),
+            };
+            let reused = PointerSnapshotKey {
+                event_window: EventWindow {
+                    root_hwnd: 10,
+                    lifetime_token: WindowLifetimeToken(5),
+                },
+                normalized_handle: WindowHandle::from_raw(10),
+            };
+
+            assert_eq!(
+                pointer_snapshot_refresh(Some(original), reused, Some(100), 101, false),
+                PointerSnapshotRefresh::FullIdentity
+            );
+        }
+
+        #[test]
+        fn automatic_stop_forces_the_next_v2_session_to_rebase_without_idle_input() {
+            let mut generations = WindowGenerationTracker::default();
+            let window = snapshot(10, 42, r"C:\Apps\same.exe", "SameWindow");
+            generations.created(10);
+            generations.begin_recording();
+            generations.destroyed(10);
+            generations.created(10);
+            assert_eq!(generations.observe(&window).generation, 1);
+
+            let mut tracking_window_relative = true;
+            let mut pointer_snapshots = PointerSnapshotCache {
+                cached: Some(CachedPointerSnapshot {
+                    key: pointer_snapshot_key(10),
+                    snapshot: window.clone(),
+                    last_full_snapshot_at_ms: 10,
+                }),
+            };
+            end_window_generation_tracking(&mut tracking_window_relative, &mut pointer_snapshots);
+            assert!(!tracking_window_relative);
+            assert!(pointer_snapshots.cached.is_none());
+
+            // This models the very next queued message being the start hotkey action:
+            // there was no intervening idle Input to observe a false mode.
+            sync_window_generation_tracking(
+                true,
+                &mut tracking_window_relative,
+                &mut generations,
+                &mut pointer_snapshots,
+            );
+            assert!(tracking_window_relative);
+            assert_eq!(generations.observe(&window).generation, 0);
+        }
+
+        #[test]
+        fn stable_pointer_identity_snapshot_is_capped_at_the_sampling_rate() {
+            let mut cached_key = None;
+            let mut last_full = None;
+            let mut full_snapshots = 0;
+            let key = pointer_snapshot_key(10);
+
+            for at_ms in 0..1_000 {
+                if pointer_snapshot_refresh(cached_key, key, last_full, at_ms, false)
+                    == PointerSnapshotRefresh::FullIdentity
+                {
+                    full_snapshots += 1;
+                    cached_key = Some(key);
+                    last_full = Some(at_ms);
+                }
+            }
+
+            assert_eq!(full_snapshots, 63);
+        }
+
+        #[test]
+        fn pointer_snapshot_refresh_is_immediate_for_edges_and_non_move_events() {
+            let first = pointer_snapshot_key(10);
+            let second = pointer_snapshot_key(20);
+            assert_eq!(
+                pointer_snapshot_refresh(Some(first), second, Some(100), 101, false),
+                PointerSnapshotRefresh::FullIdentity
+            );
+            assert_eq!(
+                pointer_snapshot_refresh(Some(first), first, Some(100), 101, true),
+                PointerSnapshotRefresh::FullIdentity
+            );
+            assert_eq!(
+                pointer_snapshot_refresh(Some(first), first, Some(100), 115, false),
+                PointerSnapshotRefresh::GeometryOnly
+            );
+            assert_eq!(
+                pointer_snapshot_refresh(Some(first), first, Some(100), 116, false),
+                PointerSnapshotRefresh::FullIdentity
+            );
+        }
+
+        #[test]
+        fn activation_intent_uses_the_hook_time_foreground_roots() {
+            let event = RawInputEvent::MouseButton {
+                at_ms: 10,
+                x: 20,
+                y: 30,
+                button: MouseButton::Left,
+                state: ButtonState::Pressed,
+            };
+
+            assert_eq!(
+                pointer_surface_decision(
+                    event,
+                    NormalizedWindowContext {
+                        pointed: Some(WindowHandle::from_raw(10)),
+                        foreground: Some(WindowHandle::from_raw(20)),
+                    }
+                ),
+                PointerSurfaceDecision::Window(WindowPointerIntent::ActivationClick)
+            );
+            assert_eq!(
+                pointer_surface_decision(
+                    event,
+                    NormalizedWindowContext {
+                        pointed: Some(WindowHandle::from_raw(10)),
+                        foreground: Some(WindowHandle::from_raw(10)),
+                    }
+                ),
+                PointerSurfaceDecision::Window(WindowPointerIntent::Foreground)
+            );
+        }
+
+        #[test]
+        fn owned_transient_folded_to_foreground_keeps_all_pointer_intents_foreground() {
+            let popup = WindowHandle::from_raw(99);
+            let owner = WindowHandle::from_raw(10);
+            let folded = normalize_event_window_handles(
+                EventWindowContext {
+                    pointed_root: Some(event_window(popup.raw())),
+                    foreground_root: Some(event_window(owner.raw())),
+                },
+                |handle| Ok(Some(if handle == popup { owner } else { handle })),
+            )
+            .expect("owned popup normalization");
+            assert_eq!(folded.pointed, folded.foreground);
+            let events = [
+                RawInputEvent::MouseMove {
+                    at_ms: 1,
+                    x: 2,
+                    y: 3,
+                },
+                RawInputEvent::MouseButton {
+                    at_ms: 2,
+                    x: 2,
+                    y: 3,
+                    button: MouseButton::Left,
+                    state: ButtonState::Pressed,
+                },
+                RawInputEvent::MouseButton {
+                    at_ms: 3,
+                    x: 2,
+                    y: 3,
+                    button: MouseButton::Left,
+                    state: ButtonState::Released,
+                },
+                RawInputEvent::MouseWheel {
+                    at_ms: 4,
+                    x: 2,
+                    y: 3,
+                    delta: 120,
+                },
+            ];
+
+            for event in events {
+                assert_eq!(
+                    pointer_surface_decision(event, folded),
+                    PointerSurfaceDecision::Window(WindowPointerIntent::Foreground)
+                );
+            }
+        }
+
+        #[test]
+        fn normalized_background_pointer_intents_remain_distinct() {
+            let background = NormalizedWindowContext {
+                pointed: Some(WindowHandle::from_raw(10)),
+                foreground: Some(WindowHandle::from_raw(20)),
+            };
+
+            assert_eq!(
+                pointer_surface_decision(
+                    RawInputEvent::MouseMove {
+                        at_ms: 1,
+                        x: 2,
+                        y: 3,
+                    },
+                    background,
+                ),
+                PointerSurfaceDecision::Screen
+            );
+            assert_eq!(
+                pointer_surface_decision(
+                    RawInputEvent::MouseButton {
+                        at_ms: 2,
+                        x: 2,
+                        y: 3,
+                        button: MouseButton::Left,
+                        state: ButtonState::Pressed,
+                    },
+                    background,
+                ),
+                PointerSurfaceDecision::Window(WindowPointerIntent::ActivationClick)
+            );
+            assert_eq!(
+                pointer_surface_decision(
+                    RawInputEvent::MouseButton {
+                        at_ms: 3,
+                        x: 2,
+                        y: 3,
+                        button: MouseButton::Left,
+                        state: ButtonState::Released,
+                    },
+                    background,
+                ),
+                PointerSurfaceDecision::Window(WindowPointerIntent::DropRelease)
+            );
+            assert_eq!(
+                pointer_surface_decision(
+                    RawInputEvent::MouseWheel {
+                        at_ms: 4,
+                        x: 2,
+                        y: 3,
+                        delta: 120,
+                    },
+                    background,
+                ),
+                PointerSurfaceDecision::Window(WindowPointerIntent::BackgroundWheel)
+            );
+        }
+
+        #[test]
+        fn keyboard_target_uses_hook_time_foreground_without_a_later_query() {
+            let root = event_foreground_root(
+                Some(EventWindowContext {
+                    pointed_root: None,
+                    foreground_root: Some(event_window(10)),
+                }),
+                || panic!("worker must not query foreground after the key event"),
+            );
+
+            assert_eq!(root, Some(event_window(10)));
+        }
+
+        #[test]
+        fn background_move_is_screen_relative_without_a_target_snapshot() {
+            assert_eq!(
+                pointer_surface_decision(
+                    RawInputEvent::MouseMove {
+                        at_ms: 10,
+                        x: 20,
+                        y: 30,
+                    },
+                    NormalizedWindowContext {
+                        pointed: Some(WindowHandle::from_raw(10)),
+                        foreground: Some(WindowHandle::from_raw(20)),
+                    }
+                ),
+                PointerSurfaceDecision::Screen
+            );
+        }
+
+        #[test]
+        fn lifecycle_filter_accepts_only_window_self_events() {
+            assert_eq!(
+                lifecycle_kind(EVENT_OBJECT_CREATE, OBJID_WINDOW.0, CHILDID_SELF as i32),
+                Some(WindowLifecycleKind::Created)
+            );
+            assert_eq!(
+                lifecycle_kind(EVENT_OBJECT_DESTROY, OBJID_WINDOW.0, CHILDID_SELF as i32),
+                Some(WindowLifecycleKind::Destroyed)
+            );
+            assert_eq!(
+                lifecycle_kind(EVENT_OBJECT_CREATE, OBJID_WINDOW.0 + 1, CHILDID_SELF as i32),
+                None
+            );
+            assert_eq!(lifecycle_kind(EVENT_OBJECT_CREATE, OBJID_WINDOW.0, 1), None);
+            assert_eq!(
+                lifecycle_kind(
+                    EVENT_OBJECT_CREATE + 10,
+                    OBJID_WINDOW.0,
+                    CHILDID_SELF as i32
+                ),
+                None
+            );
+        }
+
+        #[test]
+        fn top_level_lifecycle_filter_uses_the_live_window_set_for_destroy_events() {
+            let mut top_level_windows = HashSet::from([10]);
+
+            assert_eq!(
+                accept_top_level_lifecycle(
+                    WindowLifecycleKind::Created,
+                    20,
+                    false,
+                    &mut top_level_windows,
+                ),
+                None,
+                "child-window creation must be ignored"
+            );
+            assert_eq!(
+                accept_top_level_lifecycle(
+                    WindowLifecycleKind::Created,
+                    20,
+                    true,
+                    &mut top_level_windows,
+                ),
+                Some(WindowLifecycleEvent {
+                    hwnd: 20,
+                    kind: WindowLifecycleKind::Created,
+                })
+            );
+            assert_eq!(
+                accept_top_level_lifecycle(
+                    WindowLifecycleKind::Created,
+                    20,
+                    true,
+                    &mut top_level_windows,
+                ),
+                None,
+                "duplicate create notification must not start another lifetime"
+            );
+            assert_eq!(
+                accept_top_level_lifecycle(
+                    WindowLifecycleKind::Destroyed,
+                    10,
+                    false,
+                    &mut top_level_windows,
+                ),
+                Some(WindowLifecycleEvent {
+                    hwnd: 10,
+                    kind: WindowLifecycleKind::Destroyed,
+                }),
+                "a seeded top-level window remains identifiable after destruction"
+            );
+            assert_eq!(
+                accept_top_level_lifecycle(
+                    WindowLifecycleKind::Destroyed,
+                    99,
+                    false,
+                    &mut top_level_windows,
+                ),
+                None,
+                "unknown child-window destruction must be ignored"
+            );
+        }
+
+        #[test]
+        fn lifecycle_reopen_increments_generation_even_when_identity_is_identical() {
+            let mut generations = WindowGenerationTracker::default();
+            generations.apply_lifecycle(WindowLifecycleEvent {
+                hwnd: 10,
+                kind: WindowLifecycleKind::Created,
+            });
+            generations.begin_recording();
+            let original = snapshot(10, 42, r"C:\Apps\same.exe", "SameWindow");
+
+            assert_eq!(
+                generations.observe(&original),
+                WindowInstanceId {
+                    hwnd: 10,
+                    generation: 0,
+                }
+            );
+            assert_eq!(generations.observe(&original).generation, 0);
+
+            generations.apply_lifecycle(WindowLifecycleEvent {
+                hwnd: 10,
+                kind: WindowLifecycleKind::Destroyed,
+            });
+            generations.apply_lifecycle(WindowLifecycleEvent {
+                hwnd: 10,
+                kind: WindowLifecycleKind::Created,
+            });
+
+            assert_eq!(
+                generations.observe(&original),
+                WindowInstanceId {
+                    hwnd: 10,
+                    generation: 1,
+                }
+            );
+        }
+
+        #[test]
+        fn generation_tracking_rebases_live_windows_for_each_recording() {
+            let mut generations = WindowGenerationTracker::default();
+            let window = snapshot(10, 42, r"C:\Apps\same.exe", "SameWindow");
+            generations.created(10);
+            let _ = generations.observe(&window);
+            generations.destroyed(10);
+            generations.created(10);
+            assert_eq!(generations.observe(&window).generation, 1);
+
+            generations.begin_recording();
+            assert_eq!(
+                generations.observe(&window).generation,
+                0,
+                "a live window at the new recording boundary is initial"
+            );
+
+            generations.destroyed(10);
+            generations.created(10);
+            assert_eq!(
+                generations.observe(&window).generation,
+                1,
+                "the same HWND reopened during recording is deferred"
+            );
+        }
+
+        #[test]
+        fn identity_change_remains_a_fallback_when_lifecycle_events_are_missed() {
+            let mut generations = WindowGenerationTracker::default();
+            generations.begin_recording();
+            let original = snapshot(10, 42, r"C:\Apps\first.exe", "FirstWindow");
+            let replacement = snapshot(10, 42, r"C:\Apps\second.exe", "SecondWindow");
+
+            assert_eq!(generations.observe(&original).generation, 0);
+            assert_eq!(generations.observe(&replacement).generation, 1);
+            assert_eq!(generations.observe(&replacement).generation, 1);
         }
 
         #[test]
@@ -952,7 +2469,7 @@ mod capture {
                     state: ButtonState::Released,
                 },
             ] {
-                tx.send(CaptureWorkerMessage::Input(event)).unwrap();
+                tx.send(input_message(event)).unwrap();
             }
             let (reached_tx, reached_rx) = mpsc::sync_channel(0);
             let (resume_tx, resume_rx) = mpsc::channel();
@@ -997,7 +2514,7 @@ mod capture {
             let worker = thread::spawn(move || run_capture_worker(worker_shared, rx));
 
             let start_pause = pause_capture_worker(&tx);
-            tx.send(CaptureWorkerMessage::Input(RawInputEvent::MouseButton {
+            tx.send(input_message(RawInputEvent::MouseButton {
                 at_ms: 1_010,
                 x: 10,
                 y: 10,
@@ -1013,7 +2530,7 @@ mod capture {
             drop(start_pause);
 
             let stop_pause = pause_capture_worker(&tx);
-            tx.send(CaptureWorkerMessage::Input(RawInputEvent::MouseButton {
+            tx.send(input_message(RawInputEvent::MouseButton {
                 at_ms: 1_020,
                 x: 20,
                 y: 20,
@@ -1057,6 +2574,7 @@ mod capture {
                 control_hotkeys: ControlHotkeyRuntime::default(),
                 own_windows,
                 capture_event_tx: tx,
+                top_level_windows: RefCell::new(HashSet::new()),
             };
             let lifecycle_sender_guard = CAPTURE_CONTROL_TX
                 .lock()
@@ -1067,7 +2585,7 @@ mod capture {
                     *current.borrow_mut() = Some(hook_context);
                 });
                 assert_eq!(current_own_window_hwnds(), [Some(0x55), Some(0x66)]);
-                assert!(dispatch_hook_message(CaptureWorkerMessage::Input(
+                assert!(dispatch_hook_message(input_message(
                     RawInputEvent::MouseButton {
                         at_ms: 1_010,
                         x: 10,
@@ -1082,7 +2600,7 @@ mod capture {
                         at_ms: 1_015,
                     }
                 )));
-                assert!(dispatch_hook_message(CaptureWorkerMessage::Input(
+                assert!(dispatch_hook_message(input_message(
                     RawInputEvent::MouseButton {
                         at_ms: 1_020,
                         x: 20,
@@ -1098,15 +2616,20 @@ mod capture {
             let action_shared = shared.clone();
             let action_recording = stopped_recording.clone();
             let worker = thread::spawn(move || {
-                run_capture_worker_with_actions(worker_shared, rx, |queued| {
-                    assert_eq!(queued.action, ControlHotkeyAction::Stop);
-                    let recording = action_shared
-                        .lock()
-                        .unwrap()
-                        .stop_recording(queued.at_ms)
-                        .unwrap();
-                    *action_recording.lock().unwrap() = Some(recording);
-                });
+                run_capture_worker_with_actions(
+                    worker_shared,
+                    rx,
+                    |queued| {
+                        assert_eq!(queued.action, ControlHotkeyAction::Stop);
+                        let recording = action_shared
+                            .lock()
+                            .unwrap()
+                            .stop_recording(queued.at_ms)
+                            .unwrap();
+                        *action_recording.lock().unwrap() = Some(recording);
+                    },
+                    |_| {},
+                );
             });
 
             dispatch_done_rx
@@ -1142,7 +2665,7 @@ mod capture {
             let worker_shared = shared.clone();
             let worker = thread::spawn(move || run_capture_worker(worker_shared, rx));
 
-            tx.send(CaptureWorkerMessage::Input(RawInputEvent::MouseButton {
+            tx.send(input_message(RawInputEvent::MouseButton {
                 at_ms: 1_010,
                 x: 10,
                 y: 10,
@@ -1150,7 +2673,7 @@ mod capture {
                 state: ButtonState::Pressed,
             }))
             .unwrap();
-            tx.send(CaptureWorkerMessage::Input(RawInputEvent::MouseButton {
+            tx.send(input_message(RawInputEvent::MouseButton {
                 at_ms: 1_020,
                 x: 20,
                 y: 20,
@@ -1191,7 +2714,7 @@ mod capture {
                 .unwrap();
             let (tx, rx) = mpsc::channel();
 
-            tx.send(CaptureWorkerMessage::Input(RawInputEvent::MouseButton {
+            tx.send(input_message(RawInputEvent::MouseButton {
                 at_ms: 1_001,
                 x: 0,
                 y: 0,
@@ -1200,14 +2723,14 @@ mod capture {
             }))
             .unwrap();
             for point in 1..=600 {
-                tx.send(CaptureWorkerMessage::Input(RawInputEvent::MouseMove {
+                tx.send(input_message(RawInputEvent::MouseMove {
                     at_ms: 1_001 + point,
                     x: point as i32,
                     y: (point * 2) as i32,
                 }))
                 .unwrap();
             }
-            tx.send(CaptureWorkerMessage::Input(RawInputEvent::MouseButton {
+            tx.send(input_message(RawInputEvent::MouseButton {
                 at_ms: 1_602,
                 x: 600,
                 y: 1_200,
@@ -1248,7 +2771,7 @@ mod capture {
             let worker_shared = shared.clone();
             let worker = thread::spawn(move || run_capture_worker(worker_shared, rx));
 
-            tx.send(CaptureWorkerMessage::Input(RawInputEvent::Key {
+            tx.send(input_message(RawInputEvent::Key {
                 at_ms: 1_010,
                 vk_code: 0xA2,
                 scan_code: 0x1D,
@@ -1257,7 +2780,7 @@ mod capture {
             }))
             .unwrap();
             tx.send(CaptureWorkerMessage::ResetHotkeyFilter).unwrap();
-            tx.send(CaptureWorkerMessage::Input(RawInputEvent::Key {
+            tx.send(input_message(RawInputEvent::Key {
                 at_ms: 1_020,
                 vk_code: 0x41,
                 scan_code: 0x1E,
@@ -1314,11 +2837,11 @@ mod platform {
         state: ButtonState,
     ) -> Result<(), String> {
         let (flags, mouse_data) = mouse_button_input(button, state);
-        send_positioned_mouse_input(x, y, flags, mouse_data)
+        send_positioned_mouse_action(x, y, flags, mouse_data)
     }
 
     pub fn mouse_wheel(x: i32, y: i32, delta: i32) -> Result<(), String> {
-        send_positioned_mouse_input(x, y, MOUSEEVENTF_WHEEL, delta as u32)
+        send_positioned_mouse_action(x, y, MOUSEEVENTF_WHEEL, delta as u32)
     }
 
     pub fn key(
@@ -1402,13 +2925,55 @@ mod platform {
         send_input(mouse_input(input))
     }
 
+    fn send_positioned_mouse_action(
+        x: i32,
+        y: i32,
+        action_flags: MOUSE_EVENT_FLAGS,
+        mouse_data: u32,
+    ) -> Result<(), String> {
+        let bounds = virtual_desktop_bounds()?;
+        send_inputs(&positioned_mouse_action_inputs(
+            x,
+            y,
+            bounds,
+            action_flags,
+            mouse_data,
+        ))
+    }
+
+    fn positioned_mouse_action_inputs(
+        x: i32,
+        y: i32,
+        bounds: (i32, i32, i32, i32),
+        action_flags: MOUSE_EVENT_FLAGS,
+        mouse_data: u32,
+    ) -> [INPUT; 2] {
+        [
+            mouse_input(positioned_mouse_input(
+                x,
+                y,
+                bounds,
+                MOUSE_EVENT_FLAGS(0),
+                0,
+            )),
+            mouse_input(MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: mouse_data,
+                dwFlags: action_flags,
+                time: 0,
+                dwExtraInfo: REMEMBER_INPUT_EXTRA_INFO,
+            }),
+        ]
+    }
+
     fn virtual_desktop_bounds() -> Result<(i32, i32, i32, i32), String> {
         let left = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
         let top = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
         let width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
         let height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
         if width <= 0 || height <= 0 {
-            return Err("GetSystemMetrics virtual desktop failed".to_string());
+            return Err("无法读取 Windows 虚拟桌面范围。".to_string());
         }
 
         Ok((left, top, width, height))
@@ -1454,11 +3019,19 @@ mod platform {
     }
 
     fn send_input(input: INPUT) -> Result<(), String> {
-        let sent = unsafe { SendInput(&[input], size_of::<INPUT>() as i32) };
-        if sent == 1 {
+        send_inputs(&[input])
+    }
+
+    fn send_inputs(inputs: &[INPUT]) -> Result<(), String> {
+        let sent = unsafe { SendInput(inputs, size_of::<INPUT>() as i32) };
+        if usize::try_from(sent).ok() == Some(inputs.len()) {
             Ok(())
         } else {
-            Err("SendInput failed".to_string())
+            Err(format!(
+                "系统未能完整发送模拟输入（已发送 {sent}/{} 个事件）：{}",
+                inputs.len(),
+                windows::core::Error::from_win32()
+            ))
         }
     }
 
@@ -1504,9 +3077,9 @@ mod platform {
         }
 
         #[test]
-        fn positioned_button_input_includes_absolute_virtual_desktop_flags_and_sentinel() {
+        fn positioned_movement_uses_absolute_virtual_desktop_flags_and_sentinel() {
             let input =
-                positioned_mouse_input(320, 240, (0, 0, 1_920, 1_080), MOUSEEVENTF_LEFTDOWN, 0);
+                positioned_mouse_input(320, 240, (0, 0, 1_920, 1_080), MOUSE_EVENT_FLAGS(0), 0);
 
             assert_eq!(
                 input.dwFlags,
@@ -1514,23 +3087,26 @@ mod platform {
                     | MOUSEEVENTF_ABSOLUTE
                     | MOUSEEVENTF_VIRTUALDESK
                     | MOUSEEVENTF_MOVE_NOCOALESCE
-                    | MOUSEEVENTF_LEFTDOWN
             );
             assert_eq!(input.dwExtraInfo, REMEMBER_INPUT_EXTRA_INFO);
         }
 
         #[test]
-        fn positioned_wheel_input_keeps_mouse_data() {
-            let input = positioned_mouse_input(
+        fn positioned_actions_are_separate_from_cursor_movement() {
+            let inputs = positioned_mouse_action_inputs(
                 320,
                 240,
                 (0, 0, 1_920, 1_080),
                 MOUSEEVENTF_WHEEL,
                 (-120_i32) as u32,
             );
-
-            assert_eq!(input.mouseData, (-120_i32) as u32);
-            assert!(input.dwFlags.contains(MOUSEEVENTF_WHEEL));
+            let movement = unsafe { inputs[0].Anonymous.mi };
+            let action = unsafe { inputs[1].Anonymous.mi };
+            assert!(movement.dwFlags.contains(MOUSEEVENTF_MOVE));
+            assert!(!movement.dwFlags.contains(MOUSEEVENTF_WHEEL));
+            assert_eq!(action.dwFlags, MOUSEEVENTF_WHEEL);
+            assert_eq!(action.mouseData, (-120_i32) as u32);
+            assert_eq!(action.dwExtraInfo, REMEMBER_INPUT_EXTRA_INFO);
         }
     }
 }

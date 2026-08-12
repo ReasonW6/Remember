@@ -137,7 +137,12 @@ export function RecordingList({
                       onClick={() => onSelect(recording.path)}
                       disabled={disabled || Boolean(recording.load_error)}
                     >
-                      <span className="recording-name">{recording.name}</span>
+                      <span className="recording-title">
+                        <span className="recording-name">{recording.name}</span>
+                        {recording.version !== null && recording.version !== undefined ? (
+                          <span className="recording-version">V{recording.version}</span>
+                        ) : null}
+                      </span>
                       <span className="recording-meta">
                         {recording.step_count} 步 · {recording.duration_ms} ms
                         {formatUpdatedTime(recording.updated_at_ms)

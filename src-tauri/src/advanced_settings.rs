@@ -16,6 +16,7 @@ pub struct AdvancedSettings {
     pub feedback_volume_percent: u8,
     pub feedback_muted: bool,
     pub show_activity_indicator: bool,
+    pub window_relative_recording_enabled: bool,
 }
 
 impl Default for AdvancedSettings {
@@ -24,6 +25,7 @@ impl Default for AdvancedSettings {
             feedback_volume_percent: 50,
             feedback_muted: false,
             show_activity_indicator: true,
+            window_relative_recording_enabled: false,
         }
     }
 }
@@ -108,6 +110,7 @@ mod tests {
                 feedback_volume_percent: 50,
                 feedback_muted: false,
                 show_activity_indicator: true,
+                window_relative_recording_enabled: false,
             }
         );
     }
@@ -122,6 +125,7 @@ mod tests {
                 feedback_volume_percent: 25,
                 feedback_muted: false,
                 show_activity_indicator: true,
+                window_relative_recording_enabled: false,
             }
         );
     }

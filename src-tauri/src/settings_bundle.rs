@@ -15,10 +15,34 @@ use tauri::{AppHandle, Manager};
 const SETTINGS_BUNDLE_FILE: &str = "preferences.json";
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MainWindowPosition {
+    pub x: i32,
+    pub y: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MainWindowPreferences {
+    pub compact: bool,
+    pub position: Option<MainWindowPosition>,
+}
+
+impl Default for MainWindowPreferences {
+    fn default() -> Self {
+        Self {
+            compact: true,
+            position: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettingsBundle {
     pub advanced: AdvancedSettings,
     pub hotkeys: HotkeyConfig,
+    #[serde(default)]
+    pub main_window: MainWindowPreferences,
 }
 
 pub fn load(app: &AppHandle) -> Result<SettingsBundle, String> {
@@ -27,6 +51,7 @@ pub fn load(app: &AppHandle) -> Result<SettingsBundle, String> {
         let bundle = normalize(SettingsBundle {
             advanced: advanced_settings::load(app)?,
             hotkeys: hotkeys::load_config(app)?,
+            main_window: MainWindowPreferences::default(),
         })?;
         return save(app, bundle);
     }
@@ -84,6 +109,7 @@ pub fn normalize(bundle: SettingsBundle) -> Result<SettingsBundle, String> {
     Ok(SettingsBundle {
         advanced: advanced_settings::normalize(bundle.advanced)?,
         hotkeys: hotkeys::normalize_config(&bundle.hotkeys)?,
+        main_window: bundle.main_window,
     })
 }
 
@@ -106,6 +132,7 @@ mod tests {
                 ..AdvancedSettings::default()
             },
             hotkeys: HotkeyConfig::default(),
+            main_window: MainWindowPreferences::default(),
         });
         assert!(invalid_volume.is_err());
 
@@ -116,6 +143,7 @@ mod tests {
                 playback: "F8".to_string(),
                 stop: "F8".to_string(),
             },
+            main_window: MainWindowPreferences::default(),
         });
         assert!(invalid_hotkeys.is_err());
     }
@@ -129,10 +157,39 @@ mod tests {
                 playback: "F12".to_string(),
                 stop: "ctrl+shift+r".to_string(),
             },
+            main_window: MainWindowPreferences {
+                compact: false,
+                position: Some(MainWindowPosition { x: -1200, y: 80 }),
+            },
         })
         .expect("normalize bundle");
 
         assert_eq!(bundle.hotkeys.record, "Ctrl+Shift+R");
         assert_eq!(bundle.hotkeys.stop, "Ctrl+Shift+R");
+        assert_eq!(
+            bundle.main_window,
+            MainWindowPreferences {
+                compact: false,
+                position: Some(MainWindowPosition { x: -1200, y: 80 }),
+            }
+        );
+    }
+
+    #[test]
+    fn older_bundles_default_to_a_compact_window_without_a_saved_position() {
+        let bundle: SettingsBundle = serde_json::from_str(
+            r#"{
+                "advanced": {
+                    "feedback_volume_percent": 50,
+                    "feedback_muted": false,
+                    "show_activity_indicator": true,
+                    "window_relative_recording_enabled": false
+                },
+                "hotkeys": {"record":"F8","playback":"F12","stop":"F8"}
+            }"#,
+        )
+        .expect("legacy settings bundle");
+
+        assert_eq!(bundle.main_window, MainWindowPreferences::default());
     }
 }

@@ -13,13 +13,21 @@ import {
   startPlayback,
   confirmDeleteRecording,
   getAdvancedSettings,
+  getMainWindowPreferences,
   getPrivilegeState,
   restartAsAdministrator,
+  setMainWindowCompactMode,
+  setWindowRelativeRecordingEnabled,
+  getPendingWindowBinding,
+  selectWindowBindingCandidate,
+  cancelWindowBinding,
+  highlightWindowBindingCandidate,
   setSettingsBundle,
   showAdvancedSettings,
   subscribeToAdvancedSettingsChanged,
   subscribeToHotkeysChanged,
-  subscribeToRecordingsChanged
+  subscribeToRecordingsChanged,
+  subscribeToWindowBinding
 } from "./rememberApi";
 
 const tauriMocks = vi.hoisted(() => ({
@@ -218,7 +226,8 @@ describe("rememberApi", () => {
     const settings = {
       feedback_volume_percent: 75,
       feedback_muted: true,
-      show_activity_indicator: false
+      show_activity_indicator: false,
+      window_relative_recording_enabled: true
     };
     tauriMocks.invoke.mockResolvedValue(settings);
 
@@ -227,14 +236,93 @@ describe("rememberApi", () => {
     expect(tauriMocks.invoke).toHaveBeenCalledWith("get_advanced_settings");
   });
 
+  it("updates the persisted window-relative recording mode", async () => {
+    const settings = {
+      feedback_volume_percent: 50,
+      feedback_muted: false,
+      show_activity_indicator: true,
+      window_relative_recording_enabled: true
+    };
+    tauriMocks.invoke.mockResolvedValue(settings);
+
+    await expect(setWindowRelativeRecordingEnabled(true)).resolves.toBe(settings);
+
+    expect(tauriMocks.invoke).toHaveBeenCalledWith(
+      "set_window_relative_recording_enabled",
+      { enabled: true }
+    );
+  });
+
+  it("reads and updates the persisted main-window interface mode", async () => {
+    const compact = { compact: true, position: { x: 120, y: 80 } };
+    const expanded = { ...compact, compact: false };
+    tauriMocks.invoke.mockResolvedValueOnce(compact).mockResolvedValueOnce(expanded);
+
+    await expect(getMainWindowPreferences()).resolves.toBe(compact);
+    await expect(setMainWindowCompactMode(false)).resolves.toBe(expanded);
+
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(1, "get_main_window_preferences");
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(
+      2,
+      "set_main_window_compact_mode",
+      { compact: false }
+    );
+  });
+
+  it("routes manual window-binding reads, choices, cancellation, and highlighting", async () => {
+    const request = { request_id: 7, candidates: [] };
+    tauriMocks.invoke
+      .mockResolvedValueOnce(request)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined);
+
+    await expect(getPendingWindowBinding()).resolves.toBe(request);
+    await expect(selectWindowBindingCandidate(7, 2)).resolves.toBeUndefined();
+    await expect(highlightWindowBindingCandidate(7, 2)).resolves.toBeUndefined();
+    await expect(cancelWindowBinding(7)).resolves.toBeUndefined();
+
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(1, "get_pending_window_binding");
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(2, "select_window_binding_candidate", {
+      requestId: 7,
+      candidateId: 2
+    });
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(3, "highlight_window_binding_candidate", {
+      requestId: 7,
+      candidateId: 2
+    });
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(4, "cancel_window_binding", {
+      requestId: 7
+    });
+  });
+
+  it("forwards manual window-binding requests", async () => {
+    const callback = vi.fn();
+    const request = { request_id: 4, candidates: [] };
+    const unlisten = vi.fn();
+    tauriMocks.listen.mockImplementation(async (_eventName, handler) => {
+      handler({ payload: request });
+      return unlisten;
+    });
+
+    await expect(subscribeToWindowBinding(callback)).resolves.toBe(unlisten);
+    expect(tauriMocks.listen).toHaveBeenCalledWith(
+      "remember://window-binding",
+      expect.any(Function)
+    );
+    expect(callback).toHaveBeenCalledWith(request);
+  });
+
   it("reads and atomically saves the settings bundle", async () => {
     const bundle = {
       advanced: {
         feedback_volume_percent: 75,
         feedback_muted: true,
-        show_activity_indicator: false
+        show_activity_indicator: false,
+        window_relative_recording_enabled: true
       },
-      hotkeys: { record: "F6", playback: "F7", stop: "F8" }
+      hotkeys: { record: "F6", playback: "F7", stop: "F8" },
+      main_window: { compact: false, position: { x: 200, y: 120 } }
     };
     tauriMocks.invoke.mockResolvedValue(bundle);
 
@@ -267,7 +355,8 @@ describe("rememberApi", () => {
     const settings = {
       feedback_volume_percent: 80,
       feedback_muted: false,
-      show_activity_indicator: true
+      show_activity_indicator: true,
+      window_relative_recording_enabled: false
     };
     tauriMocks.listen.mockImplementation(async (eventName, handler) => {
       handler({ payload: eventName.includes("hotkeys") ? hotkeys : settings });

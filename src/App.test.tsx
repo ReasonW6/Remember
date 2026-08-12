@@ -26,6 +26,9 @@ const apiMocks = vi.hoisted(() => ({
   saveCurrentRecording: vi.fn(),
   getHotkeys: vi.fn(),
   getAdvancedSettings: vi.fn(),
+  getMainWindowPreferences: vi.fn(),
+  setMainWindowCompactMode: vi.fn(),
+  setWindowRelativeRecordingEnabled: vi.fn(),
   showAdvancedSettings: vi.fn(),
   getPrivilegeState: vi.fn(),
   restartAsAdministrator: vi.fn(),
@@ -63,6 +66,10 @@ vi.mock("@tauri-apps/api/window", () => ({
 }));
 
 function render(ui: ReactElement) {
+  apiMocks.getMainWindowPreferences.mockResolvedValue({
+    compact: false,
+    position: null
+  });
   const result = renderCompact(ui);
   const expand = screen.queryByRole("button", { name: "展开完整界面" });
   if (expand) {
@@ -124,6 +131,7 @@ const recordingFile = {
   duration_ms: 1200,
   created_at: "2026-07-01T00:00:00Z",
   updated_at_ms: 1782864000000,
+  version: 1,
   load_error: null
 };
 
@@ -142,6 +150,7 @@ describe("App", () => {
         feedback_volume_percent: number;
         feedback_muted: boolean;
         show_activity_indicator: boolean;
+        window_relative_recording_enabled: boolean;
       }) => void)
     | undefined;
 
@@ -173,8 +182,25 @@ describe("App", () => {
     apiMocks.getAdvancedSettings.mockResolvedValue({
       feedback_volume_percent: 50,
       feedback_muted: false,
-      show_activity_indicator: true
+      show_activity_indicator: true,
+      window_relative_recording_enabled: false
     });
+    apiMocks.getMainWindowPreferences.mockResolvedValue({
+      compact: true,
+      position: null
+    });
+    apiMocks.setMainWindowCompactMode.mockImplementation(async (compact: boolean) => ({
+      compact,
+      position: null
+    }));
+    apiMocks.setWindowRelativeRecordingEnabled.mockImplementation(
+      async (enabled: boolean) => ({
+        feedback_volume_percent: 50,
+        feedback_muted: false,
+        show_activity_indicator: true,
+        window_relative_recording_enabled: enabled
+      })
+    );
     apiMocks.showAdvancedSettings.mockResolvedValue(undefined);
     apiMocks.getPrivilegeState.mockResolvedValue({ is_elevated: false });
     apiMocks.restartAsAdministrator.mockResolvedValue(undefined);
@@ -293,20 +319,108 @@ describe("App", () => {
 
     await user.click(screen.getByRole("button", { name: "展开完整界面" }));
     await waitFor(() =>
-      expect(windowMocks.setSize).toHaveBeenLastCalledWith(
-        expect.objectContaining({ width: 420, height: 520 })
-      )
+      expect(apiMocks.setMainWindowCompactMode).toHaveBeenLastCalledWith(false)
     );
     expect(screen.getByRole("button", { name: "切换到小悬浮窗" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "高级设置" })).toBeEnabled();
 
     await user.click(screen.getByRole("button", { name: "切换到小悬浮窗" }));
     await waitFor(() =>
-      expect(windowMocks.setSize).toHaveBeenLastCalledWith(
-        expect.objectContaining({ width: 360, height: 134 })
-      )
+      expect(apiMocks.setMainWindowCompactMode).toHaveBeenLastCalledWith(true)
     );
     expect(screen.getByRole("combobox", { name: "选择录制文件" })).toBeInTheDocument();
+  });
+
+  it("restores the expanded main interface preference on startup", async () => {
+    apiMocks.getMainWindowPreferences.mockResolvedValue({
+      compact: false,
+      position: { x: 860, y: 240 }
+    });
+
+    renderCompact(<App />);
+
+    expect(
+      await screen.findByRole("button", { name: "切换到小悬浮窗" })
+    ).toBeEnabled();
+    expect(screen.getByRole("button", { name: "高级设置" })).toBeEnabled();
+  });
+
+  it("restores the enabled window-relative preference in both window sizes", async () => {
+    apiMocks.getAdvancedSettings.mockResolvedValue({
+      feedback_volume_percent: 50,
+      feedback_muted: false,
+      show_activity_indicator: true,
+      window_relative_recording_enabled: true
+    });
+    const user = userEvent.setup();
+    renderCompact(<App />);
+
+    const compactToggle = await screen.findByRole("button", {
+      name: "关闭窗口相对录制"
+    });
+    expect(compactToggle).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(screen.getByRole("button", { name: "展开完整界面" }));
+
+    const expandedToggle = screen.getByRole("button", { name: "窗口相对录制" });
+    expect(expandedToggle).toHaveAttribute("aria-pressed", "true");
+    expect(expandedToggle).toHaveClass("enabled");
+  });
+
+  it("locks the window-relative toggle until the saved preference is acknowledged", async () => {
+    let acknowledgePreference!: (settings: {
+      feedback_volume_percent: number;
+      feedback_muted: boolean;
+      show_activity_indicator: boolean;
+      window_relative_recording_enabled: boolean;
+    }) => void;
+    apiMocks.setWindowRelativeRecordingEnabled.mockReturnValue(
+      new Promise((resolve) => {
+        acknowledgePreference = resolve;
+      })
+    );
+    const user = userEvent.setup();
+    renderCompact(<App />);
+
+    await waitFor(() => expect(apiMocks.getAdvancedSettings).toHaveBeenCalledTimes(1));
+    const toggle = screen.getByRole("button", { name: "启用窗口相对录制" });
+    await user.click(toggle);
+
+    expect(apiMocks.setWindowRelativeRecordingEnabled).toHaveBeenCalledWith(true);
+    expect(toggle).toBeDisabled();
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+
+    acknowledgePreference({
+      feedback_volume_percent: 50,
+      feedback_muted: false,
+      show_activity_indicator: true,
+      window_relative_recording_enabled: true
+    });
+
+    const enabledToggle = await screen.findByRole("button", {
+      name: "关闭窗口相对录制"
+    });
+    expect(enabledToggle).toBeEnabled();
+    expect(enabledToggle).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("keeps the window-relative preference unchanged when saving fails", async () => {
+    apiMocks.setWindowRelativeRecordingEnabled.mockRejectedValue(
+      new Error("window-relative preference unavailable")
+    );
+    const user = userEvent.setup();
+    renderCompact(<App />);
+
+    await waitFor(() => expect(apiMocks.getAdvancedSettings).toHaveBeenCalledTimes(1));
+    await user.click(screen.getByRole("button", { name: "启用窗口相对录制" }));
+
+    expect(apiMocks.setWindowRelativeRecordingEnabled).toHaveBeenCalledWith(true);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "window-relative preference unavailable"
+    );
+    const toggle = screen.getByRole("button", { name: "启用窗口相对录制" });
+    expect(toggle).toBeEnabled();
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
   });
 
   it("restores the last selected recording in the compact selector", async () => {
@@ -340,7 +454,9 @@ describe("App", () => {
 
     await waitFor(() => expect(selector).toHaveValue(recordingFile.path));
     expect(screen.queryByRole("option", { name: "选择录制文件" })).not.toBeInTheDocument();
-    expect(screen.getByRole("option", { name: recordingFile.name })).toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: `${recordingFile.name} [V1]` })
+    ).toBeInTheDocument();
   });
 
   it("restarts as administrator from the compact window", async () => {
@@ -803,7 +919,8 @@ describe("App", () => {
       advancedSettingsChangedListener?.({
         feedback_volume_percent: 80,
         feedback_muted: true,
-        show_activity_indicator: false
+        show_activity_indicator: false,
+        window_relative_recording_enabled: false
       });
       stateListener?.(recordingState);
     });

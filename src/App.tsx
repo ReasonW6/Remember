@@ -37,15 +37,14 @@ const defaultHotkeys: HotkeyConfig = {
 const defaultAdvancedSettings: AdvancedSettingsConfig = {
   feedback_volume_percent: 50,
   feedback_muted: false,
-  show_activity_indicator: true
+  show_activity_indicator: true,
+  window_relative_recording_enabled: false
 };
 
 const maxLoopCount = 0xffffffff;
 const loopCountError = `循环次数必须是 1 到 ${maxLoopCount} 之间的整数。`;
 const speedError = "速度必须是大于 0 的有效数字。";
 const lastRecordingPathKey = "remember:last-recording-path";
-const compactWindowSize = { width: 360, height: 134 };
-const expandedWindowSize = { width: 420, height: 520 };
 
 interface PlaybackSettingsValue {
   loopCount: number | null;
@@ -69,6 +68,7 @@ export function App() {
   const [selectedRecordingPath, setSelectedRecordingPath] = useState<string | null>(null);
   const [hotkeys, setHotkeys] = useState(defaultHotkeys);
   const [isElevated, setIsElevated] = useState(false);
+  const [windowRelativeEnabled, setWindowRelativeEnabled] = useState(false);
   const [pendingCommand, setPendingCommand] = useState(false);
   const [playbackSettingsReady, setPlaybackSettingsReady] = useState(false);
   const [playbackSettingsPending, setPlaybackSettingsPending] = useState(true);
@@ -85,6 +85,7 @@ export function App() {
   const recordingsRefreshRef = useRef<Promise<void> | null>(null);
   const hotkeysChangeVersionRef = useRef(0);
   const advancedSettingsChangeVersionRef = useRef(0);
+  const mainWindowPreferencesVersionRef = useRef(0);
   const hasRecording = state.step_count > 0;
   const isBusy = state.mode === "recording" || state.mode === "playing";
   const validationError = useMemo(() => {
@@ -219,6 +220,7 @@ export function App() {
             if (!disposed) {
               advancedSettingsChangeVersionRef.current += 1;
               advancedSettingsRef.current = settings;
+              setWindowRelativeEnabled(settings.window_relative_recording_enabled);
             }
           }
         );
@@ -241,6 +243,21 @@ export function App() {
         const settings = await rememberApi.getAdvancedSettings();
         if (!disposed && changeVersion === advancedSettingsChangeVersionRef.current) {
           advancedSettingsRef.current = settings;
+          setWindowRelativeEnabled(settings.window_relative_recording_enabled);
+        }
+      } catch (loadError) {
+        if (!disposed) {
+          addInitializationError(loadError);
+        }
+      }
+    }
+
+    async function initializeMainWindowPreferences() {
+      const version = mainWindowPreferencesVersionRef.current;
+      try {
+        const preferences = await rememberApi.getMainWindowPreferences();
+        if (!disposed && version === mainWindowPreferencesVersionRef.current) {
+          setCompactMode(preferences.compact);
         }
       } catch (loadError) {
         if (!disposed) {
@@ -265,6 +282,7 @@ export function App() {
     }
 
     void initializeState();
+    void initializeMainWindowPreferences();
     deferredInitializationFrame = window.requestAnimationFrame(() => {
       deferredInitializationFrame = undefined;
       if (disposed) {
@@ -539,14 +557,13 @@ export function App() {
       return;
     }
     const nextCompactMode = !compactMode;
-    const size = nextCompactMode ? compactWindowSize : expandedWindowSize;
+    mainWindowPreferencesVersionRef.current += 1;
     setCompactMode(nextCompactMode);
     setWindowResizePending(true);
-    void import("@tauri-apps/api/window")
-      .then(({ getCurrentWindow, LogicalSize }) =>
-        getCurrentWindow().setSize(new LogicalSize(size.width, size.height))
-      )
-      .then(() => {
+    void rememberApi
+      .setMainWindowCompactMode(nextCompactMode)
+      .then((preferences) => {
+        setCompactMode(preferences.compact);
         setActionError("");
       })
       .catch((resizeError: unknown) => {
@@ -564,6 +581,14 @@ export function App() {
 
   function handleAdvancedSettings() {
     void applyCommand(rememberApi.showAdvancedSettings);
+  }
+
+  function handleWindowRelativeChange(enabled: boolean) {
+    void applyCommand(async () => {
+      const settings = await rememberApi.setWindowRelativeRecordingEnabled(enabled);
+      advancedSettingsRef.current = settings;
+      setWindowRelativeEnabled(settings.window_relative_recording_enabled);
+    });
   }
 
   function handleRestartAsAdministrator() {
@@ -678,13 +703,18 @@ export function App() {
           recordings={recordings}
           selectedPath={selectedRecordingPath}
           selectedName={state.recording_name}
+          selectedVersion={
+            recordings.find((recording) => recording.path === selectedRecordingPath)?.version
+          }
           hasRecording={hasRecording}
           playbackValid={!validationError && playbackSettingsReady}
-          pendingCommand={pendingCommand}
+          pendingCommand={pendingCommand || windowResizePending}
           isElevated={isElevated}
+          windowRelativeEnabled={windowRelativeEnabled}
           message={displayedStateMessage}
           error={displayedError}
           onSelect={handleSelectRecording}
+          onWindowRelativeChange={handleWindowRelativeChange}
           onRecord={handleRecord}
           onPlay={handlePlay}
           onStop={handleStop}
@@ -725,7 +755,9 @@ export function App() {
             />
             <AdministratorControl
               isElevated={isElevated}
-              disabled={pendingCommand || isBusy}
+              disabled={pendingCommand || windowResizePending || isBusy}
+              windowRelativeEnabled={windowRelativeEnabled}
+              onWindowRelativeChange={handleWindowRelativeChange}
               onRestart={handleRestartAsAdministrator}
             />
             <RecordingList

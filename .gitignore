@@ -3,5 +3,7 @@ dist/
 coverage/
 src-tauri/target/
 src-tauri/gen/
+recordings/
+*.remember.json
 *.log
 *.tmp

@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const ALL_APP_COMMANDS: [&str; 18] = [
+const ALL_APP_COMMANDS: [&str; 25] = [
     "get_state",
     "start_recording",
     "stop_recording",
@@ -16,6 +16,9 @@ const ALL_APP_COMMANDS: [&str; 18] = [
     "save_current_recording",
     "get_hotkeys",
     "get_advanced_settings",
+    "get_main_window_preferences",
+    "set_main_window_compact_mode",
+    "set_window_relative_recording_enabled",
     "get_settings_bundle",
     "set_settings_bundle",
     "show_advanced_settings",
@@ -24,9 +27,13 @@ const ALL_APP_COMMANDS: [&str; 18] = [
     "start_playback",
     "set_playback_settings",
     "stop_playback",
+    "get_pending_window_binding",
+    "select_window_binding_candidate",
+    "cancel_window_binding",
+    "highlight_window_binding_candidate",
 ];
 
-const MAIN_WINDOW_COMMANDS: [&str; 16] = [
+const MAIN_WINDOW_COMMANDS: [&str; 19] = [
     "get_state",
     "start_recording",
     "stop_recording",
@@ -37,6 +44,9 @@ const MAIN_WINDOW_COMMANDS: [&str; 16] = [
     "save_current_recording",
     "get_hotkeys",
     "get_advanced_settings",
+    "get_main_window_preferences",
+    "set_main_window_compact_mode",
+    "set_window_relative_recording_enabled",
     "show_advanced_settings",
     "get_privilege_state",
     "restart_as_administrator",
@@ -100,6 +110,10 @@ fn each_window_has_only_its_required_application_commands() {
         &permissions,
         "activity-indicator-window-commands",
     ));
+    let window_binding_commands = string_set(permission_commands(
+        &permissions,
+        "window-binding-window-commands",
+    ));
 
     assert_eq!(
         main_commands,
@@ -115,6 +129,15 @@ fn each_window_has_only_its_required_application_commands() {
     assert_eq!(
         activity_indicator_commands,
         BTreeSet::from(["get_state".to_string()])
+    );
+    assert_eq!(
+        window_binding_commands,
+        BTreeSet::from([
+            "get_pending_window_binding".to_string(),
+            "select_window_binding_candidate".to_string(),
+            "cancel_window_binding".to_string(),
+            "highlight_window_binding_candidate".to_string(),
+        ])
     );
     let declared_commands = permissions["permission"]
         .as_array()
@@ -165,6 +188,22 @@ fn each_window_has_only_its_required_application_commands() {
             "activity-indicator-window-commands".to_string(),
         ])
     );
+    assert_eq!(
+        capability_permissions("capture-warning.json", "capture-warning"),
+        BTreeSet::from([
+            "core:event:allow-listen".to_string(),
+            "core:event:allow-unlisten".to_string(),
+        ])
+    );
+    assert_eq!(
+        capability_permissions("window-binding.json", "window-binding"),
+        BTreeSet::from([
+            "core:event:allow-listen".to_string(),
+            "core:event:allow-unlisten".to_string(),
+            "core:window:allow-start-dragging".to_string(),
+            "window-binding-window-commands".to_string(),
+        ])
+    );
 }
 
 #[test]
@@ -181,6 +220,7 @@ fn generated_acl_schema_contains_the_application_manifest() {
         "main-window-commands",
         "advanced-settings-window-commands",
         "activity-indicator-window-commands",
+        "window-binding-window-commands",
     ] {
         assert!(
             manifest_permissions.contains_key(identifier),

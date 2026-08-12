@@ -9,13 +9,15 @@ Remember is an original implementation. It does not copy TinyTask code, icons, n
 ## Features
 
 - Record keyboard and mouse actions.
+- Record in V1 screen coordinates by default for legacy behavior, or enable Window-relative recording before capture to create a V2 file that follows whole-window movement across multiple windows.
 - Replay the current recording or choose a saved recording from the in-app list.
 - Configure finite or infinite playback loops and playback speed.
 - Customize hotkeys. Unmodified single-key shortcuts are limited to `F1`–`F24`; character, editing, and navigation keys require `Ctrl`, `Alt`, `Shift`, or `Win`.
+- Remember the main window's compact or expanded interface and desktop position. Ordinary launch and “Restart as administrator” restore the same state; if the original monitor is gone, the window returns to a visible display.
 - Use the same hotkey for recording and stopping. The default record/stop toggle is `F8`; during playback, both the play and stop hotkeys can stop the run.
 - Play feedback tones when recording or playback starts and stops.
 - Starting a recording from the main window does not minimize it automatically. Keyboard and mouse input inside Remember's own windows is filtered out of recordings.
-- Start in a compact floating window with only recording selection, record, and play controls; use the titlebar button to switch to the full interface.
+- Start in a compact floating window on first use, with only recording selection, record, and play controls; use the titlebar button to switch to the full interface, and later launches restore the last choice.
 - Closing the main window safely stops any active recording or playback, then exits completely without staying in the background.
 - Use a custom titlebar and localized Chinese interface.
 
@@ -34,6 +36,19 @@ Recording files are saved as `.remember.json`. Every time recording stops, Remem
 
 A recording can contain at most 250,000 steps, and a recording JSON file can be at most 64 MiB. When recording reaches the step limit, Remember truncates it, saves the captured prefix after stopping, and displays a warning.
 
+The recording list marks each valid file as V1 or V2:
+
+- **V1 (default)** preserves the original behavior and stores absolute screen coordinates. Playback does not match window identity, so the desktop layout, window position, and current focus can all affect the result.
+- **V2 (optional)** stores in-window actions relative to the client-area origin of each target top-level window and can operate across multiple windows in one recording. During playback, Remember considers only unoccupied windows with an exact full-executable-path and window-class match and compatible initial client-area size and DPI, then automatically selects the highest-ranked candidate by recorded-title similarity and stable window order. It never opens a target-window picker. Once bound, coordinates are translated by the window's whole-movement offset.
+
+V2 recognizes recorded window move or resize gestures. Every step in the gesture uses the client-area origin captured at button press, preventing the moving window from feeding displacement back into the pointer path; after release, the resulting client-area size becomes the current size for later actions. Client-area size and DPI must still strictly match when the target is first bound, and DPI or display-scaling changes and internal control reflow remain unsupported.
+
+When V2 clicks a taskbar flyout, launcher, or another background surface, it does not require the clicked surface itself to become foreground. Playback completes the press and release so that surface can close or open another window, then validates the actual target at the next operation that requires a foreground window. This prevents launcher flows such as a network flyout opening Settings from being rejected as failed activation.
+
+Recording metadata still distinguishes initial targets from deferred targets first seen later, but playback no longer requires initial targets during startup. Every target is waited for up to 30 seconds and bound automatically only when an operation first needs it; playback stops if the wait expires without a compatible candidate. This accommodates Windows reusing an existing host window for a page or dialog opened later during recording. A minimized or hidden target is restored and brought to the foreground only immediately before a click, wheel, keyboard, or other recorded operation that affects that window.
+
+If the recording pointer enters a window or privilege boundary that Remember cannot inspect, the app shows the specific reason and stops capturing ordinary mouse and keyboard steps at that entry point. Recording continues after the pointer returns to a readable surface. Elapsed time across the unreadable interval is preserved, so playback holds the pointer at the last readable location, skips the unreadable input, and resumes at the next readable location.
+
 The recording library is the `recordings` folder next to `remember.exe`:
 
 ```text
@@ -42,13 +57,14 @@ The recording library is the `recordings` folder next to `remember.exe`:
 
 When the application directory is on drive D, recordings stay on drive D as well. The current user must have write access to the application directory, so do not place the portable build in a protected directory. Files in the legacy `%APPDATA%\com.remember.desktop\recordings` directory are not moved or deleted automatically.
 
-Recording files are unencrypted JSON. They contain virtual key codes, scan codes, press/release timing, and mouse positions, so they may reveal passwords, tokens, or other sensitive input. Avoid recording secrets, inspect recordings before sharing, backing up, or uploading them, and delete recordings you no longer need.
+Recording files are unencrypted JSON. They contain virtual key codes, scan codes, press/release timing, and mouse positions, so they may reveal passwords, tokens, or other sensitive input. V2 also stores each target window's full executable path, window class, and recorded title in plaintext; those fields may expose user names, installation locations, document names, or page titles. Handle every recording carefully and treat V2 files in particular as sensitive. Avoid recording secrets, inspect recordings before sharing, backing up, or uploading them, and delete recordings you no longer need.
 
 ## Playback Safety
 
 - Loop count can be a finite integer of at least 1 or an explicitly selected infinite loop.
 - Infinite playback does not end by itself and must be stopped with the play or stop hotkey.
-- Remember intentionally does not validate the target window. It sends real input to whichever window has focus, and mouse position and window layout affect the result.
+- V1 does not validate target-window identity and sends real input at absolute screen coordinates. V2 matches windows and checks client-area size and DPI, but this is not control-level safety validation: pop-ups, changed window content, or another program taking focus can still redirect real input.
+- A non-elevated Remember process cannot reliably inspect or control an elevated window. After an explicit access-denied warning, the user may choose to restart as administrator; Remember does not automatically bypass the Windows privilege boundary.
 - Before replaying an old or externally supplied recording, verify the focus, target window, and recording source.
 
 ## Requirements
@@ -156,8 +172,8 @@ Remember is licensed under the [MIT License](LICENSE).
 
 - Windows only.
 - No AI automation or image recognition.
-- Playback sends real keyboard and mouse input, so focus and target-window state affect results.
-- Target-window validation is intentionally not implemented in the current portable tool.
-- Elevated windows may reject input from a non-elevated Remember process.
+- V1 uses absolute screen coordinates without window-identity validation. V2 translates by the client-area origin and can reproduce recorded window move or resize gestures, but it does not support DPI changes, arbitrary resize adaptation, or control reflow.
+- Both formats replay real keyboard and mouse input. Focus, pop-ups, and target-window content can still affect the result even with V2.
+- A non-elevated process cannot reliably inspect or control elevated windows; restarting as administrator requires an explicit user choice.
 
 Documents under `docs/superpowers` are historical design and implementation records and may retain older hotkeys or scope. Current behavior is defined by this README, the tests, and the source code.

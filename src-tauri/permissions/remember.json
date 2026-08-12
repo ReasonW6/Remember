@@ -16,6 +16,9 @@
           "save_current_recording",
           "get_hotkeys",
           "get_advanced_settings",
+          "get_main_window_preferences",
+          "set_main_window_compact_mode",
+          "set_window_relative_recording_enabled",
           "show_advanced_settings",
           "get_privilege_state",
           "restart_as_administrator",
@@ -42,6 +45,19 @@
       "description": "Read-only state command required by the activity indicator.",
       "commands": {
         "allow": ["get_state"],
+        "deny": []
+      }
+    },
+    {
+      "identifier": "window-binding-window-commands",
+      "description": "Commands required by the manual target-window binding dialog.",
+      "commands": {
+        "allow": [
+          "get_pending_window_binding",
+          "select_window_binding_candidate",
+          "cancel_window_binding",
+          "highlight_window_binding_candidate"
+        ],
         "deny": []
       }
     }

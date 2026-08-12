@@ -2,9 +2,13 @@ use remember_lib::app_state::{
     AppController, AppMode, ControlHotkey, ControlHotkeyAction, ControlHotkeyDecision,
     ControlHotkeyModifiers,
 };
-use remember_lib::model::{KeyState, MacroStep, Recording};
-use remember_lib::recorder::{RawInputEvent, MAX_RECORDING_STEPS};
-use std::sync::Arc;
+use remember_lib::model::{
+    ClientSize, KeyState, MacroStep, Recording, TargetWindowAvailability, WindowPointerIntent,
+};
+use remember_lib::recorder::{
+    CaptureSurface, CapturedWindow, RawInputEvent, WindowInstanceId, MAX_RECORDING_STEPS,
+};
+use std::{collections::HashSet, sync::Arc};
 
 fn recording() -> Recording {
     Recording::new(
@@ -49,6 +53,103 @@ fn starts_and_stops_recording() {
     let saved = app.stop_recording(150).expect("stop");
     assert_eq!(app.mode(), AppMode::Idle);
     assert_eq!(saved.name, "test");
+}
+
+fn captured_window(hwnd: usize, generation: u64) -> CapturedWindow {
+    CapturedWindow {
+        instance: WindowInstanceId { hwnd, generation },
+        executable_path: r"C:\Apps\Example.exe".to_string(),
+        window_class: "ExampleWindow".to_string(),
+        title: "Example".to_string(),
+        client_origin_x: 100,
+        client_origin_y: 200,
+        client_size: ClientSize {
+            width: 800,
+            height: 600,
+        },
+        dpi: 96,
+        availability: TargetWindowAvailability::Deferred,
+        direct_pointer_target: true,
+    }
+}
+
+#[test]
+fn window_relative_mode_is_snapshotted_at_start_and_marks_reopened_windows_deferred() {
+    let mut app = AppController::new();
+    app.start_window_relative_recording(
+        "relative",
+        100,
+        "2026-08-09T00:00:00Z",
+        HashSet::from([0x10]),
+    )
+    .expect("start V2 recording");
+
+    assert!(app.is_window_relative_recording());
+    assert_eq!(
+        app.target_availability(WindowInstanceId {
+            hwnd: 0x10,
+            generation: 0,
+        }),
+        TargetWindowAvailability::Initial
+    );
+    assert_eq!(
+        app.target_availability(WindowInstanceId {
+            hwnd: 0x10,
+            generation: 1,
+        }),
+        TargetWindowAvailability::Deferred
+    );
+
+    for (at_ms, generation) in [(110, 0), (120, 1)] {
+        let mut window = captured_window(0x10, generation);
+        window.availability = app.target_availability(window.instance);
+        app.capture_input_with_surface(
+            RawInputEvent::MouseWheel {
+                at_ms,
+                x: 125,
+                y: 240,
+                delta: 120,
+            },
+            CaptureSurface::Window {
+                window,
+                intent: WindowPointerIntent::Foreground,
+            },
+        );
+    }
+
+    let recording = app.stop_recording(130).expect("stop V2 recording");
+    assert_eq!(recording.version, 2);
+    assert_eq!(recording.targets.len(), 2);
+    assert_eq!(
+        recording.targets[0].availability,
+        TargetWindowAvailability::Initial
+    );
+    assert_eq!(
+        recording.targets[1].availability,
+        TargetWindowAvailability::Deferred
+    );
+    assert!(!app.is_window_relative_recording());
+}
+
+#[test]
+fn ordinary_recording_remains_v1_when_window_relative_mode_is_not_selected() {
+    let mut app = AppController::new();
+    app.start_recording("legacy", 100, "2026-08-09T00:00:00Z")
+        .expect("start V1 recording");
+    app.capture_input(RawInputEvent::MouseWheel {
+        at_ms: 110,
+        x: 20,
+        y: 30,
+        delta: 120,
+    });
+
+    let recording = app.stop_recording(120).expect("stop V1 recording");
+    assert_eq!(recording.version, 1);
+    assert!(recording.targets.is_empty());
+    assert!(matches!(
+        recording.steps.as_slice(),
+        [MacroStep::MouseWheel { .. }]
+    ));
 }
 
 #[test]

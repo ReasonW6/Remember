@@ -24,6 +24,7 @@ static RECORDING_LIST_CACHE: OnceLock<Mutex<RecordingListCache>> = OnceLock::new
 pub struct RecordingFile {
     pub name: String,
     pub path: String,
+    pub version: Option<u32>,
     pub step_count: usize,
     pub duration_ms: u64,
     pub created_at: String,
@@ -310,6 +311,7 @@ fn recording_file_from_path(path: &Path, file_name: &str, updated_at_ms: u64) ->
         Ok(recording) => RecordingFile {
             name: recording.name,
             path: path.to_string_lossy().to_string(),
+            version: Some(recording.version),
             step_count: recording.steps.len(),
             duration_ms: recording.duration_ms,
             created_at: recording.created_at,
@@ -322,6 +324,7 @@ fn recording_file_from_path(path: &Path, file_name: &str, updated_at_ms: u64) ->
                 .unwrap_or(file_name)
                 .to_string(),
             path: path.to_string_lossy().to_string(),
+            version: None,
             step_count: 0,
             duration_ms: 0,
             created_at: String::new(),
@@ -603,6 +606,7 @@ mod tests {
         RecordingFile {
             name: name.to_string(),
             path: "recording.remember.json".to_string(),
+            version: Some(1),
             step_count: 0,
             duration_ms: 0,
             created_at: String::new(),

@@ -10,7 +10,10 @@ export default defineConfig({
       input: {
         main: resolve(__dirname, "index.html"),
         advancedSettings: resolve(__dirname, "advanced-settings.html"),
-        activityIndicator: resolve(__dirname, "activity-indicator.html")
+        activityIndicator: resolve(__dirname, "activity-indicator.html"),
+        captureWarning: resolve(__dirname, "capture-warning.html"),
+        windowBinding: resolve(__dirname, "window-binding.html"),
+        windowHighlight: resolve(__dirname, "window-highlight.html")
       }
     }
   },

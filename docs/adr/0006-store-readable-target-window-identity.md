@@ -1,0 +1,3 @@
+# Store readable target-window identity
+
+Version 2 recordings store each target's executable path, window class, and recorded title as readable metadata rather than hashes. The path and class support exact matching, while the title supports deterministic automatic candidate ranking without a window-selection prompt; these fields can reveal usernames, installation paths, document names, or page titles, so Remember treats recordings as sensitive files and discloses the additional metadata. Hashing was rejected because it would obstruct matching diagnostics and title ranking without making predictable paths or titles meaningfully secret.

@@ -4,10 +4,12 @@ use crate::{
     clock::now_ms,
     hotkeys::{self, HotkeyConfig},
     input::SystemInputExecutor,
+    main_window,
     player::play_recording,
     privileges::{self, PrivilegeState},
-    settings_bundle::{self, SettingsBundle},
+    settings_bundle::{self, MainWindowPreferences, SettingsBundle},
     storage::{self, RecordingFile},
+    window_playback::WindowPlaybackExecutor,
 };
 use chrono::{DateTime, Local};
 use std::{
@@ -167,13 +169,37 @@ fn start_recording_impl(
         Some(crate::input::pause_capture_events()?)
     };
     let started_at_ms = started_at_ms.unwrap_or_else(now_ms);
+    let window_relative = advanced_settings::current(&app)?.window_relative_recording_enabled;
+    let initial_window_handles = if window_relative {
+        crate::window_target::enumerate_target_windows()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|window| window.handle.raw())
+            .collect()
+    } else {
+        std::collections::HashSet::new()
+    };
     let ui_state = {
         let mut controller = state
             .lock()
             .map_err(|_| "state lock poisoned".to_string())?;
         let name = format!("recording-{started_at_ms}");
         let created_at = Local::now().to_rfc3339();
-        if from_hotkey {
+        if window_relative && from_hotkey {
+            controller.start_window_relative_recording_from_hotkey(
+                name,
+                started_at_ms,
+                created_at,
+                initial_window_handles,
+            )?;
+        } else if window_relative {
+            controller.start_window_relative_recording(
+                name,
+                started_at_ms,
+                created_at,
+                initial_window_handles,
+            )?;
+        } else if from_hotkey {
             controller.start_recording_from_hotkey(name, started_at_ms, created_at)?;
         } else {
             controller.start_recording(name, started_at_ms, created_at)?;
@@ -191,7 +217,16 @@ pub fn stop_recording(app: AppHandle, state: State<'_, SharedApp>) -> Result<UiS
 }
 
 pub(crate) fn stop_recording_shared(app: AppHandle, state: SharedApp) -> Result<UiState, String> {
-    stop_recording_impl(app, state, now_ms(), false, true)
+    stop_recording_impl(app, state, now_ms(), false, true, None)
+}
+
+pub(crate) fn stop_recording_for_capture_issue(
+    app: AppHandle,
+    state: SharedApp,
+    stopped_at_ms: u64,
+    reason: String,
+) -> Result<UiState, String> {
+    stop_recording_impl(app, state, stopped_at_ms, true, true, Some(reason))
 }
 
 fn stop_recording_impl(
@@ -200,6 +235,7 @@ fn stop_recording_impl(
     stopped_at_ms: u64,
     capture_boundary_is_ordered: bool,
     save_to_library: bool,
+    stop_warning: Option<String>,
 ) -> Result<UiState, String> {
     let capture_pause = if capture_boundary_is_ordered {
         None
@@ -214,9 +250,15 @@ fn stop_recording_impl(
         let name = default_recording_name(&recording);
         drop(recording);
         controller.set_stopped_recording_name(name)?;
+        if let Some(warning) = stop_warning {
+            controller.set_error(warning);
+        }
         controller.ui_state()
     };
     drop(capture_pause);
+    if let Err(error) = crate::capture_warning::hide(&app) {
+        eprintln!("Remember capture warning could not hide after recording stopped: {error}");
+    }
     if !save_to_library {
         emit_state(&app, ui_state.clone())?;
         return Ok(ui_state);
@@ -227,7 +269,7 @@ fn stop_recording_impl(
             Ok(ui_state)
         }
         Err(error) => {
-            let error = format!("Recording stopped but could not be saved: {error}");
+            let error = format!("录制已停止，但自动保存失败：{error}");
             let error_state = {
                 let mut controller = state
                     .lock()
@@ -307,6 +349,54 @@ pub fn get_advanced_settings(app: AppHandle) -> Result<AdvancedSettings, String>
 }
 
 #[tauri::command]
+pub fn get_main_window_preferences(app: AppHandle) -> Result<MainWindowPreferences, String> {
+    settings_bundle::load(&app).map(|bundle| bundle.main_window)
+}
+
+#[tauri::command]
+pub fn set_main_window_compact_mode(
+    app: AppHandle,
+    compact: bool,
+) -> Result<MainWindowPreferences, String> {
+    let _transaction_guard = SETTINGS_TRANSACTION_LOCK
+        .lock()
+        .map_err(|_| "settings transaction lock poisoned".to_string())?;
+    let mut bundle = settings_bundle::load(&app)?;
+    let previous_compact = bundle.main_window.compact;
+    main_window::set_compact(&app, compact)?;
+    bundle.main_window.compact = compact;
+    match settings_bundle::save(&app, bundle) {
+        Ok(saved) => Ok(saved.main_window),
+        Err(error) => {
+            if let Err(rollback_error) = main_window::set_compact(&app, previous_compact) {
+                return Err(format!(
+                    "保存主窗口界面状态失败：{error}；恢复原窗口尺寸也失败：{rollback_error}"
+                ));
+            }
+            Err(format!("保存主窗口界面状态失败：{error}"))
+        }
+    }
+}
+
+#[tauri::command]
+pub fn set_window_relative_recording_enabled(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<AdvancedSettings, String> {
+    let _transaction_guard = SETTINGS_TRANSACTION_LOCK
+        .lock()
+        .map_err(|_| "settings transaction lock poisoned".to_string())?;
+    let mut bundle = settings_bundle::load(&app)?;
+    bundle.advanced.window_relative_recording_enabled = enabled;
+    let saved = settings_bundle::save(&app, bundle)?;
+    advanced_settings::replace(&app, saved.advanced)?;
+    if let Err(error) = app.emit(ADVANCED_SETTINGS_CHANGED_EVENT, saved.advanced) {
+        eprintln!("Remember advanced settings change event failed: {error}");
+    }
+    Ok(saved.advanced)
+}
+
+#[tauri::command]
 pub fn get_settings_bundle(app: AppHandle) -> Result<SettingsBundle, String> {
     settings_bundle::load(&app)
 }
@@ -317,11 +407,19 @@ pub fn set_settings_bundle(
     state: State<'_, SharedApp>,
     bundle: SettingsBundle,
 ) -> Result<SettingsBundle, String> {
-    let bundle = settings_bundle::normalize(bundle)?;
+    let mut bundle = settings_bundle::normalize(bundle)?;
     let _transaction_guard = SETTINGS_TRANSACTION_LOCK
         .lock()
         .map_err(|_| "settings transaction lock poisoned".to_string())?;
     let previous = settings_bundle::load(&app)?;
+    // The coordinate mode is edited only from the recording controls. Preserve the
+    // latest persisted value when the separate advanced-settings window saves an
+    // older bundle, so changing sound or hotkeys cannot silently toggle recording mode.
+    bundle.advanced.window_relative_recording_enabled =
+        previous.advanced.window_relative_recording_enabled;
+    // The main window owns its session state. A concurrently open advanced-settings
+    // window must not overwrite a newer compact/expanded choice or desktop position.
+    bundle.main_window = previous.main_window;
     let control_hotkeys = bundle.hotkeys.control_hotkeys()?;
     let record_hotkey = bundle.hotkeys.record_hotkey()?;
     let playback_hotkey = bundle.hotkeys.playback_hotkey()?;
@@ -546,8 +644,14 @@ where
     let app_for_thread = app.clone();
     let state_for_thread = state.clone();
     thread::spawn(move || {
-        let executor = SystemInputExecutor;
-        let result = play_recording(&run.recording, run.settings, &executor, &stop_token);
+        let result = if run.recording.is_window_relative() {
+            let executor =
+                WindowPlaybackExecutor::with_app(app_for_thread.clone(), stop_token.clone());
+            play_recording(&run.recording, run.settings, &executor, &stop_token)
+        } else {
+            let executor = SystemInputExecutor;
+            play_recording(&run.recording, run.settings, &executor, &stop_token)
+        };
         let next_state = {
             match state_for_thread.lock() {
                 Ok(mut controller) => {
@@ -611,7 +715,14 @@ fn stop_active_impl(
         controller.mode()
     };
     if mode == AppMode::Recording {
-        return stop_recording_impl(app, state, stopped_at_ms, capture_boundary_is_ordered, true);
+        return stop_recording_impl(
+            app,
+            state,
+            stopped_at_ms,
+            capture_boundary_is_ordered,
+            true,
+            None,
+        );
     }
 
     let ui_state = {
@@ -626,6 +737,7 @@ fn stop_active_impl(
 }
 
 pub(crate) fn prepare_for_exit(app: &AppHandle) -> Result<(), String> {
+    persist_main_window_preferences(app)?;
     let Some(state) = app.try_state::<SharedApp>() else {
         return Ok(());
     };
@@ -690,6 +802,7 @@ pub(crate) fn report_exit_failure(app: &AppHandle, error: String) {
 }
 
 fn prepare_for_administrator_restart(app: &AppHandle) -> Result<Option<PathBuf>, String> {
+    persist_main_window_preferences(app)?;
     let Some(state) = app.try_state::<SharedApp>() else {
         return Ok(None);
     };
@@ -701,7 +814,7 @@ fn prepare_for_administrator_restart(app: &AppHandle) -> Result<Option<PathBuf>,
 
     match mode {
         AppMode::Recording => {
-            stop_recording_impl(app.clone(), state.clone(), now_ms(), false, false)?;
+            stop_recording_impl(app.clone(), state.clone(), now_ms(), false, false, None)?;
         }
         AppMode::Playing => {
             let ui_state = {
@@ -734,6 +847,17 @@ fn prepare_for_administrator_restart(app: &AppHandle) -> Result<Option<PathBuf>,
     }
 
     persist_administrator_restart_recovery(app, &state)
+}
+
+fn persist_main_window_preferences(app: &AppHandle) -> Result<(), String> {
+    let position = main_window::current_position(app)?;
+    let _transaction_guard = SETTINGS_TRANSACTION_LOCK
+        .lock()
+        .map_err(|_| "settings transaction lock poisoned".to_string())?;
+    let mut bundle = settings_bundle::load(app)?;
+    bundle.main_window.position = Some(position);
+    settings_bundle::save(app, bundle)?;
+    Ok(())
 }
 
 fn persist_administrator_restart_recovery(
@@ -963,6 +1087,7 @@ mod tests {
             name: "temporary".to_string(),
             created_at: "2026-07-26T23:59:00+08:00".to_string(),
             duration_ms: 11_824,
+            targets: Vec::new(),
             steps: Vec::new(),
         };
 
@@ -986,6 +1111,7 @@ mod tests {
             name: "handoff".to_string(),
             created_at: "2026-07-26T23:59:00+08:00".to_string(),
             duration_ms: 10,
+            targets: Vec::new(),
             steps: Vec::new(),
         };
         let first_recovery =
@@ -1029,6 +1155,7 @@ mod tests {
             name: "valid-handoff".to_string(),
             created_at: "2026-07-26T23:59:00+08:00".to_string(),
             duration_ms: 10,
+            targets: Vec::new(),
             steps: Vec::new(),
         };
         let valid_path =

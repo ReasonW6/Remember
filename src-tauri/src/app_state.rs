@@ -1,10 +1,16 @@
 use crate::{
     model::{KeyState, Recording},
     player::{PlaybackSettings, StopToken},
-    recorder::{RawInputEvent, Recorder, MAX_RECORDING_STEPS},
+    recorder::{
+        CaptureOutcome, CaptureSurface, RawInputEvent, Recorder, WindowInstanceId,
+        MAX_RECORDING_STEPS,
+    },
 };
 use serde::Serialize;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex, MutexGuard},
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -174,6 +180,8 @@ pub struct AppController {
     message: String,
     message_is_error: bool,
     revision: u64,
+    window_relative_recording: bool,
+    initial_window_handles: HashSet<usize>,
 }
 
 impl Default for AppController {
@@ -199,6 +207,8 @@ impl AppController {
             message: "Idle".to_string(),
             message_is_error: false,
             revision: 0,
+            window_relative_recording: false,
+            initial_window_handles: HashSet::new(),
         }
     }
 
@@ -247,6 +257,40 @@ impl AppController {
         self.start_recording_inner(name, started_at_ms, created_at, true)
     }
 
+    pub fn start_window_relative_recording(
+        &mut self,
+        name: impl Into<String>,
+        started_at_ms: u64,
+        created_at: impl Into<String>,
+        initial_window_handles: HashSet<usize>,
+    ) -> Result<(), String> {
+        self.start_recording_inner_with_mode(
+            name,
+            started_at_ms,
+            created_at,
+            false,
+            true,
+            initial_window_handles,
+        )
+    }
+
+    pub fn start_window_relative_recording_from_hotkey(
+        &mut self,
+        name: impl Into<String>,
+        started_at_ms: u64,
+        created_at: impl Into<String>,
+        initial_window_handles: HashSet<usize>,
+    ) -> Result<(), String> {
+        self.start_recording_inner_with_mode(
+            name,
+            started_at_ms,
+            created_at,
+            true,
+            true,
+            initial_window_handles,
+        )
+    }
+
     fn start_recording_inner(
         &mut self,
         name: impl Into<String>,
@@ -254,15 +298,41 @@ impl AppController {
         created_at: impl Into<String>,
         suppress_record_hotkey_release_tail: bool,
     ) -> Result<(), String> {
+        self.start_recording_inner_with_mode(
+            name,
+            started_at_ms,
+            created_at,
+            suppress_record_hotkey_release_tail,
+            false,
+            HashSet::new(),
+        )
+    }
+
+    fn start_recording_inner_with_mode(
+        &mut self,
+        name: impl Into<String>,
+        started_at_ms: u64,
+        created_at: impl Into<String>,
+        suppress_record_hotkey_release_tail: bool,
+        window_relative: bool,
+        initial_window_handles: HashSet<usize>,
+    ) -> Result<(), String> {
         match self.mode() {
             AppMode::Idle => {}
             AppMode::Recording => return Err("cannot record while recording".to_string()),
             AppMode::Playing => return Err("cannot record while playing".to_string()),
         }
         self.ensure_recording_saved_before_replace()?;
-        self.recorder.start(name, started_at_ms, created_at)?;
+        if window_relative {
+            self.recorder
+                .start_window_relative(name, started_at_ms, created_at)?;
+        } else {
+            self.recorder.start(name, started_at_ms, created_at)?;
+        }
         self.recording = None;
         self.recording_needs_save = false;
+        self.window_relative_recording = window_relative;
+        self.initial_window_handles = initial_window_handles;
         self.control_hotkeys
             .enter_recording(suppress_record_hotkey_release_tail);
         self.message = "Recording".to_string();
@@ -276,10 +346,12 @@ impl AppController {
         let recording_was_truncated = self.recorder.last_stop_was_truncated();
         self.recording = Some(Arc::clone(&recording));
         self.recording_needs_save = true;
+        self.window_relative_recording = false;
+        self.initial_window_handles.clear();
         self.control_hotkeys.finish_recording();
         if recording_was_truncated {
             self.message = format!(
-                "Recording reached the maximum of {MAX_RECORDING_STEPS} steps; the captured prefix was retained for saving"
+                "录制已达到 {MAX_RECORDING_STEPS} 步安全上限；停止前的内容已保留并可保存。"
             );
             self.message_is_error = true;
         } else {
@@ -308,6 +380,40 @@ impl AppController {
 
         for event in self.control_hotkeys.filter(event) {
             self.recorder.capture(event);
+        }
+    }
+
+    pub fn capture_input_with_surface(
+        &mut self,
+        event: RawInputEvent,
+        surface: CaptureSurface,
+    ) -> CaptureOutcome {
+        if self.mode() != AppMode::Recording {
+            return CaptureOutcome::Continue;
+        }
+
+        let mut outcome = CaptureOutcome::Continue;
+        for event in self.control_hotkeys.filter(event) {
+            outcome = self.recorder.capture_with_surface(event, surface.clone());
+            if matches!(outcome, CaptureOutcome::StopRecording(_)) {
+                break;
+            }
+        }
+        outcome
+    }
+
+    pub fn is_window_relative_recording(&self) -> bool {
+        self.mode() == AppMode::Recording && self.window_relative_recording
+    }
+
+    pub fn target_availability(
+        &self,
+        instance: WindowInstanceId,
+    ) -> crate::model::TargetWindowAvailability {
+        if instance.generation == 0 && self.initial_window_handles.contains(&instance.hwnd) {
+            crate::model::TargetWindowAvailability::Initial
+        } else {
+            crate::model::TargetWindowAvailability::Deferred
         }
     }
 
