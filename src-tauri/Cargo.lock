@@ -2420,7 +2420,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-global-shortcut",
- "thiserror 1.0.69",
+ "thiserror 2.0.18",
  "windows 0.58.0",
 ]
 
