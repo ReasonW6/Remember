@@ -18,16 +18,11 @@ import {
   restartAsAdministrator,
   setMainWindowCompactMode,
   setWindowRelativeRecordingEnabled,
-  getPendingWindowBinding,
-  selectWindowBindingCandidate,
-  cancelWindowBinding,
-  highlightWindowBindingCandidate,
   setSettingsBundle,
   showAdvancedSettings,
   subscribeToAdvancedSettingsChanged,
   subscribeToHotkeysChanged,
   subscribeToRecordingsChanged,
-  subscribeToWindowBinding
 } from "./rememberApi";
 
 const tauriMocks = vi.hoisted(() => ({
@@ -270,50 +265,6 @@ describe("rememberApi", () => {
       "set_main_window_compact_mode",
       { compact: false }
     );
-  });
-
-  it("routes manual window-binding reads, choices, cancellation, and highlighting", async () => {
-    const request = { request_id: 7, candidates: [] };
-    tauriMocks.invoke
-      .mockResolvedValueOnce(request)
-      .mockResolvedValueOnce(undefined)
-      .mockResolvedValueOnce(undefined)
-      .mockResolvedValueOnce(undefined);
-
-    await expect(getPendingWindowBinding()).resolves.toBe(request);
-    await expect(selectWindowBindingCandidate(7, 2)).resolves.toBeUndefined();
-    await expect(highlightWindowBindingCandidate(7, 2)).resolves.toBeUndefined();
-    await expect(cancelWindowBinding(7)).resolves.toBeUndefined();
-
-    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(1, "get_pending_window_binding");
-    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(2, "select_window_binding_candidate", {
-      requestId: 7,
-      candidateId: 2
-    });
-    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(3, "highlight_window_binding_candidate", {
-      requestId: 7,
-      candidateId: 2
-    });
-    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(4, "cancel_window_binding", {
-      requestId: 7
-    });
-  });
-
-  it("forwards manual window-binding requests", async () => {
-    const callback = vi.fn();
-    const request = { request_id: 4, candidates: [] };
-    const unlisten = vi.fn();
-    tauriMocks.listen.mockImplementation(async (_eventName, handler) => {
-      handler({ payload: request });
-      return unlisten;
-    });
-
-    await expect(subscribeToWindowBinding(callback)).resolves.toBe(unlisten);
-    expect(tauriMocks.listen).toHaveBeenCalledWith(
-      "remember://window-binding",
-      expect.any(Function)
-    );
-    expect(callback).toHaveBeenCalledWith(request);
   });
 
   it("reads and atomically saves the settings bundle", async () => {

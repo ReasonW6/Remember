@@ -21,30 +21,6 @@ export interface RecordingFile {
   load_error: string | null;
 }
 
-export interface ClientSize {
-  width: number;
-  height: number;
-}
-
-export interface WindowBindingTarget {
-  executable_path: string;
-  window_class: string;
-  title: string;
-  client_size: ClientSize;
-  dpi: number;
-}
-
-export interface WindowBindingCandidate extends WindowBindingTarget {
-  candidate_id: number;
-  process_id: number;
-}
-
-export interface WindowBindingRequest {
-  request_id: number;
-  target: WindowBindingTarget;
-  candidates: WindowBindingCandidate[];
-}
-
 export interface HotkeyConfig {
   record: string;
   playback: string;

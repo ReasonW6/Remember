@@ -6,33 +6,35 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: windows-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
-  checks: write
   contents: read
 
 jobs:
-  verify:
-    runs-on: windows-latest
+  verify-and-build:
+    runs-on: windows-2025
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
-          node-version: 22.12.0
+          node-version: 24.13.1
           cache: npm
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
-      - name: Audit Rust dependencies
-        uses: rustsec/audit-check@v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          working-directory: src-tauri
+      - name: Set up pinned Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.94.1 --profile minimal --component clippy --component rustfmt
+          rustup default 1.94.1
 
       - name: Install frontend dependencies
         run: npm ci
@@ -40,11 +42,20 @@ jobs:
       - name: Audit npm dependencies
         run: npm audit --audit-level=moderate
 
-      - name: Test frontend
-        run: npm test
+      - name: Test frontend with coverage thresholds
+        run: npm run test:coverage
 
       - name: Build frontend
         run: npm run build
+
+      - name: Install pinned Rust verification tools
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo install cargo-llvm-cov --version 0.8.7 --locked
+
+      - name: Audit Rust dependencies with explicit warning policy
+        working-directory: src-tauri
+        run: cargo audit --deny warnings --file Cargo.lock
 
       - name: Check Rust formatting
         run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
@@ -52,24 +63,153 @@ jobs:
       - name: Lint Rust
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings
 
-      - name: Test Rust
-        run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+      - name: Test Rust with coverage threshold
+        run: cargo llvm-cov --manifest-path src-tauri/Cargo.toml --all-features --locked --fail-under-lines 45
 
-      - name: Build portable release executable
+      - name: Run real Windows input round trip
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test windows_input_e2e --locked -- --ignored --nocapture --test-threads=1
+
+      - name: Build optimized portable executable
         run: .\node_modules\.bin\tauri.cmd build --ci --no-bundle -- --locked
 
-      - name: Generate SHA-256 checksum
+      - name: Build debug diagnostic executable
+        run: cargo build --manifest-path src-tauri/Cargo.toml --locked
+
+      - name: Prepare release assets and notes
+        id: release_assets
         shell: pwsh
         run: |
-          $exe = Resolve-Path 'src-tauri/target/release/remember.exe'
-          $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  remember.exe" | Set-Content -LiteralPath 'src-tauri/target/release/remember.exe.sha256' -Encoding ascii
+          $packageVersion = (Get-Content -LiteralPath 'package.json' -Raw | ConvertFrom-Json).version
+          $cargoVersion = (Select-String -LiteralPath 'src-tauri/Cargo.toml' -Pattern '^version = "([^"]+)"').Matches[0].Groups[1].Value
+          $tauriVersion = (Get-Content -LiteralPath 'src-tauri/tauri.conf.json' -Raw | ConvertFrom-Json).version
+          if ($packageVersion -ne $cargoVersion -or $packageVersion -ne $tauriVersion) {
+            throw "Version mismatch: package=$packageVersion cargo=$cargoVersion tauri=$tauriVersion"
+          }
 
-      - name: Upload unsigned release candidate
-        uses: actions/upload-artifact@v4
+          New-Item -ItemType Directory -Path 'release-assets' -Force | Out-Null
+          Copy-Item -LiteralPath 'src-tauri/target/release/remember.exe' -Destination 'release-assets/remember.exe'
+          Copy-Item -LiteralPath 'src-tauri/target/debug/remember.exe' -Destination 'release-assets/remember-debug.exe'
+
+          function Write-Checksum([string] $fileName) {
+            $path = Join-Path 'release-assets' $fileName
+            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $fileName" | Set-Content -LiteralPath "$path.sha256" -Encoding ascii
+            return $hash
+          }
+
+          $optimizedHash = Write-Checksum 'remember.exe'
+          $debugHash = Write-Checksum 'remember-debug.exe'
+          $optimizedBytes = (Get-Item -LiteralPath 'release-assets/remember.exe').Length
+          $debugBytes = (Get-Item -LiteralPath 'release-assets/remember-debug.exe').Length
+          $optimizedMiB = '{0:N2}' -f ($optimizedBytes / 1MB)
+          $debugMiB = '{0:N2}' -f ($debugBytes / 1MB)
+
+          $notes = Get-Content -LiteralPath '.github/RELEASE_NOTES.md' -Raw
+          $notes = $notes.Replace('<VERSION>', $packageVersion)
+          $notes = $notes.Replace('<OPTIMIZED_BYTES>', [string]$optimizedBytes)
+          $notes = $notes.Replace('<OPTIMIZED_MIB>', $optimizedMiB)
+          $notes = $notes.Replace('<DEBUG_BYTES>', [string]$debugBytes)
+          $notes = $notes.Replace('<DEBUG_MIB>', $debugMiB)
+          $notes = $notes.Replace('<OPTIMIZED_SHA256>', $optimizedHash)
+          $notes = $notes.Replace('<DEBUG_SHA256>', $debugHash)
+          $notes | Set-Content -LiteralPath 'release-assets/release-notes.md' -Encoding utf8NoBOM
+
+          "version=$packageVersion" >> $env:GITHUB_OUTPUT
+
+      - name: Attest optimized and debug executables
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
-          name: remember-windows-unsigned
+          subject-path: |
+            release-assets/remember.exe
+            release-assets/remember-debug.exe
+
+      - name: Upload verified unsigned release assets
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: remember-windows-v${{ steps.release_assets.outputs.version }}
           path: |
-            src-tauri/target/release/remember.exe
-            src-tauri/target/release/remember.exe.sha256
+            release-assets/remember.exe
+            release-assets/remember.exe.sha256
+            release-assets/remember-debug.exe
+            release-assets/remember-debug.exe.sha256
+            release-assets/release-notes.md
           if-no-files-found: error
+          retention-days: 90
+
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: verify-and-build
+    runs-on: windows-2025
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Read release version
+        id: version
+        shell: pwsh
+        run: |
+          $version = (Get-Content -LiteralPath 'package.json' -Raw | ConvertFrom-Json).version
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=v$version" >> $env:GITHUB_OUTPUT
+
+      - name: Check whether the release already exists
+        id: release_check
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view '${{ steps.version.outputs.tag }}' --repo '${{ github.repository }}' *> $null
+          if ($LASTEXITCODE -eq 0) {
+            "exists=true" >> $env:GITHUB_OUTPUT
+          } else {
+            "exists=false" >> $env:GITHUB_OUTPUT
+            $global:LASTEXITCODE = 0
+          }
+
+      - name: Download verified CI assets
+        if: steps.release_check.outputs.exists == 'false'
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: remember-windows-v${{ steps.version.outputs.version }}
+          path: release-assets
+
+      - name: Create annotated release tag
+        if: steps.release_check.outputs.exists == 'false'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tagRefJson = gh api 'repos/${{ github.repository }}/git/ref/tags/${{ steps.version.outputs.tag }}' 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            $tagRef = $tagRefJson | ConvertFrom-Json
+            if ($tagRef.object.type -eq 'tag') {
+              $tagMetadata = gh api "repos/${{ github.repository }}/git/tags/$($tagRef.object.sha)" | ConvertFrom-Json
+              $targetSha = $tagMetadata.object.sha
+            } else {
+              $targetSha = $tagRef.object.sha
+            }
+            if ($targetSha -ne '${{ github.sha }}') {
+              throw "Existing tag ${{ steps.version.outputs.tag }} points to $targetSha instead of ${{ github.sha }}"
+            }
+          } else {
+            $global:LASTEXITCODE = 0
+            $tagObject = gh api --method POST 'repos/${{ github.repository }}/git/tags' -f tag='${{ steps.version.outputs.tag }}' -f message='Remember ${{ steps.version.outputs.tag }} verified CI release' -f object='${{ github.sha }}' -f type='commit' | ConvertFrom-Json
+            gh api --method POST 'repos/${{ github.repository }}/git/refs' -f ref='refs/tags/${{ steps.version.outputs.tag }}' -f sha=$tagObject.sha | Out-Null
+          }
+
+      - name: Publish GitHub Release from CI assets
+        if: steps.release_check.outputs.exists == 'false'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $assets = @(
+            'release-assets/remember.exe'
+            'release-assets/remember.exe.sha256'
+            'release-assets/remember-debug.exe'
+            'release-assets/remember-debug.exe.sha256'
+          )
+          gh release create '${{ steps.version.outputs.tag }}' @assets --repo '${{ github.repository }}' --verify-tag --title 'Remember ${{ steps.version.outputs.tag }}' --notes-file 'release-assets/release-notes.md'

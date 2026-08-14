@@ -10,6 +10,8 @@ Free code signing provided by [SignPath.io](https://about.signpath.io), certific
 
 Official release binaries must be produced by the repository's GitHub Actions workflow from the corresponding source revision. Each signing request requires manual approval. Every distributed artifact, including an unsigned release candidate, receives a SHA-256 checksum. When an executable is signed, its published checksum must be regenerated from the final signed bytes.
 
+Local builds are for development verification only and must never be uploaded to an official release. A version is published only after its version and release notes are merged into `main`; the Windows CI workflow then builds both executables, generates their checksums and build-provenance attestations, and creates the GitHub Release from those exact CI artifacts.
+
 ## Team roles
 
 - Committers and reviewers: [ReasonW6](https://github.com/ReasonW6)

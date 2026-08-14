@@ -14,7 +14,6 @@ pub mod recorder;
 mod settings_bundle;
 mod single_instance;
 pub mod storage;
-pub mod window_binding;
 pub mod window_playback;
 pub mod window_target;
 
@@ -36,15 +35,12 @@ pub fn run() {
     let advanced_settings: advanced_settings::SharedAdvancedSettings =
         Arc::new(Mutex::new(advanced_settings::AdvancedSettings::default()));
     let capture_shared = shared.clone();
-    let window_binding: window_binding::SharedWindowBinding =
-        Arc::new(window_binding::WindowBindingCoordinator::default());
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(shared)
         .manage(advanced_settings)
-        .manage(window_binding)
         .invoke_handler(tauri::generate_handler![
             commands::get_state,
             commands::start_recording,
@@ -67,10 +63,6 @@ pub fn run() {
             commands::start_playback,
             commands::set_playback_settings,
             commands::stop_playback,
-            window_binding::get_pending_window_binding,
-            window_binding::select_window_binding_candidate,
-            window_binding::cancel_window_binding,
-            window_binding::highlight_window_binding_candidate,
         ])
         .on_window_event(|window, event| {
             if window.label() == "advanced-settings"
@@ -107,7 +99,6 @@ pub fn run() {
                 .map_err(std::io::Error::other)?;
             activity_indicator::setup(app.handle()).map_err(std::io::Error::other)?;
             capture_warning::setup(app.handle()).map_err(std::io::Error::other)?;
-            window_binding::setup(app.handle()).map_err(std::io::Error::other)?;
             let hotkey_config = loaded_settings.hotkeys;
             hotkeys::apply_to_controller(app.handle(), &hotkey_config)
                 .map_err(std::io::Error::other)?;

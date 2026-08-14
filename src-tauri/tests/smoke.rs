@@ -168,59 +168,6 @@ fn capture_warning_window_is_non_interactive_topmost_and_event_only() {
 }
 
 #[test]
-fn manual_window_binding_uses_a_focused_dialog_and_click_through_highlight() {
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let config = std::fs::read_to_string(format!("{manifest_dir}/tauri.conf.json"))
-        .expect("read tauri config");
-    let config: serde_json::Value = serde_json::from_str(&config).expect("parse tauri config");
-    let windows = config["app"]["windows"]
-        .as_array()
-        .expect("windows should be an array");
-    let binding = windows
-        .iter()
-        .find(|window| window["label"] == "window-binding")
-        .expect("window binding dialog");
-    let highlight = windows
-        .iter()
-        .find(|window| window["label"] == "window-highlight")
-        .expect("window highlight overlay");
-
-    assert_eq!(binding["create"], false);
-    assert_eq!(binding["visible"], false);
-    assert_eq!(binding["url"], "window-binding.html");
-    assert_eq!(binding["focus"], true);
-    assert_eq!(binding["closable"], false);
-    assert_eq!(binding["decorations"], false);
-    assert_eq!(binding["resizable"], false);
-
-    assert_eq!(highlight["create"], false);
-    assert_eq!(highlight["visible"], false);
-    assert_eq!(highlight["url"], "window-highlight.html");
-    assert_eq!(highlight["focus"], false);
-    assert_eq!(highlight["focusable"], false);
-    assert_eq!(highlight["transparent"], true);
-    assert_eq!(highlight["alwaysOnTop"], true);
-    assert_eq!(highlight["decorations"], false);
-    assert_eq!(highlight["skipTaskbar"], true);
-
-    let capability =
-        std::fs::read_to_string(format!("{manifest_dir}/capabilities/window-binding.json"))
-            .expect("read window binding capability");
-    let capability: serde_json::Value =
-        serde_json::from_str(&capability).expect("parse window binding capability");
-    assert_eq!(capability["windows"], serde_json::json!(["window-binding"]));
-    assert_eq!(
-        capability["permissions"],
-        serde_json::json!([
-            "core:event:allow-listen",
-            "core:event:allow-unlisten",
-            "core:window:allow-start-dragging",
-            "window-binding-window-commands"
-        ])
-    );
-}
-
-#[test]
 fn advanced_settings_window_starts_hidden_with_narrow_permissions() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let config = std::fs::read_to_string(format!("{manifest_dir}/tauri.conf.json"))

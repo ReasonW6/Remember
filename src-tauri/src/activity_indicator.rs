@@ -4,6 +4,7 @@ use std::sync::{
     Mutex,
 };
 use std::thread;
+use std::time::Duration;
 use tauri::{
     webview::PageLoadEvent, AppHandle, Manager, PhysicalPosition, WebviewWindow,
     WebviewWindowBuilder,
@@ -11,6 +12,7 @@ use tauri::{
 
 const WINDOW_LABEL: &str = "activity-indicator";
 const SCREEN_MARGIN_PX: i32 = 12;
+const CREATION_RETRY_DELAY: Duration = Duration::from_millis(250);
 static CREATE_LOCK: Mutex<()> = Mutex::new(());
 static PAGE_READY: AtomicBool = AtomicBool::new(false);
 static CONFIGURED: AtomicBool = AtomicBool::new(false);
@@ -74,6 +76,10 @@ pub fn sync(app: &AppHandle, mode: AppMode, enabled: bool) -> Result<(), String>
 }
 
 fn schedule_window_creation(app: &AppHandle) -> Result<(), String> {
+    schedule_window_creation_after(app, Duration::ZERO)
+}
+
+fn schedule_window_creation_after(app: &AppHandle, delay: Duration) -> Result<(), String> {
     if CREATION_SCHEDULED
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
@@ -85,18 +91,39 @@ fn schedule_window_creation(app: &AppHandle) -> Result<(), String> {
     let spawn_result = thread::Builder::new()
         .name("remember-indicator-create".to_string())
         .spawn(move || {
+            if !delay.is_zero() {
+                thread::sleep(delay);
+            }
             let app_for_main = app_for_thread.clone();
             let scheduling_result = app_for_thread.run_on_main_thread(move || {
-                if SHOULD_BE_VISIBLE.load(Ordering::Acquire) {
-                    if let Err(error) = ensure_window(&app_for_main) {
-                        eprintln!("Remember activity indicator could not be created: {error}");
+                let retry = SHOULD_BE_VISIBLE.load(Ordering::Acquire)
+                    && ensure_window(&app_for_main)
+                        .map(|window| show_when_ready(&window))
+                        .and_then(|result| result)
+                        .map_err(|error| {
+                            eprintln!("Remember activity indicator could not be created: {error}");
+                            error
+                        })
+                        .is_err();
+                CREATION_SCHEDULED.store(false, Ordering::Release);
+                if retry && SHOULD_BE_VISIBLE.load(Ordering::Acquire) {
+                    if let Err(error) =
+                        schedule_window_creation_after(&app_for_main, CREATION_RETRY_DELAY)
+                    {
+                        eprintln!("Remember activity indicator retry could not start: {error}");
                     }
                 }
-                CREATION_SCHEDULED.store(false, Ordering::Release);
             });
             if let Err(error) = scheduling_result {
                 CREATION_SCHEDULED.store(false, Ordering::Release);
                 eprintln!("Remember activity indicator could not be scheduled: {error}");
+                if SHOULD_BE_VISIBLE.load(Ordering::Acquire) {
+                    if let Err(error) =
+                        schedule_window_creation_after(&app_for_thread, CREATION_RETRY_DELAY)
+                    {
+                        eprintln!("Remember activity indicator retry could not start: {error}");
+                    }
+                }
             }
         });
     if let Err(error) = spawn_result {
@@ -141,6 +168,16 @@ fn ensure_window(app: &AppHandle) -> Result<WebviewWindow, String> {
                 PAGE_READY.store(true, Ordering::Release);
                 if let Err(error) = show_when_ready(&window) {
                     eprintln!("Remember activity indicator could not become visible: {error}");
+                    if SHOULD_BE_VISIBLE.load(Ordering::Acquire) {
+                        if let Err(error) = schedule_window_creation_after(
+                            window.app_handle(),
+                            CREATION_RETRY_DELAY,
+                        ) {
+                            eprintln!(
+                                "Remember activity indicator visibility retry could not start: {error}"
+                            );
+                        }
+                    }
                 }
             }
         })

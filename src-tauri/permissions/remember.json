@@ -47,19 +47,6 @@
         "allow": ["get_state"],
         "deny": []
       }
-    },
-    {
-      "identifier": "window-binding-window-commands",
-      "description": "Commands required by the manual target-window binding dialog.",
-      "commands": {
-        "allow": [
-          "get_pending_window_binding",
-          "select_window_binding_candidate",
-          "cancel_window_binding",
-          "highlight_window_binding_candidate"
-        ],
-        "deny": []
-      }
     }
   ],
   "set": []

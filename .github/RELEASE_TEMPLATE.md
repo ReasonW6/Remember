@@ -22,3 +22,10 @@ SHA-256：
 
 - 说明签名状态、系统兼容性和必要的使用限制。
 - 日常使用优化版；Debug 版仅用于问题诊断。
+
+## 发布流程
+
+1. 同步更新 `package.json`、`src-tauri/Cargo.toml` 与 `src-tauri/tauri.conf.json` 的版本，并更新 `.github/RELEASE_NOTES.md`。
+2. 通过 Pull Request 合并到 `main`。Windows CI 必须完整通过测试、覆盖率、RustSec、真实输入往返、构建与来源证明步骤。
+3. CI 从同一次运行生成优化版、Debug 版及两个 SHA-256 文件，并自动创建对应 `v<版本>` GitHub Release。
+4. 不得把本地构建的 EXE、校验文件或修改后的 CI 下载文件上传到正式 Release；需要重试时重跑同一提交的 Actions，或提交新的版本修正。

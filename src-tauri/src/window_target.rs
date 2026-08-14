@@ -41,6 +41,12 @@ pub struct WindowGeometry {
     pub dpi: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowDisplayState {
+    pub visible: bool,
+    pub minimized: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowSnapshot {
     pub handle: WindowHandle,
@@ -244,6 +250,10 @@ pub fn enumerate_matching_windows(
 
 pub fn refresh_window_geometry(handle: WindowHandle) -> Result<WindowGeometry, WindowTargetError> {
     platform::refresh_window_geometry(handle)
+}
+
+pub fn window_display_state(handle: WindowHandle) -> Result<WindowDisplayState, WindowTargetError> {
+    platform::window_display_state(handle)
 }
 
 pub fn window_is_alive(handle: WindowHandle) -> bool {
@@ -577,7 +587,6 @@ mod platform {
             executable_path: String,
             window_class: String,
             candidates: Vec<WindowSnapshot>,
-            first_relevant_error: Option<WindowTargetError>,
         }
 
         unsafe extern "system" fn visit_window(raw: HWND, state: LPARAM) -> BOOL {
@@ -606,11 +615,10 @@ mod platform {
                     context.candidates.push(snapshot);
                 }
                 Ok(_) => {}
-                Err(error) => {
-                    if context.first_relevant_error.is_none() {
-                        context.first_relevant_error = Some(error);
-                    }
-                }
+                // A same-class window can belong to an unrelated, inaccessible process.
+                // It is not evidence that the recorded target is unreadable, so keep
+                // enumerating and let the deferred binder wait for a real candidate.
+                Err(_) => {}
             }
             BOOL(1)
         }
@@ -619,7 +627,6 @@ mod platform {
             executable_path: target.executable_path.clone(),
             window_class: target.window_class.clone(),
             candidates: Vec::new(),
-            first_relevant_error: None,
         };
         unsafe {
             EnumWindows(
@@ -629,11 +636,6 @@ mod platform {
         }
         .map_err(|error| windows_api_error("枚举顶层窗口", None, error))?;
 
-        if context.candidates.is_empty() {
-            if let Some(error) = context.first_relevant_error {
-                return Err(error);
-            }
-        }
         Ok(context.candidates)
     }
 
@@ -641,6 +643,17 @@ mod platform {
         handle: WindowHandle,
     ) -> Result<WindowGeometry, WindowTargetError> {
         read_geometry(hwnd(handle), handle)
+    }
+
+    pub(super) fn window_display_state(
+        handle: WindowHandle,
+    ) -> Result<WindowDisplayState, WindowTargetError> {
+        let raw = hwnd(handle);
+        ensure_alive(raw, handle)?;
+        Ok(WindowDisplayState {
+            visible: unsafe { IsWindowVisible(raw).as_bool() },
+            minimized: unsafe { IsIconic(raw).as_bool() },
+        })
     }
 
     pub(super) fn window_is_alive(handle: WindowHandle) -> bool {
@@ -1125,6 +1138,12 @@ mod platform {
     pub(super) fn refresh_window_geometry(
         _handle: WindowHandle,
     ) -> Result<WindowGeometry, WindowTargetError> {
+        Err(WindowTargetError::UnsupportedPlatform)
+    }
+
+    pub(super) fn window_display_state(
+        _handle: WindowHandle,
+    ) -> Result<WindowDisplayState, WindowTargetError> {
         Err(WindowTargetError::UnsupportedPlatform)
     }
 

@@ -1,0 +1,34 @@
+## 本次改动
+
+- `优化`：Windows 低级输入钩子改用 4096 条有界非阻塞队列；队列溢出时会自动停止录制并显示错误，避免无限增长或静默保存不完整序列。
+- `优化`：V2 回放只在首次绑定时读取程序路径、窗口类和标题；后续步骤使用窗口生命周期标记、客户区几何与显示状态，避免每个指针步骤重复打开进程并读取完整元数据。
+- `优化`：录制库在全局缓存锁外解析未缓存文件，刷新大型录制库时不再阻塞其他列表与缓存操作。
+- `修复`：鼠标按钮或按键在其他窗口按下、于 Remember 窗口上方释放时，录制会保留配对的释放事件。
+- `修复`：损坏或不兼容的 `preferences.json` 会被隔离为 `preferences.invalid*.json`，应用使用默认设置继续启动。
+- `修复`：捕获警告窗口显示、隐藏、定位或消息发送失败时不再错误消费状态版本，并会自动重试。
+- `修复`：活动指示器首次创建或显示遇到瞬态错误时会延迟重试，不再整次录制或回放都缺少提示。
+- `修复`：自动目标绑定会忽略无关的同类名不可读窗口，继续等待真正匹配的目标，最长仍为 30 秒。
+- `移除`：删除已弃用且无生产调用者的手动目标窗口选择器、窗口高亮层、4 个 IPC 命令、相关权限、页面、样式和测试；V2 继续只使用自动绑定。
+- `移除`：删除迁移完成后从未调用的旧 `settings.json` 与 `hotkeys.json` 写入 API；首次迁移读取兼容性保持不变。
+- `安全`：GitHub Actions 现在是发行文件的唯一来源，同时生成优化版、Debug 版、SHA-256、构建来源证明并自动发布；Actions、Node.js 与 Rust 均固定版本或提交 SHA。
+- `验证`：CI 新增前端覆盖率阈值、Rust 覆盖率阈值、真实 Windows 输入往返测试，以及“所有新 RustSec 警告均失败”的显式审计策略。
+- `版本`：应用、Tauri 与 Rust 包版本统一更新为 `<VERSION>`。
+
+## 下载与校验
+
+- `remember.exe`：Windows x64 优化便携版，<OPTIMIZED_BYTES> bytes（<OPTIMIZED_MIB> MiB）。
+- `remember.exe.sha256`：优化版 SHA-256 校验文件。
+- `remember-debug.exe`：Windows x64 调试版，仅用于诊断，<DEBUG_BYTES> bytes（<DEBUG_MIB> MiB）。
+- `remember-debug.exe.sha256`：调试版 SHA-256 校验文件。
+
+SHA-256：
+
+- `remember.exe`：`<OPTIMIZED_SHA256>`
+- `remember-debug.exe`：`<DEBUG_SHA256>`
+
+## 注意事项
+
+- 两个 EXE 均未进行 Authenticode 数字签名，Windows 可能显示“未知发布者”或 SmartScreen 提示；SHA-256 只能校验文件完整性，不能证明发布者身份。发行文件附带 GitHub 构建来源证明，可用于核对其 Actions 构建来源。
+- 这是免安装便携版，不是 MSI/NSIS 安装程序。录制保存在 EXE 同级 `recordings` 目录，请把程序放在当前用户可写目录。
+- V2 不支持 DPI 或显示缩放变化、任意缩放适配及控件重新布局。V1 和 V2 都会发送真实键盘和鼠标输入，使用前请确认目标窗口和录制来源可信。
+- 日常使用 `remember.exe`；`remember-debug.exe` 仅用于问题诊断。

@@ -40,17 +40,6 @@ pub fn load(app: &AppHandle) -> Result<AdvancedSettings, String> {
     Ok(settings_from_json_or_default(&raw))
 }
 
-pub fn save(app: &AppHandle, settings: AdvancedSettings) -> Result<AdvancedSettings, String> {
-    let settings = normalize(settings)?;
-    let path = config_path(app)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    let json = serde_json::to_string_pretty(&settings).map_err(|error| error.to_string())?;
-    fs::write(path, json).map_err(|error| error.to_string())?;
-    Ok(settings)
-}
-
 pub fn current(app: &AppHandle) -> Result<AdvancedSettings, String> {
     let state = app
         .try_state::<SharedAdvancedSettings>()

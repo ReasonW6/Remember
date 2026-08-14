@@ -146,7 +146,8 @@ pub fn window_lifetime_token(_hwnd: usize) -> WindowLifetimeToken {
 mod capture {
     use crate::{
         app_state::{
-            AppController, ControlHotkeyAction, ControlHotkeyDecision, ControlHotkeyRuntime,
+            AppController, AppMode, ControlHotkeyAction, ControlHotkeyDecision,
+            ControlHotkeyRuntime,
         },
         clock::now_ms,
         commands,
@@ -162,7 +163,10 @@ mod capture {
     use std::{
         cell::RefCell,
         collections::{HashMap, HashSet},
-        sync::{mpsc, Arc, Mutex, OnceLock, RwLock},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc, Mutex, OnceLock, RwLock,
+        },
         thread::{self, JoinHandle},
     };
     use tauri::AppHandle;
@@ -252,13 +256,83 @@ mod capture {
     struct HookContext {
         control_hotkeys: ControlHotkeyRuntime,
         own_windows: Arc<OwnWindowHandles>,
-        capture_event_tx: mpsc::Sender<CaptureWorkerMessage>,
+        capture_event_tx: mpsc::SyncSender<CaptureWorkerMessage>,
         top_level_windows: RefCell<HashSet<usize>>,
+        own_window_input: RefCell<OwnWindowInputFilter>,
     }
 
     impl HookContext {
         fn dispatch(&self, message: CaptureWorkerMessage) -> bool {
-            self.capture_event_tx.send(message).is_ok()
+            match self.capture_event_tx.try_send(message) {
+                Ok(()) => true,
+                Err(mpsc::TrySendError::Full(_)) => {
+                    CAPTURE_QUEUE_OVERFLOWED.store(true, Ordering::Release);
+                    false
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => false,
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct OwnWindowInputFilter {
+        pressed_mouse_buttons: [bool; 5],
+        pressed_keys: HashSet<(u16, u16, bool)>,
+    }
+
+    impl OwnWindowInputFilter {
+        fn keep(&mut self, event: RawInputEvent, over_own_window: bool) -> bool {
+            match event {
+                RawInputEvent::MouseButton { button, state, .. } => {
+                    let pressed = &mut self.pressed_mouse_buttons[mouse_button_index(button)];
+                    match state {
+                        ButtonState::Pressed if !over_own_window => {
+                            *pressed = true;
+                            true
+                        }
+                        ButtonState::Pressed => false,
+                        ButtonState::Released if over_own_window => std::mem::take(pressed),
+                        ButtonState::Released => {
+                            *pressed = false;
+                            true
+                        }
+                    }
+                }
+                RawInputEvent::Key {
+                    vk_code,
+                    scan_code,
+                    extended,
+                    state,
+                    ..
+                } => {
+                    let key = (vk_code, scan_code, extended);
+                    match state {
+                        KeyState::Pressed if !over_own_window => {
+                            self.pressed_keys.insert(key);
+                            true
+                        }
+                        KeyState::Pressed => false,
+                        KeyState::Released if over_own_window => self.pressed_keys.remove(&key),
+                        KeyState::Released => {
+                            self.pressed_keys.remove(&key);
+                            true
+                        }
+                    }
+                }
+                RawInputEvent::MouseMove { .. } | RawInputEvent::MouseWheel { .. } => {
+                    !over_own_window
+                }
+            }
+        }
+    }
+
+    fn mouse_button_index(button: MouseButton) -> usize {
+        match button {
+            MouseButton::Left => 0,
+            MouseButton::Right => 1,
+            MouseButton::Middle => 2,
+            MouseButton::X1 => 3,
+            MouseButton::X2 => 4,
         }
     }
 
@@ -275,7 +349,10 @@ mod capture {
 
     // Only non-hook lifecycle and command code uses this sender. Hook callbacks
     // dispatch through their thread-local HookContext above.
-    static CAPTURE_CONTROL_TX: Mutex<Option<mpsc::Sender<CaptureWorkerMessage>>> = Mutex::new(None);
+    const CAPTURE_QUEUE_CAPACITY: usize = 4_096;
+    static CAPTURE_CONTROL_TX: Mutex<Option<mpsc::SyncSender<CaptureWorkerMessage>>> =
+        Mutex::new(None);
+    static CAPTURE_QUEUE_OVERFLOWED: AtomicBool = AtomicBool::new(false);
     static WINDOW_LIFETIMES: OnceLock<RwLock<WindowLifetimeRegistry>> = OnceLock::new();
 
     #[derive(Default)]
@@ -470,13 +547,15 @@ mod capture {
             .lock()
             .map_err(|_| "state lock poisoned".to_string())?
             .control_hotkey_runtime();
-        let (capture_tx, capture_rx) = mpsc::channel();
+        CAPTURE_QUEUE_OVERFLOWED.store(false, Ordering::Release);
+        let (capture_tx, capture_rx) = mpsc::sync_channel(CAPTURE_QUEUE_CAPACITY);
         set_capture_control_sender(capture_tx.clone())?;
         let hook_context = HookContext {
             control_hotkeys: control_hotkey_runtime,
             own_windows,
             capture_event_tx: capture_tx,
             top_level_windows: RefCell::new(HashSet::new()),
+            own_window_input: RefCell::new(OwnWindowInputFilter::default()),
         };
         let capture_shared = shared.clone();
         let action_shared = shared.clone();
@@ -555,7 +634,7 @@ mod capture {
     }
 
     fn set_capture_control_sender(
-        sender: mpsc::Sender<CaptureWorkerMessage>,
+        sender: mpsc::SyncSender<CaptureWorkerMessage>,
     ) -> Result<(), String> {
         let mut current = CAPTURE_CONTROL_TX
             .lock()
@@ -655,6 +734,27 @@ mod capture {
         while let Ok(message) = receiver.recv() {
             messages.push(message);
             messages.extend(receiver.try_iter().take(BATCH_SIZE - 1));
+
+            if CAPTURE_QUEUE_OVERFLOWED.swap(false, Ordering::AcqRel) {
+                let recording = shared
+                    .lock()
+                    .map(|controller| controller.mode() == AppMode::Recording)
+                    .unwrap_or(false);
+                if recording {
+                    messages.clear();
+                    report_feedback(CaptureFeedback::StopRecording {
+                        at_ms: now_ms(),
+                        reason: format!(
+                            "输入事件过快，录制队列已达到 {CAPTURE_QUEUE_CAPACITY} 条上限。为避免保存不完整的按键或鼠标序列，本次录制已自动停止。"
+                        ),
+                    });
+                    end_window_generation_tracking(
+                        &mut tracking_window_relative_recording,
+                        &mut pointer_snapshots,
+                    );
+                    continue;
+                }
+            }
 
             let mut controller = None;
             let mut should_shutdown = false;
@@ -1623,9 +1723,6 @@ mod capture {
         let x = info.pt.x;
         let y = info.pt.y;
         let pointed_root_hwnd = root_window_from_point(x, y);
-        if same_root_window(pointed_root_hwnd, current_own_window_hwnds()) {
-            return None;
-        }
 
         let event = match w_param.0 as u32 {
             WM_MOUSEMOVE => Some(RawInputEvent::MouseMove { at_ms, x, y }),
@@ -1683,7 +1780,8 @@ mod capture {
             }),
             _ => None,
         }?;
-        Some((event, pointed_root_hwnd))
+        let over_own_window = same_root_window(pointed_root_hwnd, current_own_window_hwnds());
+        keep_input_around_own_window(event, over_own_window).then_some((event, pointed_root_hwnd))
     }
 
     fn mouse_button(
@@ -1727,11 +1825,22 @@ mod capture {
         own_window_hwnds: [Option<usize>; 2],
     ) -> Option<RawInputEvent> {
         let event = raw_key_event(w_param, l_param)?;
-        if same_root_window(foreground_root_hwnd, own_window_hwnds) {
-            return None;
-        }
+        let over_own_window = same_root_window(foreground_root_hwnd, own_window_hwnds);
+        keep_input_around_own_window(event, over_own_window).then_some(event)
+    }
 
-        Some(event)
+    fn keep_input_around_own_window(event: RawInputEvent, over_own_window: bool) -> bool {
+        HOOK_CONTEXT.with(|current| {
+            current
+                .borrow()
+                .as_ref()
+                .map_or(!over_own_window, |context| {
+                    context
+                        .own_window_input
+                        .borrow_mut()
+                        .keep(event, over_own_window)
+                })
+        })
     }
 
     fn raw_key_event(w_param: WPARAM, l_param: LPARAM) -> Option<RawInputEvent> {
@@ -2469,6 +2578,52 @@ mod capture {
         }
 
         #[test]
+        fn own_window_filter_keeps_mouse_release_for_an_external_press() {
+            let mut filter = OwnWindowInputFilter::default();
+            let press = RawInputEvent::MouseButton {
+                at_ms: 10,
+                x: 1,
+                y: 2,
+                button: MouseButton::Left,
+                state: ButtonState::Pressed,
+            };
+            let release = RawInputEvent::MouseButton {
+                at_ms: 20,
+                x: 3,
+                y: 4,
+                button: MouseButton::Left,
+                state: ButtonState::Released,
+            };
+
+            assert!(filter.keep(press, false));
+            assert!(filter.keep(release, true));
+            assert!(!filter.keep(release, true));
+        }
+
+        #[test]
+        fn own_window_filter_keeps_key_release_for_an_external_press() {
+            let mut filter = OwnWindowInputFilter::default();
+            let press = RawInputEvent::Key {
+                at_ms: 10,
+                vk_code: 0x41,
+                scan_code: 0x1e,
+                extended: false,
+                state: KeyState::Pressed,
+            };
+            let release = RawInputEvent::Key {
+                at_ms: 20,
+                vk_code: 0x41,
+                scan_code: 0x1e,
+                extended: false,
+                state: KeyState::Released,
+            };
+
+            assert!(filter.keep(press, false));
+            assert!(filter.keep(release, true));
+            assert!(!filter.keep(release, true));
+        }
+
+        #[test]
         fn capture_worker_queues_events_and_hotkeys_stay_responsive_while_controller_is_busy() {
             let shared = Arc::new(Mutex::new(AppController::new()));
             let control_hotkeys = {
@@ -2479,7 +2634,7 @@ mod capture {
                 controller.control_hotkey_runtime()
             };
 
-            let (tx, rx) = mpsc::channel();
+            let (tx, rx) = mpsc::sync_channel(CAPTURE_QUEUE_CAPACITY);
             let worker_shared = shared.clone();
             let worker = thread::spawn(move || run_capture_worker(worker_shared, rx));
 
@@ -2622,7 +2777,7 @@ mod capture {
                 .start_recording("boundary", 1_000, "2026-07-25T00:00:00Z")
                 .unwrap();
             let stopped_recording = Arc::new(Mutex::new(None));
-            let (tx, rx) = mpsc::channel();
+            let (tx, rx) = mpsc::sync_channel(CAPTURE_QUEUE_CAPACITY);
             let own_windows = Arc::new(OwnWindowHandles::default());
             own_windows.set_main(0x55);
             own_windows.set_advanced_settings(0x66);
@@ -2631,6 +2786,7 @@ mod capture {
                 own_windows,
                 capture_event_tx: tx,
                 top_level_windows: RefCell::new(HashSet::new()),
+                own_window_input: RefCell::new(OwnWindowInputFilter::default()),
             };
             let lifecycle_sender_guard = CAPTURE_CONTROL_TX
                 .lock()
