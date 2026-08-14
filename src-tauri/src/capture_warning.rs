@@ -197,6 +197,11 @@ fn schedule_main_flush(app: &AppHandle) {
     }) {
         MAIN_FLUSH_PENDING.store(false, Ordering::Release);
         eprintln!("Remember capture warning main-thread scheduling failed: {error}");
+        if has_unapplied_state() {
+            if let Err(error) = notify_update_worker() {
+                eprintln!("Remember capture warning reschedule failed: {error}");
+            }
+        }
     }
 }
 
@@ -236,9 +241,9 @@ fn mark_applied(revision: u64) {
 
 fn apply_latest_on_main(app: &AppHandle) -> Result<(), String> {
     let desired = desired_snapshot()?;
-    let result = apply_desired_on_main(app, &desired);
+    apply_desired_on_main(app, &desired)?;
     mark_applied(desired.revision);
-    result
+    Ok(())
 }
 
 fn apply_desired_on_main(app: &AppHandle, desired: &DesiredWarning) -> Result<(), String> {
@@ -297,9 +302,15 @@ fn ensure_window(app: &AppHandle) -> Result<WebviewWindow, String> {
             if let Err(error) = window.run_on_main_thread(move || {
                 if let Err(error) = apply_latest_to_window(&window_for_main) {
                     eprintln!("Remember capture warning page-ready update failed: {error}");
+                    if let Err(error) = notify_update_worker() {
+                        eprintln!("Remember capture warning page-ready retry failed: {error}");
+                    }
                 }
             }) {
                 eprintln!("Remember capture warning page-ready scheduling failed: {error}");
+                if let Err(error) = notify_update_worker() {
+                    eprintln!("Remember capture warning page-ready retry failed: {error}");
+                }
             }
         })
         .build()
@@ -321,15 +332,15 @@ fn configure_window(window: &WebviewWindow) -> Result<(), String> {
 
 fn apply_latest_to_window(window: &WebviewWindow) -> Result<(), String> {
     let desired = desired_snapshot()?;
-    let result = if desired.visible {
+    if desired.visible {
         apply_visible_warning(window, &desired)
     } else {
         window
             .hide()
             .map_err(|error| format!("capture warning could not hide after page load: {error}"))
-    };
+    }?;
     mark_applied(desired.revision);
-    result
+    Ok(())
 }
 
 fn apply_visible_warning(window: &WebviewWindow, desired: &DesiredWarning) -> Result<(), String> {

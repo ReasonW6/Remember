@@ -131,27 +131,29 @@ cargo clippy --manifest-path src-tauri\Cargo.toml --all-targets --all-features -
 npm audit
 ```
 
-CI 还会使用 RustSec 检查 `src-tauri\Cargo.lock`。本机已安装 `cargo-audit` 时可以执行同一类检查：
+CI 还会使用 RustSec 检查 `src-tauri\Cargo.lock`，并让所有未在 `src-tauri\.cargo\audit.toml` 说明的新增警告直接失败。本机已安装 `cargo-audit` 时可以执行同一策略：
 
 ```powershell
-cargo audit --file src-tauri\Cargo.lock
+Push-Location src-tauri
+cargo audit --deny warnings --file Cargo.lock
+Pop-Location
 ```
 
 ## 打包
 
-创建 release 构建：
+创建仅供本机开发验证的 release 构建：
 
 ```powershell
 npm run tauri build
 ```
 
-构建产物位于：
+本地构建产物位于：
 
 ```text
 src-tauri\target\release
 ```
 
-仓库中的 Windows CI 会运行前端测试、npm 审计、Rust 测试、Clippy 和 RustSec 审计，构建便携版 `remember.exe`，并生成 SHA-256 校验文件。
+本地产物不得上传到正式发行页。正式版本只能通过 Pull Request 合并到 `main` 后，由同一次 Windows CI 运行完成测试、覆盖率、npm/RustSec 审计、真实 Windows 输入往返、优化版与 Debug 版构建、SHA-256 和构建来源证明，再自动创建 GitHub Release。CI 发布的文件固定为 `remember.exe`、`remember.exe.sha256`、`remember-debug.exe` 与 `remember-debug.exe.sha256`。
 
 当前发布的可执行文件未使用 Authenticode 证书签名。Windows 可能显示“未知发布者”或 SmartScreen 提示；下载后可使用发行页提供的 SHA-256 校验文件确认文件完整性，但 SHA-256 不能证明发布者身份。
 

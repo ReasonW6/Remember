@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, OpenOptions},
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -56,9 +56,64 @@ pub fn load(app: &AppHandle) -> Result<SettingsBundle, String> {
         return save(app, bundle);
     }
 
+    match read_existing_bundle(&path) {
+        Ok(bundle) => Ok(bundle),
+        Err(error) => {
+            let backup = quarantine_invalid_bundle(&path);
+            match &backup {
+                Ok(backup) => eprintln!(
+                    "Remember ignored invalid preferences at {} ({error}); preserved them at {}.",
+                    path.display(),
+                    backup.display()
+                ),
+                Err(backup_error) => eprintln!(
+                    "Remember ignored invalid preferences at {} ({error}); the invalid file could not be quarantined: {backup_error}.",
+                    path.display()
+                ),
+            }
+
+            let fallback = normalize(SettingsBundle {
+                advanced: AdvancedSettings::default(),
+                hotkeys: HotkeyConfig::default(),
+                main_window: MainWindowPreferences::default(),
+            })?;
+            if backup.is_ok() {
+                if let Err(save_error) = save(app, fallback.clone()) {
+                    eprintln!(
+                        "Remember could not persist recovered default preferences: {save_error}."
+                    );
+                }
+            }
+            Ok(fallback)
+        }
+    }
+}
+
+fn read_existing_bundle(path: &Path) -> Result<SettingsBundle, String> {
     let raw = fs::read_to_string(path).map_err(|error| error.to_string())?;
     let bundle = serde_json::from_str::<SettingsBundle>(&raw).map_err(|error| error.to_string())?;
     normalize(bundle)
+}
+
+fn quarantine_invalid_bundle(path: &Path) -> Result<PathBuf, String> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| "cannot determine settings directory".to_string())?;
+    for suffix in 0_u64.. {
+        let file_name = if suffix == 0 {
+            "preferences.invalid.json".to_string()
+        } else {
+            format!("preferences.invalid.{suffix}.json")
+        };
+        let backup = parent.join(file_name);
+        if backup.exists() {
+            continue;
+        }
+        fs::rename(path, &backup).map_err(|error| error.to_string())?;
+        return Ok(backup);
+    }
+    unreachable!("the quarantine suffix space cannot be exhausted")
 }
 
 pub fn save(app: &AppHandle, bundle: SettingsBundle) -> Result<SettingsBundle, String> {
@@ -123,6 +178,18 @@ fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_directory(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "remember-settings-{name}-{}-{}",
+            process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ))
+    }
 
     #[test]
     fn validates_both_halves_before_a_bundle_can_be_saved() {
@@ -191,5 +258,23 @@ mod tests {
         .expect("legacy settings bundle");
 
         assert_eq!(bundle.main_window, MainWindowPreferences::default());
+    }
+
+    #[test]
+    fn invalid_preferences_are_quarantined_for_startup_recovery() {
+        let directory = test_directory("quarantine");
+        fs::create_dir_all(&directory).expect("create test directory");
+        let path = directory.join(SETTINGS_BUNDLE_FILE);
+        fs::write(&path, "{bad").expect("write invalid preferences");
+
+        assert!(read_existing_bundle(&path).is_err());
+        let backup = quarantine_invalid_bundle(&path).expect("quarantine invalid preferences");
+
+        assert!(!path.exists());
+        assert_eq!(
+            fs::read_to_string(backup).expect("read quarantined preferences"),
+            "{bad"
+        );
+        fs::remove_dir_all(directory).expect("remove test directory");
     }
 }

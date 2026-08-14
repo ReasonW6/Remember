@@ -97,16 +97,6 @@ fn config_from_json_or_default(raw: &str) -> HotkeyConfig {
     }
 }
 
-pub fn save_config(app: &AppHandle, config: &HotkeyConfig) -> Result<(), String> {
-    let normalized = normalize_config(config)?;
-    let path = config_path(app)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    let json = serde_json::to_string_pretty(&normalized).map_err(|error| error.to_string())?;
-    fs::write(path, json).map_err(|error| error.to_string())
-}
-
 pub fn normalize_config(config: &HotkeyConfig) -> Result<HotkeyConfig, String> {
     let normalized = HotkeyConfig {
         record: canonical_shortcut(&config.record)?,

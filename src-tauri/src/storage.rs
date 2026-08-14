@@ -45,6 +45,7 @@ struct LibraryRecordingCache {
 }
 
 impl LibraryRecordingCache {
+    #[cfg(test)]
     fn resolve<F>(&mut self, key: Option<RecordingCacheKey>, load: F) -> RecordingFile
     where
         F: FnOnce() -> RecordingFile,
@@ -54,7 +55,6 @@ impl LibraryRecordingCache {
                 return file.clone();
             }
         }
-
         let file = load();
         if let Some(key) = key {
             self.entries.insert(key, file.clone());
@@ -205,10 +205,8 @@ pub fn list_recordings(library_dir: &Path) -> Result<Vec<RecordingFile>, Storage
         return Ok(Vec::new());
     }
 
-    let mut cache = lock_recording_list_cache();
-    let library_cache = cache.library_mut(&library_cache_path);
     let mut seen_cache_keys = HashSet::new();
-    let mut files = Vec::new();
+    let mut discovered = Vec::new();
     for entry in fs::read_dir(library_dir)? {
         let entry = entry?;
         if !entry.file_type()?.is_file() {
@@ -216,7 +214,11 @@ pub fn list_recordings(library_dir: &Path) -> Result<Vec<RecordingFile>, Storage
         }
 
         let path = entry.path();
-        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        let Some(file_name) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned)
+        else {
             continue;
         };
         if !file_name.ends_with(LIBRARY_SUFFIX) {
@@ -235,17 +237,52 @@ pub fn list_recordings(library_dir: &Path) -> Result<Vec<RecordingFile>, Storage
                 modified_at,
             })
         });
-        if let Some(cache_key) = cache_key.as_ref() {
+        if let Some(cache_key) = &cache_key {
             seen_cache_keys.insert(cache_key.clone());
         }
+        discovered.push((path, file_name, updated_at_ms, cache_key));
+    }
 
-        let mut file = library_cache.resolve(cache_key, || {
-            recording_file_from_path(&path, file_name, updated_at_ms)
-        });
+    let cached = {
+        let mut cache = lock_recording_list_cache();
+        let library_cache = cache.library_mut(&library_cache_path);
+        discovered
+            .iter()
+            .filter_map(|(_, _, _, key)| {
+                let key = key.as_ref()?;
+                library_cache
+                    .entries
+                    .get(key)
+                    .cloned()
+                    .map(|file| (key.clone(), file))
+            })
+            .collect::<HashMap<_, _>>()
+    };
+
+    let mut loaded_entries = Vec::new();
+    let mut files = Vec::with_capacity(discovered.len());
+    for (path, file_name, updated_at_ms, cache_key) in discovered {
+        let mut file = cache_key
+            .as_ref()
+            .and_then(|key| cached.get(key))
+            .cloned()
+            .unwrap_or_else(|| {
+                let file = recording_file_from_path(&path, &file_name, updated_at_ms);
+                if let Some(key) = cache_key.clone() {
+                    loaded_entries.push((key, file.clone()));
+                }
+                file
+            });
         file.path = path.to_string_lossy().to_string();
         files.push(file);
     }
-    library_cache.retain_seen(&seen_cache_keys);
+
+    {
+        let mut cache = lock_recording_list_cache();
+        let library_cache = cache.library_mut(&library_cache_path);
+        library_cache.entries.extend(loaded_entries);
+        library_cache.retain_seen(&seen_cache_keys);
+    }
 
     files.sort_by(|left, right| {
         right

@@ -131,27 +131,29 @@ cargo clippy --manifest-path src-tauri\Cargo.toml --all-targets --all-features -
 npm audit
 ```
 
-CI also checks `src-tauri\Cargo.lock` against RustSec advisories. If `cargo-audit` is installed locally, run the equivalent check with:
+CI also checks `src-tauri\Cargo.lock` against RustSec advisories and fails every new warning that is not documented in `src-tauri\.cargo\audit.toml`. If `cargo-audit` is installed locally, run the same policy with:
 
 ```powershell
-cargo audit --file src-tauri\Cargo.lock
+Push-Location src-tauri
+cargo audit --deny warnings --file Cargo.lock
+Pop-Location
 ```
 
 ## Packaging
 
-Create a release build:
+Create a release-mode build for local development verification only:
 
 ```powershell
 npm run tauri build
 ```
 
-The release output is generated under:
+The local output is generated under:
 
 ```text
 src-tauri\target\release
 ```
 
-The Windows CI workflow runs frontend tests, npm audit, Rust tests, Clippy, and a RustSec audit, builds the portable `remember.exe`, and generates a SHA-256 checksum. CI artifacts are explicitly unsigned release candidates; SHA-256 detects file changes but does not authenticate the publisher.
+Local binaries must never be uploaded to an official release. After a pull request is merged into `main`, one Windows CI run must pass tests, coverage thresholds, npm and RustSec audits, the real Windows input round trip, optimized and debug builds, SHA-256 generation, and build-provenance attestation before it automatically creates the GitHub Release. The published assets are always `remember.exe`, `remember.exe.sha256`, `remember-debug.exe`, and `remember-debug.exe.sha256`.
 
 Before a public release, sign and timestamp `remember.exe` with a real trusted Authenticode certificate, then verify its status:
 

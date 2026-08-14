@@ -4,7 +4,7 @@ use crate::{
         ButtonState, KeyState, MouseButton, TargetWindowId, WindowPointerIntent, WindowTarget,
     },
     player::{StepExecutor, StopToken},
-    window_target::{self, ScreenPoint, WindowHandle, WindowSnapshot, WindowTargetError},
+    window_target::{self, ScreenPoint, WindowHandle, WindowSnapshot},
 };
 use std::{
     collections::HashMap,
@@ -60,22 +60,13 @@ impl WindowPlaybackExecutor {
     ) -> Result<BindingOutcome, String> {
         let mut session = self.session()?;
         if let Some(binding) = session.binding(target.id) {
-            if window_target::window_is_alive(binding.handle) {
-                match window_target::snapshot_window(binding.handle) {
-                    Ok(snapshot) if binding.matches_snapshot(&snapshot) => {
-                        return Ok(BindingOutcome {
-                            binding,
-                            pause_ms: 0,
-                        });
-                    }
-                    Ok(_) | Err(WindowTargetError::WindowUnavailable { .. }) => {
-                        session.remove_binding(target.id);
-                    }
-                    Err(error) => return Err(error.to_string()),
-                }
-            } else {
-                session.remove_binding(target.id);
+            if binding_has_same_live_instance(&binding) {
+                return Ok(BindingOutcome {
+                    binding,
+                    pause_ms: 0,
+                });
             }
+            session.remove_binding(target.id);
         }
 
         if input_held {
@@ -361,9 +352,6 @@ struct PointerAdjustment {
 struct BoundWindow {
     handle: WindowHandle,
     lifetime_token: WindowLifetimeToken,
-    executable_path: String,
-    window_class: String,
-    process_id: u32,
     dpi: u32,
 }
 
@@ -371,6 +359,13 @@ struct BoundWindow {
 struct BindingOutcome {
     binding: BoundWindow,
     pause_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PreparedWindow {
+    client_origin: ScreenPoint,
+    visible: bool,
+    minimized: bool,
 }
 
 impl BoundWindow {
@@ -381,19 +376,8 @@ impl BoundWindow {
         Self {
             handle: snapshot.handle,
             lifetime_token,
-            executable_path: snapshot.executable_path.clone(),
-            window_class: snapshot.window_class.clone(),
-            process_id: snapshot.process_id,
             dpi: snapshot.dpi,
         }
-    }
-
-    fn matches_snapshot(&self, snapshot: &WindowSnapshot) -> bool {
-        self.handle == snapshot.handle
-            && self.lifetime_token == input::window_lifetime_token(snapshot.handle.raw())
-            && self.process_id == snapshot.process_id
-            && windows_path_eq(&self.executable_path, &snapshot.executable_path)
-            && self.window_class == snapshot.window_class
     }
 }
 
@@ -489,22 +473,22 @@ impl PlaybackSession {
         if adjustment.target_id != target_id {
             return Err("窗口调整手势的目标发生了变化，已停止回放。".to_string());
         }
-        let snapshot =
-            window_target::snapshot_window(adjustment.handle).map_err(|error| error.to_string())?;
         let binding = self
             .bindings
-            .get_mut(&target_id)
+            .get(&target_id)
             .ok_or_else(|| format!("目标窗口 {} 的绑定已失效。", target_id.0))?;
-        if !binding.matches_snapshot(&snapshot) {
+        if !binding_has_same_live_instance(binding) {
             return Err(format!(
                 "目标窗口 {} 在窗口调整期间被关闭或替换。",
                 target_id.0
             ));
         }
-        if snapshot.dpi != binding.dpi {
+        let geometry = window_target::refresh_window_geometry(adjustment.handle)
+            .map_err(|error| error.to_string())?;
+        if geometry.dpi != binding.dpi {
             return Err(format!(
                 "目标窗口 {} 的 DPI 在窗口调整期间从 {} 变为 {}，无法安全继续回放。",
-                target_id.0, binding.dpi, snapshot.dpi
+                target_id.0, binding.dpi, geometry.dpi
             ));
         }
         Ok(())
@@ -601,9 +585,7 @@ fn bind_target_with_wait(
             choice => {
                 let mut outcome = bind_candidate_choice(session, target, choice)?;
                 wait_for_binding_settle(stop_token)?;
-                let snapshot = window_target::snapshot_window(outcome.binding.handle)
-                    .map_err(|error| error.to_string())?;
-                validate_bound_snapshot(target, &outcome.binding, &snapshot)?;
+                prepare_compatible_target(target, &outcome.binding, true)?;
                 outcome.pause_ms = elapsed_millis(started).max(outcome.pause_ms);
                 return Ok(outcome);
             }
@@ -753,22 +735,28 @@ fn prepare_compatible_target(
     target: &WindowTarget,
     binding: &BoundWindow,
     validate_current_geometry: bool,
-) -> Result<WindowSnapshot, String> {
-    if !window_target::window_is_alive(binding.handle) {
+) -> Result<PreparedWindow, String> {
+    if !binding_has_same_live_instance(binding) {
         return Err(format!("目标窗口 {} 已关闭或不可用。", target.id.0));
     }
-    let snapshot =
-        window_target::snapshot_window(binding.handle).map_err(|error| error.to_string())?;
-    if !binding.matches_snapshot(&snapshot) {
+    let geometry = window_target::refresh_window_geometry(binding.handle)
+        .map_err(|error| error.to_string())?;
+    let display =
+        window_target::window_display_state(binding.handle).map_err(|error| error.to_string())?;
+    if !binding_has_same_live_instance(binding) {
         return Err(format!(
             "目标窗口 {} 的已绑定实例发生变化，拒绝继续回放。",
             target.id.0
         ));
     }
     if validate_current_geometry {
-        validate_bound_geometry(target, binding, &snapshot)?;
+        validate_bound_dpi(target, binding, geometry.dpi)?;
     }
-    Ok(snapshot)
+    Ok(PreparedWindow {
+        client_origin: geometry.client_origin,
+        visible: display.visible,
+        minimized: display.minimized,
+    })
 }
 
 fn validate_snapshot(target: &WindowTarget, snapshot: &WindowSnapshot) -> Result<(), String> {
@@ -781,29 +769,15 @@ fn validate_snapshot(target: &WindowTarget, snapshot: &WindowSnapshot) -> Result
     validate_geometry(target, snapshot)
 }
 
-fn validate_bound_snapshot(
+fn validate_bound_dpi(
     target: &WindowTarget,
     binding: &BoundWindow,
-    snapshot: &WindowSnapshot,
+    current_dpi: u32,
 ) -> Result<(), String> {
-    if !binding.matches_snapshot(snapshot) {
-        return Err(format!(
-            "目标窗口 {} 的已绑定实例发生变化，拒绝继续回放。",
-            target.id.0
-        ));
-    }
-    validate_bound_geometry(target, binding, snapshot)
-}
-
-fn validate_bound_geometry(
-    target: &WindowTarget,
-    binding: &BoundWindow,
-    snapshot: &WindowSnapshot,
-) -> Result<(), String> {
-    if snapshot.dpi != binding.dpi {
+    if current_dpi != binding.dpi {
         return Err(format!(
             "目标窗口 {} 的 DPI 在回放期间从 {} 变为 {}。",
-            target.id.0, binding.dpi, snapshot.dpi
+            target.id.0, binding.dpi, current_dpi
         ));
     }
     Ok(())
@@ -832,29 +806,23 @@ fn validate_geometry(target: &WindowTarget, snapshot: &WindowSnapshot) -> Result
 fn restore_if_needed(
     target: &WindowTarget,
     binding: &BoundWindow,
-    snapshot: WindowSnapshot,
-) -> Result<WindowSnapshot, String> {
+    snapshot: PreparedWindow,
+) -> Result<PreparedWindow, String> {
     if snapshot.visible && !snapshot.minimized {
         return Ok(snapshot);
     }
-    window_target::restore_and_activate_window(snapshot.handle)
+    window_target::restore_and_activate_window(binding.handle)
         .map_err(|error| error.to_string())?;
-    let refreshed =
-        window_target::snapshot_window(snapshot.handle).map_err(|error| error.to_string())?;
-    validate_bound_snapshot(target, binding, &refreshed)?;
-    Ok(refreshed)
+    prepare_compatible_target(target, binding, true)
 }
 
 fn restore_foreground_target(
     target: &WindowTarget,
     binding: &BoundWindow,
-) -> Result<WindowSnapshot, String> {
+) -> Result<PreparedWindow, String> {
     window_target::restore_and_activate_window(binding.handle)
         .map_err(|error| error.to_string())?;
-    let snapshot =
-        window_target::snapshot_window(binding.handle).map_err(|error| error.to_string())?;
-    validate_bound_snapshot(target, binding, &snapshot)?;
-    Ok(snapshot)
+    prepare_compatible_target(target, binding, true)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1297,10 +1265,10 @@ mod tests {
         let mut resized = valid.clone();
         resized.client_size.width += 120;
         resized.client_size.height += 80;
-        assert_eq!(validate_bound_geometry(&target, &binding, &resized), Ok(()));
+        assert_eq!(validate_bound_dpi(&target, &binding, resized.dpi), Ok(()));
 
         resized.dpi = 144;
-        assert!(validate_bound_geometry(&target, &binding, &resized)
+        assert!(validate_bound_dpi(&target, &binding, resized.dpi)
             .expect_err("DPI change")
             .contains("DPI 在回放期间"));
     }

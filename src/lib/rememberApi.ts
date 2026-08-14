@@ -8,8 +8,7 @@ import type {
   PrivilegeState,
   RecordingFile,
   SettingsBundle,
-  UiState,
-  WindowBindingRequest
+  UiState
 } from "../types";
 
 export function getState() {
@@ -123,25 +122,6 @@ export function setWindowRelativeRecordingEnabled(enabled: boolean) {
   });
 }
 
-export function getPendingWindowBinding() {
-  return invoke<WindowBindingRequest | null>("get_pending_window_binding");
-}
-
-export function selectWindowBindingCandidate(requestId: number, candidateId: number) {
-  return invoke<void>("select_window_binding_candidate", { requestId, candidateId });
-}
-
-export function cancelWindowBinding(requestId: number) {
-  return invoke<void>("cancel_window_binding", { requestId });
-}
-
-export function highlightWindowBindingCandidate(
-  requestId: number,
-  candidateId: number | null
-) {
-  return invoke<void>("highlight_window_binding_candidate", { requestId, candidateId });
-}
-
 export function getSettingsBundle() {
   return invoke<SettingsBundle>("get_settings_bundle");
 }
@@ -192,13 +172,5 @@ export async function subscribeToAdvancedSettingsChanged(
 ) {
   return listen<AdvancedSettingsConfig>("remember://advanced-settings-changed", (event) => {
     onChanged(event.payload);
-  });
-}
-
-export async function subscribeToWindowBinding(
-  onRequest: (request: WindowBindingRequest) => void
-) {
-  return listen<WindowBindingRequest>("remember://window-binding", (event) => {
-    onRequest(event.payload);
   });
 }
