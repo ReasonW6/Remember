@@ -113,6 +113,7 @@ fn window_relative_mode_is_snapshotted_at_start_and_marks_reopened_windows_defer
             CaptureSurface::Window {
                 window,
                 intent: WindowPointerIntent::Foreground,
+                semantic_action: None,
             },
         );
     }

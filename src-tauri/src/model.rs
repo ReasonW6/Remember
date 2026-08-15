@@ -99,6 +99,24 @@ pub enum KeyState {
     Released,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ControlBounds {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum PointerSemanticAction {
+    SelectComboOption {
+        control_id: i32,
+        control_bounds: ControlBounds,
+        option_name: String,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MacroStep {
@@ -137,6 +155,8 @@ pub enum MacroStep {
         position: PointerPosition,
         button: MouseButton,
         state: ButtonState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        semantic_action: Option<PointerSemanticAction>,
     },
     PointerWheel {
         elapsed_ms: u64,
@@ -322,9 +342,43 @@ impl Recording {
                 MacroStep::Wait { .. } => {}
             }
             validate_pointer_intent(step)?;
+            validate_pointer_semantic_action(step)?;
         }
         Ok(())
     }
+}
+
+fn validate_pointer_semantic_action(step: &MacroStep) -> Result<(), String> {
+    let MacroStep::PointerButton {
+        position,
+        button,
+        semantic_action: Some(action),
+        ..
+    } = step
+    else {
+        return Ok(());
+    };
+    if !matches!(position, PointerPosition::WindowRelative { .. }) {
+        return Err("语义鼠标操作必须引用目标窗口。".to_string());
+    }
+    if *button != MouseButton::Left {
+        return Err("下拉选项语义操作只能使用鼠标左键。".to_string());
+    }
+    match action {
+        PointerSemanticAction::SelectComboOption {
+            control_bounds,
+            option_name,
+            ..
+        } => {
+            if option_name.trim().is_empty() {
+                return Err("下拉选项名称不能为空。".to_string());
+            }
+            if control_bounds.width == 0 || control_bounds.height == 0 {
+                return Err("下拉控件的录制尺寸必须大于零。".to_string());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_pointer_intent(step: &MacroStep) -> Result<(), String> {

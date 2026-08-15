@@ -175,6 +175,7 @@ fn each_window_has_only_its_required_application_commands() {
     assert_eq!(
         capability_permissions("capture-warning.json", "capture-warning"),
         BTreeSet::from([
+            "core:event:allow-emit".to_string(),
             "core:event:allow-listen".to_string(),
             "core:event:allow-unlisten".to_string(),
         ])

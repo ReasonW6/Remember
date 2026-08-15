@@ -1,4 +1,7 @@
-use crate::model::{ClientSize, TargetWindowAvailability, TargetWindowId, WindowTarget};
+use crate::{
+    combo_box,
+    model::{ClientSize, TargetWindowAvailability, TargetWindowId, WindowTarget},
+};
 use std::{cmp::Ordering, error::Error, fmt};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -377,6 +380,21 @@ fn is_owned_transient_class(window_class: &str) -> bool {
         .any(|candidate| window_class.eq_ignore_ascii_case(candidate))
 }
 
+pub fn is_owned_transient_window_class(window_class: &str) -> bool {
+    is_owned_transient_class(window_class)
+}
+
+fn matching_candidate_is_eligible(
+    recorded_class: &str,
+    candidate_class: &str,
+    visible: bool,
+) -> bool {
+    candidate_class == recorded_class
+        && !is_tooltip_class(candidate_class)
+        && !is_system_surface_class(candidate_class)
+        && (!is_owned_transient_class(candidate_class) || visible)
+}
+
 fn is_system_surface_class(window_class: &str) -> bool {
     [
         "#32769",
@@ -459,9 +477,9 @@ mod platform {
                     EnumWindows, GetAncestor, GetClassNameW, GetClientRect, GetForegroundWindow,
                     GetSystemMetrics, GetWindow, GetWindowTextLengthW, GetWindowTextW,
                     GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible,
-                    SetForegroundWindow, ShowWindowAsync, WindowFromPoint, GA_ROOT, GW_OWNER,
-                    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-                    SW_RESTORE, SW_SHOW,
+                    SetForegroundWindow, ShowWindowAsync, WindowFromPoint, GA_ROOT, GA_ROOTOWNER,
+                    GW_OWNER, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+                    SM_YVIRTUALSCREEN, SW_RESTORE, SW_SHOW,
                 },
             },
         },
@@ -599,11 +617,11 @@ mod platform {
                 Ok(window_class) => window_class,
                 Err(_) => return BOOL(1),
             };
-            if window_class != context.window_class
-                || is_tooltip_class(&window_class)
-                || is_owned_transient_class(&window_class)
-                || is_system_surface_class(&window_class)
-            {
+            if !matching_candidate_is_eligible(
+                &context.window_class,
+                &window_class,
+                IsWindowVisible(raw).as_bool(),
+            ) {
                 return BOOL(1);
             }
 
@@ -759,6 +777,25 @@ mod platform {
             }
             if !is_owned_transient_class(&window_class) {
                 break;
+            }
+
+            if window_class.eq_ignore_ascii_case("ComboLBox") {
+                let foreground = unsafe { GetForegroundWindow() };
+                let owner_hint = (!foreground.0.is_null())
+                    .then(|| WindowHandle::from_raw(foreground.0 as usize));
+                if let Some(owner) = combo_box::stable_owner_for_popup(
+                    WindowHandle::from_raw(current.0 as usize),
+                    owner_hint,
+                ) {
+                    current = hwnd(owner);
+                    continue;
+                }
+            }
+
+            let root_owner = unsafe { GetAncestor(current, GA_ROOTOWNER) };
+            if !root_owner.0.is_null() && root_owner.0 != current.0 {
+                current = root_owner;
+                continue;
             }
 
             let Some(owner) = (unsafe { GetWindow(current, GW_OWNER).ok() }) else {
@@ -1282,6 +1319,30 @@ mod tests {
         assert!(is_owned_transient_class("#32768"));
         assert!(is_owned_transient_class("ComboLBox"));
         assert!(!is_system_surface_class("#32770"));
+    }
+
+    #[test]
+    fn legacy_transient_targets_match_only_while_the_surface_is_visible() {
+        assert!(matching_candidate_is_eligible(
+            "ComboLBox",
+            "ComboLBox",
+            true
+        ));
+        assert!(!matching_candidate_is_eligible(
+            "ComboLBox",
+            "ComboLBox",
+            false
+        ));
+        assert!(matching_candidate_is_eligible(
+            "ExampleWindow",
+            "ExampleWindow",
+            false
+        ));
+        assert!(!matching_candidate_is_eligible(
+            "ExampleWindow",
+            "OtherWindow",
+            true
+        ));
     }
 
     #[test]

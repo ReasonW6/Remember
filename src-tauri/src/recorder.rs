@@ -1,7 +1,7 @@
 use crate::model::{
-    ButtonState, ClientSize, KeyState, MacroStep, MouseButton, PointerPosition, Recording,
-    TargetWindowAvailability, TargetWindowId, WindowPointerIntent, WindowTarget, RECORDING_VERSION,
-    RECORDING_VERSION_V2,
+    ButtonState, ClientSize, KeyState, MacroStep, MouseButton, PointerPosition,
+    PointerSemanticAction, Recording, TargetWindowAvailability, TargetWindowId,
+    WindowPointerIntent, WindowTarget, RECORDING_VERSION, RECORDING_VERSION_V2,
 };
 use std::collections::HashMap;
 
@@ -73,6 +73,7 @@ pub enum CaptureSurface {
     Window {
         window: CapturedWindow,
         intent: WindowPointerIntent,
+        semantic_action: Option<PointerSemanticAction>,
     },
     Unreadable(String),
 }
@@ -149,6 +150,7 @@ impl Recorder {
             physically_pressed_mouse_buttons: Vec::new(),
             recorded_pressed_mouse_buttons: Vec::new(),
             pointer_gesture_anchor: None,
+            active_semantic_pointer: None,
             physically_pressed_keys: Vec::new(),
             keyboard_sequence: None,
         });
@@ -230,6 +232,7 @@ struct ActiveRecording {
     physically_pressed_mouse_buttons: Vec<MouseButton>,
     recorded_pressed_mouse_buttons: Vec<MouseButton>,
     pointer_gesture_anchor: Option<PointerGestureAnchor>,
+    active_semantic_pointer: Option<ActiveSemanticPointer>,
     physically_pressed_keys: Vec<PhysicalKey>,
     keyboard_sequence: Option<KeyboardSequence>,
 }
@@ -242,6 +245,13 @@ struct PointerGestureAnchor {
     client_origin_y: i32,
     step_start_index: usize,
     adjusting_window: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ActiveSemanticPointer {
+    button: MouseButton,
+    position: PointerPosition,
+    action: PointerSemanticAction,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -446,12 +456,54 @@ impl ActiveRecording {
                 self.last_mouse_move_elapsed_ms = None;
                 self.last_mouse_move_position = None;
                 self.pointer_gesture_anchor = None;
+                self.active_semantic_pointer = None;
                 self.release_recorded_mouse_buttons(elapsed_ms);
             }
             if let RawInputEvent::MouseButton { button, state, .. } = event {
                 update_button_state(&mut self.physically_pressed_mouse_buttons, button, state);
             }
             return Ok(());
+        }
+
+        if let RawInputEvent::MouseButton {
+            button,
+            state: ButtonState::Released,
+            ..
+        } = event
+        {
+            if self
+                .active_semantic_pointer
+                .as_ref()
+                .is_some_and(|active| active.button == button)
+            {
+                let active = self
+                    .active_semantic_pointer
+                    .take()
+                    .expect("matching semantic pointer must still be active");
+                update_button_state(
+                    &mut self.physically_pressed_mouse_buttons,
+                    button,
+                    ButtonState::Released,
+                );
+                self.last_readable_pointer = Some(active.position);
+                if self.push_step(MacroStep::PointerButton {
+                    elapsed_ms,
+                    position: active.position,
+                    button,
+                    state: ButtonState::Released,
+                    semantic_action: Some(active.action),
+                }) {
+                    update_button_state(
+                        &mut self.recorded_pressed_mouse_buttons,
+                        button,
+                        ButtonState::Released,
+                    );
+                }
+                if self.physically_pressed_mouse_buttons.is_empty() {
+                    self.pointer_gesture_anchor = None;
+                }
+                return Ok(());
+            }
         }
 
         self.detect_pointer_adjustment(&surface);
@@ -530,13 +582,32 @@ impl ActiveRecording {
             }
             RawInputEvent::MouseButton { button, state, .. } => {
                 update_button_state(&mut self.physically_pressed_mouse_buttons, button, state);
+                let semantic_action = match (&surface, button, state) {
+                    (
+                        CaptureSurface::Window {
+                            semantic_action: Some(action),
+                            ..
+                        },
+                        MouseButton::Left,
+                        ButtonState::Pressed,
+                    ) => Some(action.clone()),
+                    _ => None,
+                };
                 if self.push_step(MacroStep::PointerButton {
                     elapsed_ms,
                     position,
                     button,
                     state,
+                    semantic_action: semantic_action.clone(),
                 }) {
                     update_button_state(&mut self.recorded_pressed_mouse_buttons, button, state);
+                }
+                if let Some(action) = semantic_action {
+                    self.active_semantic_pointer = Some(ActiveSemanticPointer {
+                        button,
+                        position,
+                        action,
+                    });
                 }
                 if self.physically_pressed_mouse_buttons.is_empty() {
                     self.pointer_gesture_anchor = None;
@@ -646,7 +717,7 @@ impl ActiveRecording {
         }
         match surface {
             CaptureSurface::Screen => Ok(PointerPosition::ScreenRelative { x, y }),
-            CaptureSurface::Window { window, intent } => {
+            CaptureSurface::Window { window, intent, .. } => {
                 validate_pointer_intent(event_kind, *intent)?;
                 let relative_x = checked_relative_coordinate(x, window.client_origin_x, "x")?;
                 let relative_y = checked_relative_coordinate(y, window.client_origin_y, "y")?;
@@ -796,6 +867,7 @@ impl ActiveRecording {
                 position,
                 button,
                 state: ButtonState::Released,
+                semantic_action: None,
             }) {
                 break;
             }
@@ -817,6 +889,7 @@ impl ActiveRecording {
                 position,
                 button,
                 state: ButtonState::Pressed,
+                semantic_action: None,
             }) {
                 break;
             }

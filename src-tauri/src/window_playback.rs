@@ -1,7 +1,9 @@
 use crate::{
+    capture_warning, combo_box,
     input::{self, SystemInputExecutor, WindowLifetimeToken},
     model::{
-        ButtonState, KeyState, MouseButton, TargetWindowId, WindowPointerIntent, WindowTarget,
+        ButtonState, ControlBounds, KeyState, MouseButton, TargetWindowId, WindowPointerIntent,
+        WindowTarget,
     },
     player::{StepExecutor, StopToken},
     window_target::{self, ScreenPoint, WindowHandle, WindowSnapshot},
@@ -23,6 +25,7 @@ pub struct WindowPlaybackExecutor {
     input: SystemInputExecutor,
     stop_token: StopToken,
     session: Mutex<PlaybackSession>,
+    app: Option<AppHandle>,
 }
 
 impl WindowPlaybackExecutor {
@@ -31,26 +34,23 @@ impl WindowPlaybackExecutor {
             input: SystemInputExecutor,
             stop_token,
             session: Mutex::new(PlaybackSession::default()),
+            app: None,
         }
     }
 
-    pub fn with_app(_app: AppHandle, stop_token: StopToken) -> Self {
-        Self::new(stop_token)
+    pub fn with_app(app: AppHandle, stop_token: StopToken) -> Self {
+        Self {
+            input: SystemInputExecutor,
+            stop_token,
+            session: Mutex::new(PlaybackSession::default()),
+            app: Some(app),
+        }
     }
 
     fn session(&self) -> Result<MutexGuard<'_, PlaybackSession>, String> {
         self.session
             .lock()
             .map_err(|_| "window playback session lock poisoned".to_string())
-    }
-
-    fn foreground_established(&self) -> Result<bool, String> {
-        Ok(self.session()?.foreground_established)
-    }
-
-    fn mark_foreground_established(&self) -> Result<(), String> {
-        self.session()?.mark_foreground_established();
-        Ok(())
     }
 
     fn ensure_binding(
@@ -74,7 +74,70 @@ impl WindowPlaybackExecutor {
             require_immediate_candidate_while_input_held(target, &choice)?;
             return bind_candidate_choice(&mut session, target, choice);
         }
-        bind_target_with_wait(&mut session, target, &self.stop_token)
+        bind_target_with_wait(&mut session, target, &self.stop_token, self.app.as_ref())
+    }
+
+    fn passive_binding(&self, target: &WindowTarget) -> Result<Option<BoundWindow>, String> {
+        let mut session = self.session()?;
+        if let Some(binding) = session.binding(target.id) {
+            if binding_has_same_live_instance(&binding) {
+                return Ok(Some(binding));
+            }
+            session.remove_binding(target.id);
+        }
+        if let Some(binding) = session.passive_binding(target.id) {
+            if binding_has_same_live_instance(&binding) {
+                return Ok(Some(binding));
+            }
+            session.remove_passive_binding(target.id);
+        }
+
+        let choice = match discover_candidate_choice(target, &session.assigned_handles) {
+            Ok(choice) => choice,
+            Err(_) => return Ok(None),
+        };
+        let Some(candidate) = passive_pointer_candidate(choice) else {
+            return Ok(None);
+        };
+        let (snapshot, lifetime_token) = match stable_binding_snapshot(&candidate) {
+            Ok(stable) => stable,
+            Err(_) => return Ok(None),
+        };
+        if !snapshot.visible || snapshot.minimized {
+            return Ok(None);
+        }
+        Ok(Some(session.cache_passive_binding(
+            target.id,
+            &snapshot,
+            lifetime_token,
+        )))
+    }
+
+    fn prepare_passive_pointer_target(
+        &self,
+        target: &WindowTarget,
+        relative_x: i32,
+        relative_y: i32,
+    ) -> Result<Option<ScreenPoint>, String> {
+        ensure_playback_running(&self.stop_token)?;
+        let Some(binding) = self.passive_binding(target)? else {
+            return Ok(None);
+        };
+        let snapshot = match prepare_compatible_target(target, &binding, true) {
+            Ok(snapshot) if snapshot.visible && !snapshot.minimized => snapshot,
+            Ok(_) | Err(_) => return Ok(None),
+        };
+        let point = relative_screen_point(
+            binding.handle,
+            snapshot.client_origin,
+            relative_x,
+            relative_y,
+        )?;
+        if !window_target::is_screen_point_reachable(point).map_err(|error| error.to_string())? {
+            return Ok(None);
+        }
+        ensure_playback_running(&self.stop_token)?;
+        Ok(Some(point))
     }
 
     fn prepare_pointer_target(
@@ -83,6 +146,7 @@ impl WindowPlaybackExecutor {
         relative_x: i32,
         relative_y: i32,
         intent: WindowPointerIntent,
+        input_kind: PointerInputKind,
         input_held: bool,
     ) -> Result<(WindowHandle, ScreenPoint, ScreenPoint, u64), String> {
         let outcome = self.ensure_binding(target, input_held)?;
@@ -90,7 +154,14 @@ impl WindowPlaybackExecutor {
         let adjustment_active = intent == WindowPointerIntent::WindowAdjustment
             && adjustment.is_some_and(|active| active.handle == outcome.binding.handle);
         let snapshot = prepare_compatible_target(target, &outcome.binding, !adjustment_active)?;
+        let transient_target = window_target::is_owned_transient_window_class(&target.window_class);
         let restore_needed = !snapshot.visible || snapshot.minimized;
+        if transient_target && restore_needed {
+            return Err(format!(
+                "瞬时目标窗口 {} 已在执行操作前关闭，请重新展开对应的下拉框或菜单。",
+                target.id.0
+            ));
+        }
         if restore_needed {
             require_no_held_input_for_target_transition(input_held, target, "恢复并激活")?;
         }
@@ -100,10 +171,7 @@ impl WindowPlaybackExecutor {
         if restore_needed {
             pause_ms = pause_ms.saturating_add(elapsed_millis(restore_started));
         }
-        match foreground_preparation(
-            self.foreground_established()?,
-            TargetedInputKind::Pointer(intent),
-        ) {
+        match pointer_foreground_preparation(input_kind, intent, input_held, transient_target) {
             ForegroundPreparation::None => {}
             ForegroundPreparation::Establish => {
                 if !target_is_foreground(outcome.binding.handle)? {
@@ -113,7 +181,6 @@ impl WindowPlaybackExecutor {
                     pause_ms = pause_ms.saturating_add(elapsed_millis(foreground_started));
                 }
                 enforce_pre_input_foreground(intent, outcome.binding.handle)?;
-                self.mark_foreground_established()?;
             }
             ForegroundPreparation::Verify => {
                 enforce_pre_input_foreground(intent, outcome.binding.handle)?;
@@ -135,14 +202,14 @@ impl WindowPlaybackExecutor {
                 target.id.0, point.x, point.y
             ));
         }
-        if !adjustment_active {
+        if !adjustment_active && !transient_target {
             verify_unoccluded(target, outcome.binding.handle, point)?;
         }
         ensure_playback_running(&self.stop_token)?;
         Ok((outcome.binding.handle, point, client_origin, pause_ms))
     }
 
-    fn prepare_keyboard_target(
+    fn prepare_foreground_target(
         &self,
         target: &WindowTarget,
         input_held: bool,
@@ -159,25 +226,13 @@ impl WindowPlaybackExecutor {
         if restore_needed {
             pause_ms = pause_ms.saturating_add(elapsed_millis(restore_started));
         }
-        match foreground_preparation(
-            self.foreground_established()?,
-            TargetedInputKind::KeyboardSequence,
-        ) {
-            ForegroundPreparation::None => unreachable!("keyboard input always needs foreground"),
-            ForegroundPreparation::Establish => {
-                if !target_is_foreground(outcome.binding.handle)? {
-                    require_no_held_input_for_target_transition(input_held, target, "切换到前台")?;
-                    let foreground_started = Instant::now();
-                    let _snapshot = restore_foreground_target(target, &outcome.binding)?;
-                    pause_ms = pause_ms.saturating_add(elapsed_millis(foreground_started));
-                }
-                require_foreground(outcome.binding.handle, target)?;
-                self.mark_foreground_established()?;
-            }
-            ForegroundPreparation::Verify => {
-                require_foreground(outcome.binding.handle, target)?;
-            }
+        if !target_is_foreground(outcome.binding.handle)? {
+            require_no_held_input_for_target_transition(input_held, target, "切换到前台")?;
+            let foreground_started = Instant::now();
+            let _snapshot = restore_foreground_target(target, &outcome.binding)?;
+            pause_ms = pause_ms.saturating_add(elapsed_millis(foreground_started));
         }
+        require_foreground(outcome.binding.handle, target)?;
         ensure_playback_running(&self.stop_token)?;
         Ok((outcome.binding.handle, pause_ms))
     }
@@ -214,6 +269,9 @@ fn require_immediate_candidate_while_input_held(
 
 impl StepExecutor for WindowPlaybackExecutor {
     fn prepare_window_relative_playback(&self) -> Result<(), String> {
+        if let Some(app) = &self.app {
+            let _ = capture_warning::hide(app);
+        }
         let mut session = self.session()?;
         session.clear();
         drop(session);
@@ -262,8 +320,14 @@ impl StepExecutor for WindowPlaybackExecutor {
         intent: WindowPointerIntent,
         input_held: bool,
     ) -> Result<u64, String> {
+        if !input_held {
+            if let Some(point) = self.prepare_passive_pointer_target(target, x, y)? {
+                self.input.mouse_move(point.x, point.y)?;
+            }
+            return Ok(0);
+        }
         let (_handle, point, _origin, pause_ms) =
-            self.prepare_pointer_target(target, x, y, intent, input_held)?;
+            self.prepare_pointer_target(target, x, y, intent, PointerInputKind::Move, input_held)?;
         self.input.mouse_move(point.x, point.y)?;
         Ok(pause_ms)
     }
@@ -279,8 +343,14 @@ impl StepExecutor for WindowPlaybackExecutor {
         state: ButtonState,
         input_held: bool,
     ) -> Result<u64, String> {
-        let (handle, point, client_origin, pause_ms) =
-            self.prepare_pointer_target(target, x, y, intent, input_held)?;
+        let (handle, point, client_origin, pause_ms) = self.prepare_pointer_target(
+            target,
+            x,
+            y,
+            intent,
+            PointerInputKind::Button(state),
+            input_held,
+        )?;
         self.input.mouse_button(point.x, point.y, button, state)?;
         if intent == WindowPointerIntent::WindowAdjustment && state == ButtonState::Pressed {
             self.session()?
@@ -302,8 +372,29 @@ impl StepExecutor for WindowPlaybackExecutor {
         input_held: bool,
     ) -> Result<u64, String> {
         let (_handle, point, _origin, pause_ms) =
-            self.prepare_pointer_target(target, x, y, intent, input_held)?;
+            self.prepare_pointer_target(target, x, y, intent, PointerInputKind::Wheel, input_held)?;
         self.input.mouse_wheel(point.x, point.y, delta)?;
+        Ok(pause_ms)
+    }
+
+    fn window_select_combo_option(
+        &self,
+        target: &WindowTarget,
+        control_id: i32,
+        control_bounds: ControlBounds,
+        option_name: &str,
+        input_held: bool,
+    ) -> Result<u64, String> {
+        let (handle, pause_ms) = self.prepare_foreground_target(target, input_held)?;
+        combo_box::select_option(handle, control_id, control_bounds, option_name).map_err(
+            |error| {
+                format!(
+                    "无法在目标窗口 {} 中选择下拉选项“{}”：{}",
+                    target.id.0, option_name, error
+                )
+            },
+        )?;
+        ensure_playback_running(&self.stop_token)?;
         Ok(pause_ms)
     }
 
@@ -319,7 +410,7 @@ impl StepExecutor for WindowPlaybackExecutor {
         input_held: bool,
     ) -> Result<u64, String> {
         let pause_ms = if sequence_start {
-            let (_handle, pause_ms) = self.prepare_keyboard_target(target, input_held)?;
+            let (_handle, pause_ms) = self.prepare_foreground_target(target, input_held)?;
             pause_ms
         } else {
             0
@@ -336,8 +427,8 @@ impl StepExecutor for WindowPlaybackExecutor {
 #[derive(Default)]
 struct PlaybackSession {
     bindings: HashMap<TargetWindowId, Binding>,
+    passive_bindings: HashMap<TargetWindowId, Binding>,
     assigned_handles: HashMap<WindowHandle, TargetWindowId>,
-    foreground_established: bool,
     pointer_adjustment: Option<PointerAdjustment>,
 }
 
@@ -386,13 +477,28 @@ type Binding = BoundWindow;
 impl PlaybackSession {
     fn clear(&mut self) {
         self.bindings.clear();
+        self.passive_bindings.clear();
         self.assigned_handles.clear();
-        self.foreground_established = false;
         self.pointer_adjustment = None;
     }
 
     fn binding(&self, target_id: TargetWindowId) -> Option<BoundWindow> {
         self.bindings.get(&target_id).cloned()
+    }
+
+    fn passive_binding(&self, target_id: TargetWindowId) -> Option<BoundWindow> {
+        self.passive_bindings.get(&target_id).cloned()
+    }
+
+    fn cache_passive_binding(
+        &mut self,
+        target_id: TargetWindowId,
+        snapshot: &WindowSnapshot,
+        lifetime_token: WindowLifetimeToken,
+    ) -> BoundWindow {
+        let binding = BoundWindow::from_stable_snapshot(snapshot, lifetime_token);
+        self.passive_bindings.insert(target_id, binding.clone());
+        binding
     }
 
     fn bind(
@@ -412,6 +518,7 @@ impl PlaybackSession {
                 ));
             }
         }
+        self.remove_passive_binding(target_id);
         self.remove_binding(target_id);
         let binding = BoundWindow::from_stable_snapshot(snapshot, lifetime_token);
         self.bindings.insert(target_id, binding.clone());
@@ -425,9 +532,12 @@ impl PlaybackSession {
         }
     }
 
+    fn remove_passive_binding(&mut self, target_id: TargetWindowId) {
+        self.passive_bindings.remove(&target_id);
+    }
+
     fn begin_loop(&mut self) {
         self.remove_expired_lifetimes();
-        self.foreground_established = false;
         self.pointer_adjustment = None;
     }
 
@@ -442,10 +552,8 @@ impl PlaybackSession {
         for target_id in expired_targets {
             self.remove_binding(target_id);
         }
-    }
-
-    fn mark_foreground_established(&mut self) {
-        self.foreground_established = true;
+        self.passive_bindings
+            .retain(|_, binding| binding_has_same_live_instance(binding));
     }
 
     fn pointer_adjustment(&self, target_id: TargetWindowId) -> Option<PointerAdjustment> {
@@ -557,6 +665,18 @@ fn choose_candidate(
     }
 }
 
+fn passive_pointer_candidate(choice: CandidateChoice) -> Option<WindowSnapshot> {
+    match choice {
+        CandidateChoice::Unique(candidate) if candidate.visible && !candidate.minimized => {
+            Some(candidate)
+        }
+        CandidateChoice::Missing
+        | CandidateChoice::Unique(_)
+        | CandidateChoice::Incompatible { .. }
+        | CandidateChoice::AlreadyAssigned { .. } => None,
+    }
+}
+
 fn discover_candidate_choice(
     target: &WindowTarget,
     assigned_handles: &HashMap<WindowHandle, TargetWindowId>,
@@ -570,31 +690,122 @@ fn bind_target_with_wait(
     session: &mut PlaybackSession,
     target: &WindowTarget,
     stop_token: &StopToken,
+    app: Option<&AppHandle>,
 ) -> Result<BindingOutcome, String> {
     let started = Instant::now();
     let deadline = started + DEFERRED_BIND_TIMEOUT;
     loop {
         if stop_token.is_stopped() {
+            hide_playback_notice(app);
             return Err("playback stopped".to_string());
         }
         session.remove_expired_lifetimes();
-        let unavailable = match discover_candidate_choice(target, &session.assigned_handles)? {
+        let choice = match discover_candidate_choice(target, &session.assigned_handles) {
+            Ok(choice) => choice,
+            Err(error) => {
+                hide_playback_notice(app);
+                return Err(error);
+            }
+        };
+        let unavailable = match choice {
             unavailable @ (CandidateChoice::Missing
             | CandidateChoice::Incompatible { .. }
             | CandidateChoice::AlreadyAssigned { .. }) => unavailable,
             choice => {
-                let mut outcome = bind_candidate_choice(session, target, choice)?;
-                wait_for_binding_settle(stop_token)?;
-                prepare_compatible_target(target, &outcome.binding, true)?;
+                let mut outcome = match bind_candidate_choice(session, target, choice) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        hide_playback_notice(app);
+                        return Err(error);
+                    }
+                };
+                if let Err(error) = wait_for_binding_settle(stop_token) {
+                    hide_playback_notice(app);
+                    return Err(error);
+                }
+                if let Err(error) = prepare_compatible_target(target, &outcome.binding, true) {
+                    hide_playback_notice(app);
+                    return Err(error);
+                }
                 outcome.pause_ms = elapsed_millis(started).max(outcome.pause_ms);
+                hide_playback_notice(app);
                 return Ok(outcome);
             }
         };
 
         if Instant::now() >= deadline {
-            return Err(deferred_timeout_error(target, unavailable));
+            let error = deferred_timeout_error(target, unavailable);
+            show_playback_stopped_notice(app, &error);
+            return Err(error);
         }
-        sleep_until_next_poll(stop_token, deadline)?;
+        show_playback_waiting_notice(app, target, &unavailable, deadline);
+        if let Err(error) = sleep_until_next_poll(stop_token, deadline) {
+            hide_playback_notice(app);
+            return Err(error);
+        }
+    }
+}
+
+fn show_playback_waiting_notice(
+    app: Option<&AppHandle>,
+    target: &WindowTarget,
+    choice: &CandidateChoice,
+    deadline: Instant,
+) {
+    let Some(app) = app else {
+        return;
+    };
+    let message = playback_wait_message(target, choice);
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let seconds_remaining = u64::try_from(remaining.as_millis().div_ceil(1_000))
+        .unwrap_or(u64::MAX)
+        .max(1);
+    if let Err(error) =
+        capture_warning::show_playback_waiting_at_cursor(app, &message, seconds_remaining)
+    {
+        eprintln!("Remember playback wait notice could not show: {error}");
+    }
+}
+
+fn playback_wait_message(target: &WindowTarget, choice: &CandidateChoice) -> String {
+    let label = if target.title.trim().is_empty() {
+        format!("{} 窗口", target.window_class)
+    } else {
+        format!("“{}”", target.title)
+    };
+    match choice {
+        CandidateChoice::Missing if target.window_class.eq_ignore_ascii_case("ComboLBox") => {
+            "请展开录制时使用的下拉框；列表出现后会继续这一操作。".to_string()
+        }
+        CandidateChoice::Missing => format!("请打开或恢复{label}，并保持它可操作。"),
+        CandidateChoice::Incompatible { .. } => format!(
+            "请把{label}的客户区恢复为录制尺寸 {}×{}，并保持显示缩放不变。",
+            target.client_size.width, target.client_size.height
+        ),
+        CandidateChoice::AlreadyAssigned { .. } => {
+            format!("当前匹配窗口已用于其他录制目标；请再打开一个{label}。")
+        }
+        CandidateChoice::Unique(_) => {
+            unreachable!("a unique candidate never displays a playback wait notice")
+        }
+    }
+}
+
+fn show_playback_stopped_notice(app: Option<&AppHandle>, message: &str) {
+    let Some(app) = app else {
+        return;
+    };
+    if let Err(error) = capture_warning::show_playback_stopped_at_cursor(app, message) {
+        eprintln!("Remember playback stopped notice could not show: {error}");
+    }
+}
+
+fn hide_playback_notice(app: Option<&AppHandle>) {
+    let Some(app) = app else {
+        return;
+    };
+    if let Err(error) = capture_warning::hide(app) {
+        eprintln!("Remember playback notice could not hide: {error}");
     }
 }
 
@@ -613,8 +824,8 @@ fn wait_for_binding_settle(stop_token: &StopToken) -> Result<(), String> {
 fn deferred_timeout_error(target: &WindowTarget, choice: CandidateChoice) -> String {
     match choice {
         CandidateChoice::Missing => format!(
-            "等待目标窗口 {} 超过 30 秒；未找到路径为“{}”、类名为“{}”的窗口。",
-            target.id.0, target.executable_path, target.window_class
+            "等待目标窗口 {} 超过 30 秒；未找到类名为“{}”、路径为“{}”的窗口。",
+            target.id.0, target.window_class, target.executable_path
         ),
         CandidateChoice::Incompatible { .. } | CandidateChoice::AlreadyAssigned { .. } => {
             format!(
@@ -826,9 +1037,10 @@ fn restore_foreground_target(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TargetedInputKind {
-    Pointer(WindowPointerIntent),
-    KeyboardSequence,
+enum PointerInputKind {
+    Move,
+    Button(ButtonState),
+    Wheel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -838,22 +1050,25 @@ enum ForegroundPreparation {
     Verify,
 }
 
-fn foreground_preparation(
-    foreground_established: bool,
-    input: TargetedInputKind,
+fn pointer_foreground_preparation(
+    input_kind: PointerInputKind,
+    intent: WindowPointerIntent,
+    input_held: bool,
+    transient_target: bool,
 ) -> ForegroundPreparation {
-    let needs_foreground = matches!(
-        input,
-        TargetedInputKind::Pointer(WindowPointerIntent::Foreground)
-            | TargetedInputKind::Pointer(WindowPointerIntent::WindowAdjustment)
-            | TargetedInputKind::KeyboardSequence
+    if transient_target {
+        return ForegroundPreparation::None;
+    }
+    let starts_effective_operation = matches!(
+        input_kind,
+        PointerInputKind::Button(ButtonState::Pressed) | PointerInputKind::Wheel
     );
-    if !needs_foreground {
+    if !starts_effective_operation || !pointer_policy(intent).require_foreground_before_input {
         ForegroundPreparation::None
-    } else if !foreground_established {
-        ForegroundPreparation::Establish
-    } else {
+    } else if input_held {
         ForegroundPreparation::Verify
+    } else {
+        ForegroundPreparation::Establish
     }
 }
 
@@ -1176,57 +1391,179 @@ mod tests {
     }
 
     #[test]
-    fn each_loop_establishes_foreground_once_then_only_verifies_it() {
+    fn passive_pointer_motion_never_establishes_or_verifies_foreground() {
         assert_eq!(
-            foreground_preparation(
+            pointer_foreground_preparation(
+                PointerInputKind::Move,
+                WindowPointerIntent::Foreground,
                 false,
-                TargetedInputKind::Pointer(WindowPointerIntent::Foreground)
-            ),
-            ForegroundPreparation::Establish
-        );
-        assert_eq!(
-            foreground_preparation(
-                true,
-                TargetedInputKind::Pointer(WindowPointerIntent::Foreground)
-            ),
-            ForegroundPreparation::Verify
-        );
-        assert_eq!(
-            foreground_preparation(false, TargetedInputKind::KeyboardSequence),
-            ForegroundPreparation::Establish
-        );
-        for intent in [
-            WindowPointerIntent::ActivationClick,
-            WindowPointerIntent::DropRelease,
-            WindowPointerIntent::BackgroundWheel,
-        ] {
-            assert_eq!(
-                foreground_preparation(false, TargetedInputKind::Pointer(intent)),
-                ForegroundPreparation::None
-            );
-        }
-
-        let mut session = PlaybackSession::default();
-        assert!(!session.foreground_established);
-        session.mark_foreground_established();
-        assert!(session.foreground_established);
-        assert_eq!(
-            foreground_preparation(
                 false,
-                TargetedInputKind::Pointer(WindowPointerIntent::BackgroundWheel)
             ),
             ForegroundPreparation::None
         );
         assert_eq!(
-            foreground_preparation(
+            pointer_foreground_preparation(
+                PointerInputKind::Move,
+                WindowPointerIntent::Foreground,
+                true,
                 false,
-                TargetedInputKind::Pointer(WindowPointerIntent::Foreground)
+            ),
+            ForegroundPreparation::None
+        );
+    }
+
+    #[test]
+    fn effective_pointer_operations_establish_focus_only_at_their_start() {
+        assert_eq!(
+            pointer_foreground_preparation(
+                PointerInputKind::Button(ButtonState::Pressed),
+                WindowPointerIntent::Foreground,
+                false,
+                false,
             ),
             ForegroundPreparation::Establish
         );
-        session.mark_foreground_established();
-        session.begin_loop();
-        assert!(!session.foreground_established);
+        assert_eq!(
+            pointer_foreground_preparation(
+                PointerInputKind::Button(ButtonState::Pressed),
+                WindowPointerIntent::Foreground,
+                true,
+                false,
+            ),
+            ForegroundPreparation::Verify
+        );
+        assert_eq!(
+            pointer_foreground_preparation(
+                PointerInputKind::Button(ButtonState::Released),
+                WindowPointerIntent::Foreground,
+                true,
+                false,
+            ),
+            ForegroundPreparation::None
+        );
+        assert_eq!(
+            pointer_foreground_preparation(
+                PointerInputKind::Wheel,
+                WindowPointerIntent::Foreground,
+                false,
+                false,
+            ),
+            ForegroundPreparation::Establish
+        );
+    }
+
+    #[test]
+    fn launcher_drop_and_background_wheel_never_force_foreground() {
+        for (kind, intent) in [
+            (
+                PointerInputKind::Button(ButtonState::Pressed),
+                WindowPointerIntent::ActivationClick,
+            ),
+            (
+                PointerInputKind::Button(ButtonState::Released),
+                WindowPointerIntent::DropRelease,
+            ),
+            (
+                PointerInputKind::Wheel,
+                WindowPointerIntent::BackgroundWheel,
+            ),
+        ] {
+            assert_eq!(
+                pointer_foreground_preparation(kind, intent, false, false),
+                ForegroundPreparation::None
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_transient_surface_is_never_restored_or_forced_to_foreground() {
+        assert_eq!(
+            pointer_foreground_preparation(
+                PointerInputKind::Button(ButtonState::Pressed),
+                WindowPointerIntent::Foreground,
+                false,
+                true,
+            ),
+            ForegroundPreparation::None
+        );
+    }
+
+    #[test]
+    fn wait_notice_explains_the_action_that_can_make_each_candidate_state_continue() {
+        let mut combo = target(4);
+        combo.window_class = "ComboLBox".to_string();
+        combo.title.clear();
+        assert!(playback_wait_message(&combo, &CandidateChoice::Missing).contains("展开"));
+
+        let incompatible = playback_wait_message(
+            &target(5),
+            &CandidateChoice::Incompatible {
+                candidate_count: 1,
+                size_mismatch_count: 1,
+                dpi_mismatch_count: 0,
+            },
+        );
+        assert!(incompatible.contains("800×600"));
+        assert!(incompatible.contains("显示缩放"));
+
+        assert!(playback_wait_message(
+            &target(6),
+            &CandidateChoice::AlreadyAssigned { assigned_count: 1 },
+        )
+        .contains("再打开一个"));
+    }
+
+    #[test]
+    fn passive_motion_only_uses_an_already_visible_candidate() {
+        assert!(passive_pointer_candidate(CandidateChoice::Missing).is_none());
+
+        let mut hidden = snapshot(11);
+        hidden.visible = false;
+        assert!(passive_pointer_candidate(CandidateChoice::Unique(hidden)).is_none());
+
+        let mut minimized = snapshot(12);
+        minimized.minimized = true;
+        assert!(passive_pointer_candidate(CandidateChoice::Unique(minimized)).is_none());
+
+        let visible = snapshot(13);
+        assert_eq!(
+            passive_pointer_candidate(CandidateChoice::Unique(visible.clone())),
+            Some(visible)
+        );
+    }
+
+    #[test]
+    fn passive_motion_cache_does_not_reserve_a_window_for_an_effective_operation() {
+        let mut session = PlaybackSession::default();
+        let candidate = snapshot(21);
+        let binding = session.cache_passive_binding(
+            TargetWindowId(7),
+            &candidate,
+            input::window_lifetime_token(candidate.handle.raw()),
+        );
+
+        assert_eq!(binding.handle, candidate.handle);
+        assert!(session.binding(TargetWindowId(7)).is_none());
+        assert_eq!(
+            session
+                .passive_binding(TargetWindowId(7))
+                .map(|cached| cached.handle),
+            Some(candidate.handle)
+        );
+        assert!(session.assigned_handles.is_empty());
+
+        session
+            .bind(
+                TargetWindowId(7),
+                &candidate,
+                input::window_lifetime_token(candidate.handle.raw()),
+            )
+            .expect("effective operation promotes the target to a reserved binding");
+        assert!(session.passive_binding(TargetWindowId(7)).is_none());
+        assert_eq!(
+            session.assigned_handles.get(&candidate.handle),
+            Some(&TargetWindowId(7))
+        );
     }
 
     #[test]

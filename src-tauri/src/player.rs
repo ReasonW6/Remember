@@ -1,6 +1,6 @@
 use crate::model::{
-    ButtonState, KeyState, MacroStep, MouseButton, PointerPosition, Recording, TargetWindowId,
-    WindowPointerIntent, WindowTarget,
+    ButtonState, ControlBounds, KeyState, MacroStep, MouseButton, PointerPosition,
+    PointerSemanticAction, Recording, TargetWindowId, WindowPointerIntent, WindowTarget,
 };
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -113,6 +113,17 @@ pub trait StepExecutor {
         _input_held: bool,
     ) -> Result<u64, String> {
         Err("当前输入执行器不支持窗口相对回放。".to_string())
+    }
+
+    fn window_select_combo_option(
+        &self,
+        _target: &WindowTarget,
+        _control_id: i32,
+        _control_bounds: ControlBounds,
+        _option_name: &str,
+        _input_held: bool,
+    ) -> Result<u64, String> {
+        Err("当前输入执行器不支持按名称选择标准 Windows 下拉选项。".to_string())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -458,8 +469,33 @@ fn execute_step<E: StepExecutor + ?Sized>(
             position,
             button,
             state,
+            semantic_action,
             ..
         } => {
+            if let Some(action) = semantic_action {
+                let PointerPosition::WindowRelative { target_id, .. } = *position else {
+                    return Err("语义鼠标操作没有引用目标窗口。".to_string());
+                };
+                return match (action, state) {
+                    (
+                        PointerSemanticAction::SelectComboOption {
+                            control_id,
+                            control_bounds,
+                            option_name,
+                        },
+                        ButtonState::Pressed,
+                    ) => executor.window_select_combo_option(
+                        find_target(targets, target_id)?,
+                        *control_id,
+                        *control_bounds,
+                        option_name,
+                        pressed_inputs.any_held(),
+                    ),
+                    (PointerSemanticAction::SelectComboOption { .. }, ButtonState::Released) => {
+                        Ok(0)
+                    }
+                };
+            }
             let pause_ms = match *position {
                 PointerPosition::ScreenRelative { x, y } => {
                     executor.mouse_button(x, y, *button, *state)?;

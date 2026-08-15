@@ -661,6 +661,10 @@ where
             let executor = SystemInputExecutor;
             play_recording(&run.recording, run.settings, &executor, &stop_token)
         };
+        let playback_error_notice = match &result {
+            Err(error) if error != "playback stopped" => Some(error.clone()),
+            _ => None,
+        };
         let next_state = {
             match state_for_thread.lock() {
                 Ok(mut controller) => {
@@ -682,6 +686,15 @@ where
         };
         if let Some(next_state) = next_state {
             let _ = emit_state(&app_for_thread, next_state);
+        }
+        if let Some(error) = playback_error_notice {
+            if let Err(notice_error) =
+                crate::capture_warning::show_playback_stopped_at_cursor(&app_for_thread, &error)
+            {
+                eprintln!("Remember playback stopped notice could not show: {notice_error}");
+            }
+        } else if let Err(error) = crate::capture_warning::hide(&app_for_thread) {
+            eprintln!("Remember playback notice could not hide: {error}");
         }
     });
 

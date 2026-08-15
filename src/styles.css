@@ -1091,19 +1091,112 @@ html.capture-warning-page #root {
 }
 
 .capture-warning {
-  display: flex;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 10px;
   width: 100%;
-  min-height: 52px;
-  align-items: center;
-  border: 1px solid rgb(194 65 12 / 76%);
-  border-radius: 9px;
-  padding: 9px 12px;
-  background: rgb(255 247 237 / 96%);
-  box-shadow: 0 5px 18px rgb(67 35 15 / 24%);
-  color: #9a3412;
-  font-size: 0.82rem;
-  font-weight: 600;
-  line-height: 1.35;
+  min-height: 110px;
+  align-items: start;
+  border: 2px solid rgb(194 65 12 / 90%);
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: rgb(255 247 237 / 98%);
+  box-shadow:
+    0 9px 28px rgb(31 41 55 / 32%),
+    0 0 0 3px rgb(255 255 255 / 72%);
+  color: #7c2d12;
   overflow-wrap: anywhere;
   pointer-events: none;
+}
+
+.capture-warning-signal {
+  width: 12px;
+  height: 12px;
+  margin-top: 4px;
+  border-radius: 999px;
+  background: #ea580c;
+  box-shadow: 0 0 0 5px rgb(234 88 12 / 18%);
+}
+
+.capture-warning-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.capture-warning-copy strong {
+  font-size: 0.96rem;
+  line-height: 1.25;
+}
+
+.capture-warning-copy > span {
+  color: #431407;
+  font-size: 0.84rem;
+  font-weight: 650;
+  line-height: 1.38;
+}
+
+.capture-warning-copy small {
+  color: #9a3412;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.capture-warning-playback-waiting {
+  border-color: rgb(29 78 216 / 92%);
+  background: rgb(239 246 255 / 98%);
+  color: #1e3a8a;
+}
+
+.capture-warning-playback-waiting .capture-warning-signal {
+  background: #2563eb;
+  box-shadow: 0 0 0 5px rgb(37 99 235 / 20%);
+  animation: capture-warning-pulse 1s ease-in-out infinite;
+}
+
+.capture-warning-playback-waiting .capture-warning-copy > span {
+  color: #172554;
+}
+
+.capture-warning-playback-waiting .capture-warning-copy small {
+  color: #1d4ed8;
+}
+
+.capture-warning-playback-stopped {
+  border-color: rgb(185 28 28 / 94%);
+  background: rgb(254 242 242 / 98%);
+  color: #7f1d1d;
+}
+
+.capture-warning-playback-stopped .capture-warning-signal {
+  background: #dc2626;
+  box-shadow: 0 0 0 5px rgb(220 38 38 / 20%);
+}
+
+.capture-warning-playback-stopped .capture-warning-copy > span {
+  color: #450a0a;
+}
+
+.capture-warning-playback-stopped .capture-warning-copy small {
+  color: #b91c1c;
+}
+
+@keyframes capture-warning-pulse {
+  0%,
+  100% {
+    transform: scale(0.9);
+    opacity: 0.72;
+  }
+
+  50% {
+    transform: scale(1.08);
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .capture-warning-playback-waiting .capture-warning-signal {
+    animation: none;
+  }
 }

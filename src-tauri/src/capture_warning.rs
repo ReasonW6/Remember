@@ -9,16 +9,18 @@ use std::{
     time::{Duration, Instant},
 };
 use tauri::{
-    webview::PageLoadEvent, AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow,
-    WebviewWindowBuilder,
+    AppHandle, Emitter, Listener, Manager, PhysicalPosition, WebviewWindow, WebviewWindowBuilder,
 };
 
 const WINDOW_LABEL: &str = "capture-warning";
 const WARNING_EVENT: &str = "remember://capture-warning";
+const WARNING_READY_EVENT: &str = "remember://capture-warning-ready";
 const UPDATE_INTERVAL: Duration = Duration::from_millis(20);
 const CURSOR_OFFSET_X: i32 = 18;
 const CURSOR_OFFSET_Y: i32 = 22;
 const SCREEN_MARGIN: i32 = 8;
+const PLAYBACK_ERROR_VISIBLE_FOR: Duration = Duration::from_secs(8);
+const PLAYBACK_ERROR_MAX_CHARS: usize = 96;
 
 static STATE: Mutex<WarningState> = Mutex::new(WarningState::new());
 static UPDATE_SENDER: Mutex<Option<SyncSender<()>>> = Mutex::new(None);
@@ -30,7 +32,10 @@ static CONFIGURED: AtomicBool = AtomicBool::new(false);
 #[derive(Clone)]
 struct DesiredWarning {
     visible: bool,
+    kind: WarningKind,
+    title: String,
     message: String,
+    detail: String,
     cursor_x: i32,
     cursor_y: i32,
     revision: u64,
@@ -46,7 +51,10 @@ impl WarningState {
         Self {
             desired: DesiredWarning {
                 visible: false,
+                kind: WarningKind::CaptureUnavailable,
+                title: String::new(),
                 message: String::new(),
+                detail: String::new(),
                 cursor_x: 0,
                 cursor_y: 0,
                 revision: 0,
@@ -56,9 +64,20 @@ impl WarningState {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum WarningKind {
+    CaptureUnavailable,
+    PlaybackWaiting,
+    PlaybackStopped,
+}
+
 #[derive(Clone, Serialize)]
 struct CaptureWarningPayload {
+    kind: WarningKind,
+    title: String,
     message: String,
+    detail: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,7 +99,10 @@ pub fn setup(app: &AppHandle) -> Result<(), String> {
         let revision = state.desired.revision.wrapping_add(1);
         state.desired = DesiredWarning {
             visible: false,
+            kind: WarningKind::CaptureUnavailable,
+            title: String::new(),
             message: String::new(),
+            detail: String::new(),
             cursor_x: 0,
             cursor_y: 0,
             revision,
@@ -95,29 +117,112 @@ pub fn setup(app: &AppHandle) -> Result<(), String> {
             .map_err(|_| "capture warning update sender lock poisoned during setup".to_string())?;
         *current = Some(sender);
     }
+    app.listen(WARNING_READY_EVENT, |_| {
+        PAGE_READY.store(true, Ordering::Release);
+        if let Err(error) = notify_update_worker() {
+            eprintln!("Remember capture warning ready update failed: {error}");
+        }
+    });
     notify_update_worker()
 }
 
 pub fn show(_app: &AppHandle, message: &str, cursor_x: i32, cursor_y: i32) -> Result<(), String> {
+    show_notice(
+        WarningKind::CaptureUnavailable,
+        "此处无法录制",
+        message,
+        "把鼠标移回可读取窗口后会自动继续。",
+        cursor_x,
+        cursor_y,
+    )?;
+    Ok(())
+}
+
+pub fn show_playback_waiting_at_cursor(
+    _app: &AppHandle,
+    message: &str,
+    seconds_remaining: u64,
+) -> Result<(), String> {
+    let (cursor_x, cursor_y) = current_cursor_position()?;
+    show_notice(
+        WarningKind::PlaybackWaiting,
+        "回放正在等待",
+        message,
+        &format!("检测到目标后会自动继续 · 还剩 {seconds_remaining} 秒 · 按停止快捷键可取消"),
+        cursor_x,
+        cursor_y,
+    )?;
+    Ok(())
+}
+
+pub fn show_playback_stopped_at_cursor(_app: &AppHandle, message: &str) -> Result<(), String> {
+    let (cursor_x, cursor_y) = current_cursor_position()?;
+    let message = truncate_message(message, PLAYBACK_ERROR_MAX_CHARS);
+    let revision = show_notice(
+        WarningKind::PlaybackStopped,
+        "回放已停止",
+        &message,
+        "准备好目标窗口或选项后，请重新开始回放。",
+        cursor_x,
+        cursor_y,
+    )?;
+    thread::spawn(move || {
+        thread::sleep(PLAYBACK_ERROR_VISIBLE_FOR);
+        hide_if_revision(revision);
+    });
+    Ok(())
+}
+
+fn truncate_message(message: &str, max_chars: usize) -> String {
+    if message.chars().count() <= max_chars {
+        return message.to_string();
+    }
+    let mut shortened = message
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    shortened.push('…');
+    shortened
+}
+
+fn show_notice(
+    kind: WarningKind,
+    title: &str,
+    message: &str,
+    detail: &str,
+    cursor_x: i32,
+    cursor_y: i32,
+) -> Result<u64, String> {
+    let revision;
     {
         let mut state = STATE
             .lock()
             .map_err(|_| "capture warning state lock poisoned while showing".to_string())?;
         if state.desired.visible
+            && state.desired.kind == kind
+            && state.desired.title == title
             && state.desired.message == message
+            && state.desired.detail == detail
             && state.desired.cursor_x == cursor_x
             && state.desired.cursor_y == cursor_y
         {
-            return Ok(());
+            return Ok(state.desired.revision);
         }
         state.desired.visible = true;
+        state.desired.kind = kind;
+        state.desired.title.clear();
+        state.desired.title.push_str(title);
         state.desired.message.clear();
         state.desired.message.push_str(message);
+        state.desired.detail.clear();
+        state.desired.detail.push_str(detail);
         state.desired.cursor_x = cursor_x;
         state.desired.cursor_y = cursor_y;
         state.desired.revision = state.desired.revision.wrapping_add(1);
+        revision = state.desired.revision;
     }
-    notify_update_worker()
+    notify_update_worker()?;
+    Ok(revision)
 }
 
 pub fn hide(_app: &AppHandle) -> Result<(), String> {
@@ -129,10 +234,29 @@ pub fn hide(_app: &AppHandle) -> Result<(), String> {
             return Ok(());
         }
         state.desired.visible = false;
+        state.desired.title.clear();
         state.desired.message.clear();
+        state.desired.detail.clear();
         state.desired.revision = state.desired.revision.wrapping_add(1);
     }
     notify_update_worker()
+}
+
+fn hide_if_revision(revision: u64) {
+    let changed = STATE.lock().map(|mut state| {
+        if !state.desired.visible || state.desired.revision != revision {
+            return false;
+        }
+        state.desired.visible = false;
+        state.desired.title.clear();
+        state.desired.message.clear();
+        state.desired.detail.clear();
+        state.desired.revision = state.desired.revision.wrapping_add(1);
+        true
+    });
+    if matches!(changed, Ok(true)) {
+        let _ = notify_update_worker();
+    }
 }
 
 fn start_update_worker(app: AppHandle) -> Result<SyncSender<()>, String> {
@@ -293,26 +417,6 @@ fn ensure_window(app: &AppHandle) -> Result<WebviewWindow, String> {
         .ok_or_else(|| "capture warning window configuration is unavailable".to_string())?;
     let window = WebviewWindowBuilder::from_config(app, &config)
         .map_err(|error| format!("capture warning window builder failed: {error}"))?
-        .on_page_load(|window, payload| {
-            if payload.event() != PageLoadEvent::Finished {
-                return;
-            }
-            PAGE_READY.store(true, Ordering::Release);
-            let window_for_main = window.clone();
-            if let Err(error) = window.run_on_main_thread(move || {
-                if let Err(error) = apply_latest_to_window(&window_for_main) {
-                    eprintln!("Remember capture warning page-ready update failed: {error}");
-                    if let Err(error) = notify_update_worker() {
-                        eprintln!("Remember capture warning page-ready retry failed: {error}");
-                    }
-                }
-            }) {
-                eprintln!("Remember capture warning page-ready scheduling failed: {error}");
-                if let Err(error) = notify_update_worker() {
-                    eprintln!("Remember capture warning page-ready retry failed: {error}");
-                }
-            }
-        })
         .build()
         .map_err(|error| format!("capture warning window creation failed: {error}"))?;
     configure_window(&window)?;
@@ -327,19 +431,6 @@ fn configure_window(window: &WebviewWindow) -> Result<(), String> {
         .set_ignore_cursor_events(true)
         .map_err(|error| format!("capture warning could not ignore cursor events: {error}"))?;
     CONFIGURED.store(true, Ordering::Release);
-    Ok(())
-}
-
-fn apply_latest_to_window(window: &WebviewWindow) -> Result<(), String> {
-    let desired = desired_snapshot()?;
-    if desired.visible {
-        apply_visible_warning(window, &desired)
-    } else {
-        window
-            .hide()
-            .map_err(|error| format!("capture warning could not hide after page load: {error}"))
-    }?;
-    mark_applied(desired.revision);
     Ok(())
 }
 
@@ -362,13 +453,31 @@ fn apply_visible_warning(window: &WebviewWindow, desired: &DesiredWarning) -> Re
         .emit(
             WARNING_EVENT,
             CaptureWarningPayload {
+                kind: desired.kind,
+                title: desired.title.clone(),
                 message: desired.message.clone(),
+                detail: desired.detail.clone(),
             },
         )
         .map_err(|error| format!("capture warning message could not emit: {error}"))?;
     window
         .show()
         .map_err(|error| format!("capture warning could not show: {error}"))
+}
+
+#[cfg(target_os = "windows")]
+fn current_cursor_position() -> Result<(i32, i32), String> {
+    use windows::Win32::{Foundation::POINT, UI::WindowsAndMessaging::GetCursorPos};
+
+    let mut point = POINT::default();
+    unsafe { GetCursorPos(&mut point) }
+        .map_err(|error| format!("capture warning could not read cursor position: {error}"))?;
+    Ok((point.x, point.y))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn current_cursor_position() -> Result<(i32, i32), String> {
+    Err("capture warning cursor tracking is Windows-only".to_string())
 }
 
 #[cfg(target_os = "windows")]
@@ -444,7 +553,7 @@ fn clamp_i64_to_i32(value: i64) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{warning_position, DesktopBounds};
+    use super::{truncate_message, warning_position, DesktopBounds};
 
     const BOUNDS: DesktopBounds = DesktopBounds {
         left: 0,
@@ -488,5 +597,11 @@ mod tests {
         };
 
         assert_eq!(warning_position(50, 30, 360, 72, bounds), (18, 28));
+    }
+
+    #[test]
+    fn stopped_notice_truncation_preserves_short_text_and_marks_long_text() {
+        assert_eq!(truncate_message("Mihomo 不存在", 20), "Mihomo 不存在");
+        assert_eq!(truncate_message("一二三四五六", 5), "一二三四…");
     }
 }

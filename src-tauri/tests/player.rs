@@ -1,6 +1,7 @@
 use remember_lib::model::{
-    ButtonState, ClientSize, KeyState, MacroStep, MouseButton, PointerPosition, Recording,
-    TargetWindowAvailability, TargetWindowId, WindowPointerIntent, WindowTarget,
+    ButtonState, ClientSize, ControlBounds, KeyState, MacroStep, MouseButton, PointerPosition,
+    PointerSemanticAction, Recording, TargetWindowAvailability, TargetWindowId,
+    WindowPointerIntent, WindowTarget,
 };
 use remember_lib::player::{
     play_actions, play_recording, scaled_delay_ms, PlaybackAction, PlaybackSettings, StepExecutor,
@@ -237,6 +238,24 @@ impl StepExecutor for FakeExecutor {
         ))
     }
 
+    fn window_select_combo_option(
+        &self,
+        target: &WindowTarget,
+        control_id: i32,
+        control_bounds: ControlBounds,
+        option_name: &str,
+        input_held: bool,
+    ) -> Result<u64, String> {
+        self.record_window_call(format!(
+            "window-select:{}:{control_id}:{}:{}:{}:{}:{option_name}:held={input_held}",
+            target.id.0,
+            control_bounds.x,
+            control_bounds.y,
+            control_bounds.width,
+            control_bounds.height,
+        ))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn targeted_key(
         &self,
@@ -257,6 +276,70 @@ impl StepExecutor for FakeExecutor {
     fn release_mouse_button(&self, button: MouseButton) -> Result<(), String> {
         self.record_call(format!("release-button:{button:?}"))
     }
+}
+
+#[test]
+fn semantic_combo_click_selects_by_name_once_without_holding_a_mouse_button() {
+    let fake = FakeExecutor::default();
+    let calls = fake.calls.clone();
+    let action = PointerSemanticAction::SelectComboOption {
+        control_id: 1_042,
+        control_bounds: ControlBounds {
+            x: 70,
+            y: 220,
+            width: 493,
+            height: 31,
+        },
+        option_name: "Mihomo".to_string(),
+    };
+    let recording = Recording::new_window_relative(
+        "semantic combo",
+        "2026-08-15T00:00:00Z",
+        vec![window_target(7, TargetWindowAvailability::Deferred)],
+        vec![
+            MacroStep::PointerButton {
+                elapsed_ms: 0,
+                position: PointerPosition::WindowRelative {
+                    target_id: TargetWindowId(7),
+                    x: 126,
+                    y: 297,
+                    intent: WindowPointerIntent::Foreground,
+                },
+                button: MouseButton::Left,
+                state: ButtonState::Pressed,
+                semantic_action: Some(action.clone()),
+            },
+            MacroStep::PointerButton {
+                elapsed_ms: 1,
+                position: PointerPosition::WindowRelative {
+                    target_id: TargetWindowId(7),
+                    x: 126,
+                    y: 297,
+                    intent: WindowPointerIntent::Foreground,
+                },
+                button: MouseButton::Left,
+                state: ButtonState::Released,
+                semantic_action: Some(action),
+            },
+        ],
+    );
+
+    play_recording(
+        &recording,
+        PlaybackSettings::new(Some(1), 1.0).expect("settings"),
+        &fake,
+        &StopToken::default(),
+    )
+    .expect("semantic playback");
+
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        [
+            "prepare",
+            "loop:7",
+            "window-select:7:1042:70:220:493:31:Mihomo:held=false",
+        ]
+    );
 }
 
 #[test]
@@ -757,12 +840,14 @@ fn v2_screen_relative_steps_use_legacy_executor_methods() {
                 position: PointerPosition::ScreenRelative { x: 11, y: 21 },
                 button: MouseButton::Left,
                 state: ButtonState::Pressed,
+                semantic_action: None,
             },
             MacroStep::PointerButton {
                 elapsed_ms: 0,
                 position: PointerPosition::ScreenRelative { x: 11, y: 21 },
                 button: MouseButton::Left,
                 state: ButtonState::Released,
+                semantic_action: None,
             },
             MacroStep::PointerWheel {
                 elapsed_ms: 0,
@@ -840,6 +925,7 @@ fn v2_dispatches_window_actions_with_their_intents() {
                 },
                 button: MouseButton::Left,
                 state: ButtonState::Pressed,
+                semantic_action: None,
             },
             MacroStep::PointerButton {
                 elapsed_ms: 0,
@@ -851,6 +937,7 @@ fn v2_dispatches_window_actions_with_their_intents() {
                 },
                 button: MouseButton::Left,
                 state: ButtonState::Released,
+                semantic_action: None,
             },
             MacroStep::PointerWheel {
                 elapsed_ms: 0,
@@ -1141,6 +1228,7 @@ fn automatic_target_binding_failure_during_drag_releases_the_mouse() {
                 position: PointerPosition::ScreenRelative { x: 1, y: 2 },
                 button: MouseButton::Left,
                 state: ButtonState::Pressed,
+                semantic_action: None,
             },
             MacroStep::PointerMove {
                 elapsed_ms: 0,
