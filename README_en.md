@@ -1,187 +1,177 @@
-# Remember
+<div align="center">
+  <img src="src-tauri/icons/remember-icon.svg" width="88" alt="Remember icon">
+</div>
 
-[中文](README.md)
+<h1 align="center">Remember</h1>
 
-Remember is a lightweight Windows macro recorder inspired by the TinyTask workflow: press a hotkey to record keyboard and mouse input, then press it again to stop. The result is saved automatically to the local library and can also be exported as a `.remember.json` file for later replay.
+<p align="center">A lightweight, portable, fully local keyboard and mouse recorder for Windows.</p>
 
-Remember is an original implementation. It does not copy TinyTask code, icons, names, binaries, or assets.
+<p align="center">
+  <a href="https://github.com/ReasonW6/Remember/actions/workflows/windows-ci.yml"><img src="https://github.com/ReasonW6/Remember/actions/workflows/windows-ci.yml/badge.svg" alt="Windows CI"></a>
+  <a href="https://github.com/ReasonW6/Remember/releases/latest"><img src="https://img.shields.io/github/v/release/ReasonW6/Remember" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/platform-Windows-0078D4?logo=windows" alt="Windows">
+  <img src="https://img.shields.io/badge/code%20signing-unsigned-orange" alt="Unsigned">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/ReasonW6/Remember" alt="MIT License"></a>
+</p>
 
-## Features
+<p align="center">
+  <a href="https://github.com/ReasonW6/Remember/releases/latest">Download</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#recording-modes">Recording modes</a> ·
+  <a href="#development-and-builds">Development</a> ·
+  <a href="README.md">中文</a>
+</p>
 
-- Record keyboard and mouse actions.
-- Record in V1 screen coordinates by default for legacy behavior, or enable Window-relative recording before capture to create a V2 file that follows whole-window movement across multiple windows.
-- Replay the current recording or choose a saved recording from the in-app list.
-- Configure finite or infinite playback loops, playback speed, and an inter-loop delay.
-- Customize hotkeys. Unmodified single-key shortcuts are limited to `F1`–`F24`; character, editing, and navigation keys require `Ctrl`, `Alt`, `Shift`, or `Win`.
-- Remember the main window's compact or expanded interface and desktop position. Ordinary launch and “Restart as administrator” restore the same state; if the original monitor is gone, the window returns to a visible display.
-- Use the same hotkey for recording and stopping. The default record/stop toggle is `F8`; during playback, both the play and stop hotkeys can stop the run.
-- Play feedback tones when recording or playback starts and stops.
-- Starting a recording from the main window does not minimize it automatically. Keyboard and mouse input inside Remember's own windows is filtered out of recordings.
-- Start in a compact floating window on first use, with only recording selection, record, and play controls; use the titlebar button for a smooth transition to the full interface, and later launches restore the last choice. The transition is skipped when the system requests reduced motion.
-- Save Advanced Settings with “Save and exit.” Closing the window directly discards unsaved edits, and the next open reloads persisted settings.
-- Closing the main window safely stops any active recording or playback, then exits completely without staying in the background.
-- Use a custom titlebar and localized Chinese interface.
+<div align="center">
+  <img src="docs/images/remember-main.png" width="420" alt="Remember full interface">
+</div>
 
-## Default Hotkeys
+Remember follows the familiar TinyTask workflow: press a hotkey to record keyboard and mouse input, press it again to stop, then replay the result whenever needed. Recordings stay on your computer. No account or network upload is required.
 
-- `F8`: start recording; press again while recording to stop; use it as the independent stop hotkey during playback.
-- `F12`: start playback while idle; press it again during playback to stop.
+Remember is an original implementation. It does not contain TinyTask code, icons, names, binaries, or assets.
 
-The playback hotkey must be different from the record and stop hotkeys. The record and stop hotkeys may be the same. To avoid hijacking normal input, unmodified shortcuts are limited to `F1`–`F24`.
+## Highlights
 
-During playback, either `F8` or `F12` stops the run. Remember first releases any keys or mouse buttons that are still held down; the mode remains playing and reports “Stopping playback” until cleanup finishes, then returns to idle.
+- Record and replay real keyboard and mouse input with global hotkeys.
+- Choose between V1 screen coordinates and V2 window-relative coordinates.
+- V2 finds, restores, and activates a target only when an operation is about to use it. It does not bring every application to the foreground when playback starts.
+- Replay workflows that open new windows during recording; each deferred window is resolved when its first operation arrives.
+- Select standard Windows `ComboBox` options by visible name. If “Mihomo” was recorded, playback still tries to select “Mihomo” after the list order changes.
+- Show a cursor-side explanation while playback waits or stops. A privileged target produces an immediate administrator guidance message instead of a misleading missing-window wait.
+- Manage a local recording library and configure finite or infinite loops, playback speed, and inter-loop delay.
+- Switch between a compact floating window and the full interface. Remember restores the last interface mode and visible window position.
 
-## Recording Files
+## Compact interface
 
-Recording files are saved as `.remember.json`. Every time recording stops, Remember automatically saves the current recording to the local library. The Save button exports an additional copy to a user-selected location. The in-app list supports selecting, replaying, renaming, and deleting recordings. A normal delete requires confirmation; holding `Ctrl` while clicking delete permanently removes the recording immediately. Corrupt, oversized, or unreadable recording files remain visible with an error and cannot be loaded or replayed.
+<div align="center">
+  <img src="docs/images/remember-compact.png" width="540" alt="Remember compact floating window">
+</div>
 
-A recording can contain at most 250,000 steps, and a recording JSON file can be at most 64 MiB. When recording reaches the step limit, Remember truncates it, saves the captured prefix after stopping, and displays a warning.
+The compact interface keeps recording selection, the V1/V2 toggle, Record, Play, and the administrator-mode entry available in a small desktop footprint.
 
-The recording list marks each valid file as V1 or V2:
+## Quick start
 
-- **V1 (default)** preserves the original behavior and stores absolute screen coordinates. Playback does not match window identity, so the desktop layout, window position, and current focus can all affect the result.
-- **V2 (optional)** stores in-window actions relative to the client-area origin of each target top-level window and can operate across multiple windows in one recording. During playback, Remember considers only unoccupied windows with an exact full-executable-path and window-class match and compatible initial client-area size and DPI, then automatically selects the highest-ranked candidate by recorded-title similarity and stable window order. It never opens a target-window picker. Once bound, coordinates are translated by the window's whole-movement offset.
+1. Download `remember.exe` from [GitHub Releases](https://github.com/ReasonW6/Remember/releases/latest).
+2. Put it in a user-writable directory such as `D:\Apps\Remember`. Remember is a portable application and does not need installation.
+3. Run `remember.exe`. By default, `F8` starts or stops recording and `F12` starts or stops playback.
+4. Enable Window-relative recording before capture when the replay should follow whole-window movement.
+5. Before playback, verify the target windows, current focus, and recording source. Press `F8` or `F12` for an emergency stop.
 
-V2 recognizes recorded window move or resize gestures. Every step in the gesture uses the client-area origin captured at button press, preventing the moving window from feeding displacement back into the pointer path; after release, the resulting client-area size becomes the current size for later actions. Client-area size and DPI must still strictly match when the target is first bound, and DPI or display-scaling changes and internal control reflow remain unsupported.
+Remember currently has no automatic updater. Use the Releases page to obtain newer versions.
 
-When V2 clicks a taskbar flyout, launcher, or another background surface, it does not require the clicked surface itself to become foreground. Playback completes the press and release so that surface can close or open another window, then validates the actual target at the next operation that requires a foreground window. This prevents launcher flows such as a network flyout opening Settings from being rejected as failed activation.
+## Default hotkeys
 
-Recording metadata still distinguishes initial targets from deferred targets first seen later, but playback no longer requires initial targets during startup. Every target is waited for up to 30 seconds and bound automatically only when an operation first needs it; playback stops if the wait expires without a compatible candidate. This accommodates Windows reusing an existing host window for a page or dialog opened later during recording. A minimized or hidden target is restored and brought to the foreground only immediately before a click, wheel, keyboard, or other recorded operation that affects that window; unheld pointer motion alone never waits for, wakes, or activates a window.
+| Hotkey | Idle | Recording | Playing |
+| --- | --- | --- | --- |
+| `F8` | Start recording | Stop recording | Stop playback |
+| `F12` | Start playback | No action | Stop playback |
 
-While target binding waits, a prominent status card follows the cursor and shows the remaining time, the action needed to continue, and how to stop playback. It disappears automatically when the target becomes available. Transient surfaces such as menus and standard dropdown lists do not become independent targets that must already exist; legacy V2 files that already contain a `ComboLBox` target bind it only when its recorded step is reached and the list is actually open.
+Hotkeys can be changed in Advanced Settings. To avoid intercepting normal typing, unmodified single-key shortcuts are limited to `F1`–`F24`; character, editing, and navigation keys require `Ctrl`, `Alt`, `Shift`, or `Win`.
 
-When V2 records a click on an item in a standard Windows `ComboBox`, it keeps the original coordinates as a legacy fallback and also stores the visible option name and owning control. Current playback selects by name, so an option recorded as “Mihomo” is still selected if its list position changes. If the control or option no longer exists, playback stops with a specific cursor-side explanation. Browser, custom-drawn, or otherwise non-standard controls that do not expose standard option text continue to use coordinates.
+## Recording modes
 
-If the recording pointer enters a window or privilege boundary that Remember cannot inspect, the app shows the specific reason and stops capturing ordinary mouse and keyboard steps at that entry point. Recording continues after the pointer returns to a readable surface. Elapsed time across the unreadable interval is preserved, so playback holds the pointer at the last readable location, skips the unreadable input, and resumes at the next readable location.
+| | V1 screen coordinates | V2 window-relative coordinates |
+| --- | --- | --- |
+| Default | Enabled by default | Opt in before recording |
+| Coordinates | Absolute virtual-desktop position | Position relative to a target client area |
+| Window movement | Can cause replay drift | Follows whole-window movement |
+| Multi-window flows | Depends on the original layout and focus | Resolves multiple target windows per step |
+| Window identity | Not checked | Checks full executable path, window class, initial client size, and DPI |
+| Standard dropdowns | Coordinate replay | Can also select by visible option name |
+| Privacy metadata | Input and timing | Also stores executable paths, classes, and recorded titles |
 
-The recording library is the `recordings` folder next to `remember.exe`:
+### How V2 handles windows
+
+- A target is automatically bound only when its first effective operation is about to run. There is no target-window picker.
+- Ordinary pointer motion with no held input never waits for, restores, wakes, activates, or foreground-checks a background window.
+- Windows first opened during recording become deferred targets. Playback waits for up to 30 seconds when the corresponding step is reached.
+- Short-lived menus and dropdown surfaces are not opened during playback startup. Legacy `ComboLBox` targets match only while the list is actually visible.
+- If the target is already visible but has a higher Windows integrity level, playback stops immediately and asks the user to restart Remember as administrator.
+- Initial client size and DPI must be compatible. V2 cannot understand internal control reflow or adapt to arbitrary resizing and display-scaling changes.
+
+## Recording files and privacy
+
+Every completed recording is saved automatically in the `recordings` folder next to `remember.exe`. The Save button exports an additional `.remember.json` copy to a location chosen by the user.
 
 ```text
 <application directory>\recordings
 ```
 
-When the application directory is on drive D, recordings stay on drive D as well. The current user must have write access to the application directory, so do not place the portable build in a protected directory. Files in the legacy `%APPDATA%\com.remember.desktop\recordings` directory are not moved or deleted automatically.
+- One recording may contain up to 250,000 steps; one JSON file may be up to 64 MiB.
+- The in-app list supports selection, replay, rename, and delete. Normal deletion asks for confirmation; holding `Ctrl` while clicking Delete permanently removes the file immediately.
+- Corrupt, oversized, or unreadable files remain visible with an error and cannot be loaded or replayed.
+- Files in the legacy `%APPDATA%\com.remember.desktop\recordings` directory are not moved or deleted automatically.
 
-Recording files are unencrypted JSON. They contain virtual key codes, scan codes, press/release timing, and mouse positions, so they may reveal passwords, tokens, or other sensitive input. V2 also stores each target window's full executable path, window class, and recorded title in plaintext; those fields may expose user names, installation locations, document names, or page titles. Handle every recording carefully and treat V2 files in particular as sensitive. Avoid recording secrets, inspect recordings before sharing, backing up, or uploading them, and delete recordings you no longer need.
+Recordings are unencrypted JSON. They may contain virtual key codes, scan codes, press and release timing, mouse positions, and, for V2, full executable paths, window classes, and recorded titles. Do not record passwords, tokens, or other secrets. Inspect files before sharing, backing up, or uploading them.
 
-## Playback Safety
+## Playback safety and privileges
 
-- Loop count can be a finite integer of at least 1 or an explicitly selected infinite loop.
-- Inter-loop delay is available only when the loop count is greater than 1 or infinite. It runs only between iterations, never after the final iteration, and can be interrupted with the play or stop hotkey.
-- Infinite playback does not end by itself and must be stopped with the play or stop hotkey.
-- V1 does not validate target-window identity and sends real input at absolute screen coordinates. V2 matches windows and checks client-area size and DPI. Standard Windows dropdown options can be replayed by name, but other steps still have no general control-level safety validation: pop-ups, changed window content, or another program taking focus can still redirect real input.
-- A non-elevated Remember process cannot reliably inspect or control an elevated window. After an explicit access-denied warning, the user may choose to restart as administrator; Remember does not automatically bypass the Windows privilege boundary.
-- Before replaying an old or externally supplied recording, verify the focus, target window, and recording source.
+- Both V1 and V2 send real system keyboard and mouse input. Pop-ups, focus changes, or changed target content can still redirect an action.
+- Infinite playback never ends by itself and must be stopped with the play or stop hotkey.
+- When stopping playback, Remember releases any key or mouse button still held down before returning to idle.
+- A non-elevated Remember process cannot reliably inspect or control an elevated window. After a privilege warning, the user must explicitly choose Restart as administrator. The UAC secure desktop still requires manual interaction.
+- Do not replay `.remember.json` files from an untrusted source.
 
-## Requirements
+## Downloads, verification, and signing status
+
+Official files are available only from [GitHub Releases](https://github.com/ReasonW6/Remember/releases):
+
+- `remember.exe`: optimized Windows x64 portable build for normal use.
+- `remember.exe.sha256`: SHA-256 checksum for the optimized build.
+- `remember-debug.exe`: diagnostic debug build, not recommended for normal use.
+- `remember-debug.exe.sha256`: SHA-256 checksum for the debug build.
+
+**Current Windows executables are not Authenticode code-signed.** Windows may display an Unknown publisher or SmartScreen warning. SHA-256 verifies that a download matches the release asset, but it does not prove publisher identity.
+
+Official release files are built by the repository's Windows CI from the corresponding source revision and include SHA-256 checksums and GitHub build provenance. Local builds are for development verification only and must not be uploaded to an official release.
+
+## Current limitations
+
+- Windows x64 only.
+- No AI automation or image recognition. Remember does not decide actions from screen content.
+- V1 depends on screen position and focus. V2 compensates for whole-window movement but does not support arbitrary resizing, DPI changes, or internal control reflow.
+- Browsers, custom-drawn interfaces, and non-standard dropdowns generally fall back to coordinate replay.
+- Recording contents are not encrypted; users are responsible for protecting recording files.
+
+## Development and builds
+
+### Prerequisites
 
 - Windows
-- Node.js 22.12+
-- Rust stable
+- Node.js 24.13.1
+- Rust 1.94.1 stable
 - Tauri 2 Windows build prerequisites
 
-## Development
+The repository CI pins the Node.js and Rust versions above. Other newer versions may work, but they are outside the current validation baseline.
 
-Install dependencies:
+### Run locally
 
 ```powershell
 npm install
-```
-
-Run the desktop app in development:
-
-```powershell
 npm run tauri dev
 ```
 
-Development mode starts both the frontend dev server and the Tauri app. Release executables use the Windows GUI subsystem and should not open an extra console window.
-
-## Tests and Build
-
-Run frontend tests:
+### Verify
 
 ```powershell
 npm test
-```
-
-Build the frontend:
-
-```powershell
 npm run build
-```
-
-Run Rust tests:
-
-```powershell
-cargo test --manifest-path src-tauri\Cargo.toml
-```
-
-Check Rust compilation:
-
-```powershell
-cargo check --manifest-path src-tauri\Cargo.toml
-```
-
-Check Rust formatting:
-
-```powershell
+npm audit --audit-level=moderate
 cargo fmt --manifest-path src-tauri\Cargo.toml -- --check
-```
-
-Run Rust lint and dependency security checks:
-
-```powershell
 cargo clippy --manifest-path src-tauri\Cargo.toml --all-targets --all-features --locked -- -D warnings
-npm audit
+cargo test --manifest-path src-tauri\Cargo.toml --locked
 ```
 
-CI also checks `src-tauri\Cargo.lock` against RustSec advisories and fails every new warning that is not documented in `src-tauri\.cargo\audit.toml`. If `cargo-audit` is installed locally, run the same policy with:
+CI also runs RustSec auditing, coverage thresholds, and a real Windows input round trip.
 
-```powershell
-Push-Location src-tauri
-cargo audit --deny warnings --file Cargo.lock
-Pop-Location
-```
-
-## Packaging
-
-Create a release-mode build for local development verification only:
+### Build the local application
 
 ```powershell
 npm run tauri build
 ```
 
-The local output is generated under:
+The optimized local executable is written to `src-tauri\target\release\remember.exe`. It is intended only for local development verification.
 
-```text
-src-tauri\target\release
-```
+## License
 
-Local binaries must never be uploaded to an official release. After a pull request is merged into `main`, one Windows CI run must pass tests, coverage thresholds, npm and RustSec audits, the real Windows input round trip, optimized and debug builds, SHA-256 generation, and build-provenance attestation before it automatically creates the GitHub Release. The published assets are always `remember.exe`, `remember.exe.sha256`, `remember-debug.exe`, and `remember-debug.exe.sha256`.
-
-Before a public release, sign and timestamp `remember.exe` with a real trusted Authenticode certificate, then verify its status:
-
-```powershell
-Get-AuthenticodeSignature .\remember.exe
-```
-
-Do not describe a self-signed binary or a checksum-only artifact as an officially signed release.
-
-## Download and code signing policy
-
-- Official downloads: [GitHub Releases](https://github.com/ReasonW6/Remember/releases)
-- Full policy: [Code signing policy](CODE_SIGNING_POLICY.md)
-- The SignPath Foundation application is currently pending; existing releases remain unsigned.
-- If the application is accepted, future Windows release files will use the following statement: Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
-
-Remember is licensed under the [MIT License](LICENSE).
-
-## Current Limits
-
-- Windows only.
-- No AI automation or image recognition.
-- V1 uses absolute screen coordinates without window-identity validation. V2 translates by the client-area origin and can reproduce recorded window move or resize gestures, but it does not support DPI changes, arbitrary resize adaptation, or control reflow.
-- Both formats replay real keyboard and mouse input. Focus, pop-ups, and target-window content can still affect the result even with V2.
-- A non-elevated process cannot reliably inspect or control elevated windows; restarting as administrator requires an explicit user choice.
-
-Documents under `docs/superpowers` are historical design and implementation records and may retain older hotkeys or scope. Current behavior is defined by this README, the tests, and the source code.
+Remember is available under the [MIT License](LICENSE).

@@ -1092,35 +1092,35 @@ html.capture-warning-page #root {
 
 .capture-warning {
   display: grid;
-  grid-template-columns: 16px minmax(0, 1fr);
-  gap: 10px;
+  grid-template-columns: 12px minmax(0, 1fr);
+  gap: 8px;
   width: 100%;
-  min-height: 110px;
+  height: 100%;
   align-items: start;
-  border: 2px solid rgb(194 65 12 / 90%);
-  border-radius: 12px;
-  padding: 12px 14px;
+  border: 1px solid rgb(194 65 12 / 90%);
+  border-radius: 9px;
+  padding: 8px 10px;
   background: rgb(255 247 237 / 98%);
   box-shadow:
-    0 9px 28px rgb(31 41 55 / 32%),
-    0 0 0 3px rgb(255 255 255 / 72%);
+    0 4px 12px rgb(31 41 55 / 24%),
+    0 0 0 1px rgb(255 255 255 / 68%);
   color: #7c2d12;
   overflow-wrap: anywhere;
   pointer-events: none;
 }
 
 .capture-warning-signal {
-  width: 12px;
-  height: 12px;
+  width: 9px;
+  height: 9px;
   margin-top: 4px;
   border-radius: 999px;
   background: #ea580c;
-  box-shadow: 0 0 0 5px rgb(234 88 12 / 18%);
+  box-shadow: 0 0 0 3px rgb(234 88 12 / 18%);
 }
 
 .capture-warning-copy {
   display: grid;
-  gap: 3px;
+  gap: 2px;
   min-width: 0;
 }
 
@@ -1151,8 +1151,7 @@ html.capture-warning-page #root {
 
 .capture-warning-playback-waiting .capture-warning-signal {
   background: #2563eb;
-  box-shadow: 0 0 0 5px rgb(37 99 235 / 20%);
-  animation: capture-warning-pulse 1s ease-in-out infinite;
+  box-shadow: 0 0 0 3px rgb(37 99 235 / 20%);
 }
 
 .capture-warning-playback-waiting .capture-warning-copy > span {
@@ -1171,7 +1170,7 @@ html.capture-warning-page #root {
 
 .capture-warning-playback-stopped .capture-warning-signal {
   background: #dc2626;
-  box-shadow: 0 0 0 5px rgb(220 38 38 / 20%);
+  box-shadow: 0 0 0 3px rgb(220 38 38 / 20%);
 }
 
 .capture-warning-playback-stopped .capture-warning-copy > span {
@@ -1180,23 +1179,4 @@ html.capture-warning-page #root {
 
 .capture-warning-playback-stopped .capture-warning-copy small {
   color: #b91c1c;
-}
-
-@keyframes capture-warning-pulse {
-  0%,
-  100% {
-    transform: scale(0.9);
-    opacity: 0.72;
-  }
-
-  50% {
-    transform: scale(1.08);
-    opacity: 1;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .capture-warning-playback-waiting .capture-warning-signal {
-    animation: none;
-  }
 }

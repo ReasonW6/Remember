@@ -323,6 +323,13 @@ fn title_match_rank(recorded_title: &str, candidate_title: &str) -> u8 {
     }
 }
 
+fn inaccessible_candidate_matches_recorded_title(
+    recorded_title: &str,
+    candidate_title: &str,
+) -> bool {
+    !recorded_title.trim().is_empty() && recorded_title.eq_ignore_ascii_case(candidate_title)
+}
+
 fn windows_path_eq(left: &str, right: &str) -> bool {
     left.eq_ignore_ascii_case(right) || left.to_lowercase() == right.to_lowercase()
 }
@@ -604,7 +611,9 @@ mod platform {
         struct EnumerationContext {
             executable_path: String,
             window_class: String,
+            title: String,
             candidates: Vec<WindowSnapshot>,
+            inaccessible_candidate: Option<WindowTargetError>,
         }
 
         unsafe extern "system" fn visit_window(raw: HWND, state: LPARAM) -> BOOL {
@@ -636,7 +645,21 @@ mod platform {
                 // A same-class window can belong to an unrelated, inaccessible process.
                 // It is not evidence that the recorded target is unreadable, so keep
                 // enumerating and let the deferred binder wait for a real candidate.
-                Err(_) => {}
+                Err(error) => {
+                    let permission_error = matches!(
+                        &error,
+                        WindowTargetError::AccessDenied { .. }
+                            | WindowTargetError::HigherIntegrityTarget { .. }
+                    );
+                    let title_matches =
+                        read_window_title(raw, window_handle(raw)).is_ok_and(|title| {
+                            inaccessible_candidate_matches_recorded_title(&context.title, &title)
+                        });
+                    if permission_error && title_matches && context.inaccessible_candidate.is_none()
+                    {
+                        context.inaccessible_candidate = Some(error);
+                    }
+                }
             }
             BOOL(1)
         }
@@ -644,7 +667,9 @@ mod platform {
         let mut context = EnumerationContext {
             executable_path: target.executable_path.clone(),
             window_class: target.window_class.clone(),
+            title: target.title.clone(),
             candidates: Vec::new(),
+            inaccessible_candidate: None,
         };
         unsafe {
             EnumWindows(
@@ -654,6 +679,11 @@ mod platform {
         }
         .map_err(|error| windows_api_error("枚举顶层窗口", None, error))?;
 
+        if context.candidates.is_empty() {
+            if let Some(error) = context.inaccessible_candidate {
+                return Err(error);
+            }
+        }
         Ok(context.candidates)
     }
 
@@ -1388,6 +1418,23 @@ mod tests {
         assert!(message.contains("PID 9001"));
         assert!(message.contains("访问被拒绝"));
         assert!(message.contains("管理员身份"));
+    }
+
+    #[test]
+    fn inaccessible_candidate_requires_an_exact_nonempty_recorded_title() {
+        assert!(inaccessible_candidate_matches_recorded_title(
+            "WLAN 属性",
+            "WLAN 属性"
+        ));
+        assert!(inaccessible_candidate_matches_recorded_title(
+            "wlan properties",
+            "WLAN PROPERTIES"
+        ));
+        assert!(!inaccessible_candidate_matches_recorded_title(
+            "WLAN 属性",
+            "以太网 属性"
+        ));
+        assert!(!inaccessible_candidate_matches_recorded_title("", ""));
     }
 
     #[test]

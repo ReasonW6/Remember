@@ -1,189 +1,177 @@
-# Remember
+<div align="center">
+  <img src="src-tauri/icons/remember-icon.svg" width="88" alt="Remember 图标">
+</div>
 
-[English](README_en.md)
+<h1 align="center">Remember</h1>
 
-Remember 是一个面向 Windows 的轻量级录制回放工具，使用方式接近 TinyTask：按下快捷键开始录制键盘和鼠标操作，再按一次停止；结果会自动保存到本地录制库，也可以另行导出为 `.remember.json` 文件并重复回放。
+<p align="center">轻量、便携、完全本地运行的 Windows 键鼠录制与回放工具。</p>
+
+<p align="center">
+  <a href="https://github.com/ReasonW6/Remember/actions/workflows/windows-ci.yml"><img src="https://github.com/ReasonW6/Remember/actions/workflows/windows-ci.yml/badge.svg" alt="Windows CI"></a>
+  <a href="https://github.com/ReasonW6/Remember/releases/latest"><img src="https://img.shields.io/github/v/release/ReasonW6/Remember" alt="最新版本"></a>
+  <img src="https://img.shields.io/badge/platform-Windows-0078D4?logo=windows" alt="支持 Windows">
+  <img src="https://img.shields.io/badge/code%20signing-unsigned-orange" alt="未进行代码签名">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/ReasonW6/Remember" alt="MIT License"></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/ReasonW6/Remember/releases/latest">下载最新版</a> ·
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#录制模式">录制模式</a> ·
+  <a href="#开发与构建">开发与构建</a> ·
+  <a href="README_en.md">English</a>
+</p>
+
+<div align="center">
+  <img src="docs/images/remember-main.png" width="420" alt="Remember 完整界面">
+</div>
+
+Remember 的使用方式接近 TinyTask：按下快捷键开始录制键盘和鼠标操作，再按一次停止，之后即可重复回放。录制文件保存在本地，不需要账号，也不会上传到网络。
 
 Remember 是原创实现，不包含 TinyTask 的代码、图标、名称、二进制文件或其他资产。
 
-## 主要功能
+## 功能亮点
 
-- 录制键盘和鼠标操作。
-- 默认使用兼容旧版行为的 V1 屏幕坐标录制；也可在录制前开启“窗口相对录制”，生成支持多窗口相对平移的 V2 文件。
-- 回放当前录制或从录制文件列表中选择一个文件回放。
-- 支持有限循环、无限循环、回放速度和循环间延迟设置。
-- 支持自定义快捷键；无修饰单键仅允许 `F1`–`F24`，字符、编辑和导航键必须与 `Ctrl`、`Alt`、`Shift` 或 `Win` 组合。
-- 记住主窗口上次的紧凑/完整界面和桌面位置；普通启动与“以管理员身份重启”都会恢复相同状态。若原显示器已断开，窗口会回到可见显示器。
-- 录制和停止快捷键可以相同，默认使用 `F8` 作为录制/停止切换；回放时播放键和停止键都可以终止回放。
-- 播放开始、播放结束、录制开始、录制结束会播放提示音。
-- 从主界面开始录制时不会自动最小化；Remember 自身窗口内的键鼠操作会被过滤，不会写入录制。
-- 首次使用以紧凑悬浮窗启动，只保留文件选择、录制和播放；标题栏按钮以平滑动画切换到完整界面，后续启动恢复上次选择。系统启用“减少动态效果”时会跳过动画。
-- 高级设置使用“保存并退出”提交更改；直接关闭窗口会放弃尚未保存的修改，下次打开时重新读取已保存设置。
-- 关闭主窗口会先安全结束当前录制或回放，再彻底退出，不会驻留后台。
-- 使用自定义标题栏和应用内中文界面。
+- 使用全局快捷键录制和回放真实键盘、鼠标输入。
+- 提供 V1 屏幕坐标与 V2 窗口相对坐标两种录制格式。
+- V2 在真正执行某一步时才寻找、恢复并激活对应窗口，不会在回放开始时把所有应用唤醒到前台。
+- 支持录制过程中才出现的窗口，并在第一次需要操作时等待其出现。
+- 标准 Windows `ComboBox` 可按选项名称回放。录制选择“Mihomo”后，即使列表顺序改变，仍会尝试选择“Mihomo”。
+- 等待或停止回放时，鼠标旁会显示原因、剩余时间和继续方法；检测到管理员权限不足时会直接给出权限提示，不会误报为等待窗口出现。
+- 支持录制库、重命名、删除、导入导出、有限或无限循环、速度和循环间延迟。
+- 提供紧凑悬浮窗与完整界面，记住上次使用的界面模式和窗口位置。
+
+## 紧凑界面
+
+<div align="center">
+  <img src="docs/images/remember-compact.png" width="540" alt="Remember 紧凑悬浮窗">
+</div>
+
+紧凑界面保留录制选择、V1/V2 切换、录制、播放和管理员模式入口，适合长时间放在桌面边缘使用。
+
+## 快速开始
+
+1. 从 [GitHub Releases](https://github.com/ReasonW6/Remember/releases/latest) 下载 `remember.exe`。
+2. 把它放在当前用户可写的目录中，例如 `D:\Apps\Remember`。Remember 是免安装便携程序。
+3. 运行 `remember.exe`。默认按 `F8` 开始或停止录制，按 `F12` 开始或停止回放。
+4. 如需让操作跟随窗口整体移动，在录制前开启“窗口相对录制”。
+5. 回放前确认目标窗口、当前焦点和录制来源可信；紧急停止可按 `F8` 或 `F12`。
+
+应用当前不提供自动更新。请通过 Releases 页面获取后续版本。
 
 ## 默认快捷键
 
-- `F8`：开始录制；录制中再次按下会停止录制；回放中作为独立停止键。
-- `F12`：就绪时开始回放；回放中再次按下会停止回放。
+| 快捷键 | 就绪时 | 录制时 | 回放时 |
+| --- | --- | --- | --- |
+| `F8` | 开始录制 | 停止录制 | 停止回放 |
+| `F12` | 开始回放 | 无操作 | 停止回放 |
 
-播放快捷键不能和录制或停止快捷键相同。录制和停止快捷键可以相同。为避免劫持正常输入，无修饰快捷键只能使用 `F1`–`F24`。
+快捷键可在高级设置中修改。为避免劫持正常输入，无修饰单键只允许 `F1`–`F24`；字符、编辑和导航键必须与 `Ctrl`、`Alt`、`Shift` 或 `Win` 组合。
 
-回放期间可以按 `F8` 或 `F12` 停止。应用会先释放仍处于按下状态的按键和鼠标按钮；清理期间状态仍是回放中并显示“正在停止回放”，清理完成后才回到就绪。
+## 录制模式
 
-## 录制文件
+| | V1 屏幕坐标 | V2 窗口相对坐标 |
+| --- | --- | --- |
+| 默认状态 | 默认启用 | 录制前手动开启 |
+| 坐标含义 | 虚拟桌面绝对坐标 | 目标窗口客户区相对坐标 |
+| 窗口移动 | 可能导致操作错位 | 可跟随窗口整体平移 |
+| 多窗口流程 | 依赖原来的桌面布局和焦点 | 按步骤自动匹配多个目标窗口 |
+| 窗口身份 | 不校验 | 校验程序完整路径、窗口类、初始客户区尺寸和 DPI |
+| 标准下拉选项 | 按坐标 | 可额外按可见选项名称选择 |
+| 隐私数据 | 键鼠输入和时序 | 另含程序路径、窗口类和录制时标题 |
 
-录制文件会保存为 `.remember.json`。每次停止录制时，应用都会自动把当前录制保存到本地录制库；“保存”按钮用于把当前录制另外导出到用户选择的位置。应用内的“录制文件”列表支持选择、回放、重命名和删除；普通点击删除需要确认，按住 `Ctrl` 点击删除会直接永久删除。损坏、过大或无法读取的录制文件仍会保留在列表中并显示错误，但不会被加载或回放。
+### V2 如何处理窗口
 
-单个录制最多包含 250,000 个步骤，JSON 文件最大为 64 MiB。录制达到步骤上限时会自动截断，停止后保存达到上限前的内容并显示警告。
+- 每个目标只在第一条有效操作即将执行时自动绑定，不会弹出窗口选择框。
+- 没有按住输入的普通鼠标轨迹不会等待、恢复、唤醒或激活后台窗口。
+- 录制过程中打开的新窗口可以成为延迟目标。回放会在对应步骤到达后等待最多 30 秒。
+- 菜单、下拉列表等短暂表面不会在回放开始时被预先打开。旧文件中的 `ComboLBox` 目标也只在列表真实展开时匹配。
+- 如果目标窗口已出现，但完整性级别高于 Remember，回放会立即停止并提示使用管理员身份重新启动。
+- 首次绑定要求客户区尺寸与 DPI 兼容；V2 不会理解控件重新布局，也不会自动适配任意缩放或显示缩放变化。
 
-录制文件列表会用 V1 或 V2 标记格式：
+## 录制文件与隐私
 
-- **V1（默认）**沿用原有行为，保存屏幕绝对坐标。回放时不匹配窗口身份，桌面布局、窗口位置和当前焦点都可能影响结果。
-- **V2（可选）**把窗口内操作保存为相对于各目标顶层窗口客户区原点（client origin）的坐标，同一份录制可以跨多个窗口。回放只考虑可执行文件完整路径和窗口类精确匹配、初始客户区尺寸与 DPI 兼容且尚未被其他录制目标占用的窗口，再按录制时标题的匹配度和稳定窗口顺序自动选择排名最高者；不会弹出目标窗口选择框。绑定后会把坐标随窗口整体移动产生的偏移量平移。
-
-V2 会识别录制到的窗口移动或缩放手势：整个手势都以鼠标按下时的客户区原点计算，避免窗口移动反过来带动鼠标漂移；松开后，新的客户区尺寸成为后续操作的当前尺寸。首次绑定时客户区尺寸和 DPI 仍必须与录制时严格一致，回放期间也不支持 DPI 或显示缩放变化，更不会理解控件重新布局。
-
-点击任务栏弹窗、启动器或其他后台表面时，V2 不要求被点击的表面自己成为前台。它会正常完成按下与释放，让该表面关闭或打开新的窗口；下一条需要窗口前台的操作再校验实际目标，因此网络弹窗打开“设置”等流程不会被误判为激活失败。
-
-录制文件仍会区分初始目标和录制中出现的延迟目标，但回放不再在开始时预先要求初始目标存在。所有目标都在第一次真正需要操作时等待最多 30 秒并自动绑定，超时仍无兼容候选才停止。这样可以兼容 Windows 复用已有宿主窗口来承载录制中途新页面或新对话框的情况。只有即将在目标窗口内执行鼠标点击、滚轮、键盘输入等会影响它的操作时，才会按需恢复最小化或隐藏窗口并切到前台；没有按住输入的单纯鼠标轨迹不会等待、唤醒或切换任何窗口。
-
-等待目标窗口期间，鼠标旁会显示醒目的回放状态、剩余时间、需要执行的操作和停止方式；目标出现后提示自动消失并继续回放。录制到的菜单和标准下拉列表等瞬时表面不会成为需要提前存在的独立目标；旧 V2 文件中已经保存为 `ComboLBox` 的下拉列表也只会在对应步骤到达且列表实际展开后即时匹配。
-
-V2 在标准 Windows `ComboBox` 下拉列表中点击选项时，会在保留原坐标作为旧版回退的同时记录可见选项名称和所属控件。当前版本回放时按名称选择，例如录制了“Mihomo”后，即使它在列表中的顺序发生变化仍会选择“Mihomo”；如果控件或选项不存在，会明确停止并在鼠标旁说明原因。浏览器、自绘界面或无法提供标准选项文本的控件仍按坐标录制。
-
-如果录制指针进入无法读取的窗口或权限边界，应用会显示具体原因并从进入处暂停记录普通键鼠步骤；离开后继续记录。该区间的经过时间仍会保留，所以回放会让指针停在上一个可读位置，跳过不可读输入，并在下一个可读位置继续。
-
-录制库位于 `remember.exe` 同级的 `recordings` 文件夹：
+每次停止录制后，Remember 会把当前录制自动保存到 `remember.exe` 同级的 `recordings` 文件夹。界面中的“保存”按钮用于另外导出一份 `.remember.json` 文件。
 
 ```text
 <软件所在目录>\recordings
 ```
 
-把软件目录放在 D 盘时，录制文件也会保存在 D 盘。软件所在目录必须允许当前用户写入；不建议把便携版放在需要管理员权限才能写入的目录。旧版 `%APPDATA%\com.remember.desktop\recordings` 中的文件不会被自动移动或删除。
+- 单个录制最多 250,000 个步骤，JSON 文件最大 64 MiB。
+- 文件列表支持选择、回放、重命名和删除。普通删除需要确认，按住 `Ctrl` 点击删除会直接永久删除。
+- 损坏、过大或无法读取的文件会保留在列表中并显示错误，不会被加载或回放。
+- 旧版 `%APPDATA%\com.remember.desktop\recordings` 中的文件不会被自动移动或删除。
 
-录制文件是未加密的 JSON，其中包含按键虚拟键码、扫描码、按下/释放时序以及鼠标位置。它可能反映密码、令牌或其他敏感输入。V2 还会以明文保存目标窗口的可执行文件完整路径、窗口类名和录制时标题；这些字段可能暴露用户名、安装位置、文档名或网页标题。所有录制都应谨慎保管，尤其应把 V2 文件视为敏感文件；不要录制敏感信息，共享、备份或上传前请先检查内容，并及时删除不再需要的录制。
+录制文件是不加密的 JSON，可能包含按键虚拟键码、扫描码、按下与释放时序、鼠标位置，以及 V2 的程序完整路径、窗口类和窗口标题。不要录制密码、令牌或其他敏感信息；共享、备份或上传前请先检查内容。
 
-## 回放安全
+## 回放安全与权限
 
-- 循环次数可以是大于等于 1 的有限整数，也可以显式选择无限循环。
-- 只有循环次数大于 1 或选择无限循环时才可设置循环间延迟；延迟只发生在两轮之间，不会添加到最后一轮之后，并且可以用播放键或停止键中断。
-- 无限循环不会自行结束，必须使用播放键或停止键终止。
-- V1 不校验目标窗口身份，并按屏幕绝对坐标发送真实输入。V2 会匹配窗口并检查客户区尺寸和 DPI；标准 Windows 下拉选项可以按名称回放，但其他步骤仍不是通用的控件级安全校验，弹窗、窗口内容变化或焦点被其他程序抢走仍可能让真实输入落到错误位置。
-- 普通权限运行的 Remember 无法可靠读取或控制管理员权限窗口。遇到明确的权限拒绝提示时，可由用户选择以管理员身份重启；应用不会自动越过 Windows 的权限边界。
-- 回放从他人获得或较早保存的录制前，应先确认焦点、目标窗口和录制来源可信。
+- V1 和 V2 都会发送真实的系统键盘与鼠标输入。弹窗、焦点变化或目标内容改变仍可能让操作落到错误位置。
+- 无限循环不会自行结束，必须使用播放或停止快捷键终止。
+- 停止回放时，Remember 会先释放仍处于按下状态的按键和鼠标按钮，再回到就绪状态。
+- 普通权限运行的 Remember 无法可靠读取或控制管理员权限窗口。遇到权限提示时，需要由用户明确选择“以管理员身份重启”；UAC 安全桌面仍必须手动操作。
+- 不要直接回放来源不明的 `.remember.json` 文件。
 
-## 环境要求
+## 下载、校验与签名状态
+
+正式发行文件只从 [GitHub Releases](https://github.com/ReasonW6/Remember/releases) 提供：
+
+- `remember.exe`：Windows x64 优化便携版，供日常使用。
+- `remember.exe.sha256`：优化版 SHA-256 校验文件。
+- `remember-debug.exe`：调试诊断版，不建议日常使用。
+- `remember-debug.exe.sha256`：调试版 SHA-256 校验文件。
+
+**当前发布的 Windows 可执行文件未进行 Authenticode 代码签名。** Windows 可能显示“未知发布者”或 SmartScreen 提示。SHA-256 可以验证下载文件是否与发行页资产一致，但不能证明发布者身份。
+
+正式发行文件由仓库的 Windows CI 从对应源码提交构建，并生成 SHA-256 与 GitHub 构建来源证明。本地构建仅用于开发验证，不应上传到正式发行页。
+
+## 当前限制
+
+- 目前只支持 Windows x64。
+- 不是 AI 自动化工具，不使用图像识别，也不会根据界面内容自行决定操作。
+- V1 依赖屏幕位置和焦点；V2 可以补偿窗口整体移动，但不支持任意缩放、DPI 变化或内部控件重新布局。
+- 浏览器、自绘界面和非标准下拉控件通常只能按坐标回放。
+- 录制内容未加密，使用者需要自行保护录制文件。
+
+## 开发与构建
+
+### 环境
 
 - Windows
-- Node.js 22.12 或更高版本
-- Rust stable
-- Tauri 2 的 Windows 构建环境
+- Node.js 24.13.1
+- Rust 1.94.1 stable
+- Tauri 2 的 Windows 构建依赖
 
-## 开发运行
+仓库 CI 固定使用以上 Node.js 与 Rust 版本。其他新版本可能可以工作，但不属于当前验证基线。
 
-安装依赖：
+### 本地运行
 
 ```powershell
 npm install
-```
-
-启动桌面应用开发模式：
-
-```powershell
 npm run tauri dev
 ```
 
-开发模式会同时启动前端开发服务和 Tauri 应用。正式 release 可执行文件使用 Windows GUI 子系统，不会额外弹出控制台黑框。
-
-## 测试与构建
-
-运行前端测试：
+### 验证
 
 ```powershell
 npm test
-```
-
-构建前端：
-
-```powershell
 npm run build
-```
-
-运行 Rust 测试：
-
-```powershell
-cargo test --manifest-path src-tauri\Cargo.toml
-```
-
-检查 Rust 编译：
-
-```powershell
-cargo check --manifest-path src-tauri\Cargo.toml
-```
-
-检查 Rust 格式：
-
-```powershell
+npm audit --audit-level=moderate
 cargo fmt --manifest-path src-tauri\Cargo.toml -- --check
-```
-
-检查 Rust lint 和依赖安全：
-
-```powershell
 cargo clippy --manifest-path src-tauri\Cargo.toml --all-targets --all-features --locked -- -D warnings
-npm audit
+cargo test --manifest-path src-tauri\Cargo.toml --locked
 ```
 
-CI 还会使用 RustSec 检查 `src-tauri\Cargo.lock`，并让所有未在 `src-tauri\.cargo\audit.toml` 说明的新增警告直接失败。本机已安装 `cargo-audit` 时可以执行同一策略：
+CI 还会运行 RustSec 审计、覆盖率阈值检查和真实 Windows 输入往返测试。
 
-```powershell
-Push-Location src-tauri
-cargo audit --deny warnings --file Cargo.lock
-Pop-Location
-```
-
-## 打包
-
-创建仅供本机开发验证的 release 构建：
+### 构建本地应用
 
 ```powershell
 npm run tauri build
 ```
 
-本地构建产物位于：
+本地优化版位于 `src-tauri\target\release\remember.exe`。该文件只用于本地开发验证。
 
-```text
-src-tauri\target\release
-```
-
-本地产物不得上传到正式发行页。正式版本只能通过 Pull Request 合并到 `main` 后，由同一次 Windows CI 运行完成测试、覆盖率、npm/RustSec 审计、真实 Windows 输入往返、优化版与 Debug 版构建、SHA-256 和构建来源证明，再自动创建 GitHub Release。CI 发布的文件固定为 `remember.exe`、`remember.exe.sha256`、`remember-debug.exe` 与 `remember-debug.exe.sha256`。
-
-当前发布的可执行文件未使用 Authenticode 证书签名。Windows 可能显示“未知发布者”或 SmartScreen 提示；下载后可使用发行页提供的 SHA-256 校验文件确认文件完整性，但 SHA-256 不能证明发布者身份。
-
-如果将来配置了真实、受信任的 Authenticode 证书，应对可执行文件签名并加时间戳，再验证签名状态：
-
-```powershell
-Get-AuthenticodeSignature .\remember.exe
-```
-
-发行页必须明确说明文件是否签名，不把自签名证书或仅有 SHA-256 校验文件描述为正式签名版本。
-
-## Download and code signing policy
-
-- 官方下载：[GitHub Releases](https://github.com/ReasonW6/Remember/releases)
-- 完整政策：[Code signing policy](CODE_SIGNING_POLICY.md)
-- SignPath Foundation 申请目前正在审核；现有发行版仍未签名。
-- 申请获批后，未来的 Windows 发行文件将按以下声明签名：Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+## 许可证
 
 Remember 使用 [MIT License](LICENSE)。
-
-## 当前限制
-
-- 目前只面向 Windows。
-- 不是 AI 自动化工具，也不做图像识别。
-- V1 使用屏幕绝对坐标且不校验窗口身份；V2 按客户区原点补偿窗口整体平移，并可复现录制到的窗口移动或缩放手势，但不支持 DPI 变化、任意缩放适配或控件重新布局。
-- 两种格式都回放真实键盘和鼠标输入；即使使用 V2，运行时焦点、弹窗和目标窗口内容仍会影响结果。
-- 以普通权限运行时，无法可靠读取或控制管理员权限窗口；需要由用户明确选择以管理员身份重启。
-
-`docs/superpowers` 下的文档是早期设计和实施记录，可能保留历史快捷键或范围描述；当前用户行为以本 README、测试和源码为准。

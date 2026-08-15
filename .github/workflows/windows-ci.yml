@@ -130,22 +130,29 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          HEAD_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
-          gh release view 'v${{ steps.release_assets.outputs.version }}' --repo '${{ github.repository }}' *> $null
+          $tag = 'v${{ steps.release_assets.outputs.version }}'
+          $marker = "[replace-release:$tag]"
+          gh release view $tag --repo '${{ github.repository }}' *> $null
           if ($LASTEXITCODE -eq 0) {
             "exists=true" >> $env:GITHUB_OUTPUT
+            $replace = $env:HEAD_COMMIT_MESSAGE.Contains($marker)
+            "replace=$($replace.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
           } else {
             "exists=false" >> $env:GITHUB_OUTPUT
+            "replace=false" >> $env:GITHUB_OUTPUT
             $global:LASTEXITCODE = 0
           }
 
       - name: Create annotated release tag
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.release_check.outputs.exists == 'false'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && (steps.release_check.outputs.exists == 'false' || steps.release_check.outputs.replace == 'true')
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = 'v${{ steps.release_assets.outputs.version }}'
+          $replace = '${{ steps.release_check.outputs.replace }}' -eq 'true'
           $tagRefJson = gh api "repos/${{ github.repository }}/git/ref/tags/$tag" 2>$null
           if ($LASTEXITCODE -eq 0) {
             $tagRef = $tagRefJson | ConvertFrom-Json
@@ -156,7 +163,11 @@ jobs:
               $targetSha = $tagRef.object.sha
             }
             if ($targetSha -ne '${{ github.sha }}') {
-              throw "Existing tag $tag points to $targetSha instead of ${{ github.sha }}"
+              if (-not $replace) {
+                throw "Existing tag $tag points to $targetSha instead of ${{ github.sha }}"
+              }
+              $tagObject = gh api --method POST 'repos/${{ github.repository }}/git/tags' -f "tag=$tag" -f "message=Remember $tag verified CI replacement" -f object='${{ github.sha }}' -f type='commit' | ConvertFrom-Json
+              gh api --method PATCH "repos/${{ github.repository }}/git/refs/tags/$tag" -f "sha=$($tagObject.sha)" -F force=true | Out-Null
             }
           } else {
             $global:LASTEXITCODE = 0
@@ -165,7 +176,7 @@ jobs:
           }
 
       - name: Publish GitHub Release from CI assets
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.release_check.outputs.exists == 'false'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && (steps.release_check.outputs.exists == 'false' || steps.release_check.outputs.replace == 'true')
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -177,4 +188,9 @@ jobs:
             'release-assets/remember-debug.exe.sha256'
           )
           $tag = 'v${{ steps.release_assets.outputs.version }}'
-          gh release create $tag @assets --repo '${{ github.repository }}' --verify-tag --title "Remember $tag" --notes-file 'release-assets/release-notes.md'
+          if ('${{ steps.release_check.outputs.exists }}' -eq 'true') {
+            gh release upload $tag @assets --repo '${{ github.repository }}' --clobber
+            gh release edit $tag --repo '${{ github.repository }}' --title "Remember $tag" --notes-file 'release-assets/release-notes.md'
+          } else {
+            gh release create $tag @assets --repo '${{ github.repository }}' --verify-tag --title "Remember $tag" --notes-file 'release-assets/release-notes.md'
+          }

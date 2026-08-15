@@ -703,7 +703,7 @@ fn bind_target_with_wait(
         let choice = match discover_candidate_choice(target, &session.assigned_handles) {
             Ok(choice) => choice,
             Err(error) => {
-                hide_playback_notice(app);
+                show_playback_stopped_notice(app, &error);
                 return Err(error);
             }
         };

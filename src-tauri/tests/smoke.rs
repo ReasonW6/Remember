@@ -142,8 +142,8 @@ fn capture_warning_window_is_non_interactive_topmost_and_event_only() {
     assert_eq!(warning["visible"], false);
     assert_eq!(warning["create"], false);
     assert_eq!(warning["url"], "capture-warning.html");
-    assert_eq!(warning["width"], 440);
-    assert_eq!(warning["height"], 132);
+    assert_eq!(warning["width"], 400);
+    assert_eq!(warning["height"], 108);
     assert_eq!(warning["focus"], false);
     assert_eq!(warning["focusable"], false);
     assert_eq!(warning["transparent"], true);

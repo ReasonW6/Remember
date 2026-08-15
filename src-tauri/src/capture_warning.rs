@@ -15,14 +15,15 @@ use tauri::{
 const WINDOW_LABEL: &str = "capture-warning";
 const WARNING_EVENT: &str = "remember://capture-warning";
 const WARNING_READY_EVENT: &str = "remember://capture-warning-ready";
-const UPDATE_INTERVAL: Duration = Duration::from_millis(20);
+const CURSOR_FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 const CURSOR_OFFSET_X: i32 = 18;
 const CURSOR_OFFSET_Y: i32 = 22;
 const SCREEN_MARGIN: i32 = 8;
 const PLAYBACK_ERROR_VISIBLE_FOR: Duration = Duration::from_secs(8);
-const PLAYBACK_ERROR_MAX_CHARS: usize = 96;
+const PLAYBACK_ERROR_MAX_CHARS: usize = 56;
 
 static STATE: Mutex<WarningState> = Mutex::new(WarningState::new());
+static APPLIED_WARNING: Mutex<AppliedWarning> = Mutex::new(AppliedWarning::hidden());
 static UPDATE_SENDER: Mutex<Option<SyncSender<()>>> = Mutex::new(None);
 static CREATE_LOCK: Mutex<()> = Mutex::new(());
 static MAIN_FLUSH_PENDING: AtomicBool = AtomicBool::new(false);
@@ -44,6 +45,7 @@ struct DesiredWarning {
 struct WarningState {
     desired: DesiredWarning,
     applied_revision: u64,
+    notice_revision: u64,
 }
 
 impl WarningState {
@@ -60,6 +62,7 @@ impl WarningState {
                 revision: 0,
             },
             applied_revision: 0,
+            notice_revision: 0,
         }
     }
 }
@@ -72,12 +75,36 @@ enum WarningKind {
     PlaybackStopped,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct CaptureWarningPayload {
     kind: WarningKind,
     title: String,
     message: String,
     detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AppliedWarning {
+    visible: bool,
+    payload: Option<CaptureWarningPayload>,
+    cursor: Option<(i32, i32)>,
+}
+
+impl AppliedWarning {
+    const fn hidden() -> Self {
+        Self {
+            visible: false,
+            payload: None,
+            cursor: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VisibleUpdateDelta {
+    move_window: bool,
+    emit_payload: bool,
+    show_window: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,7 +135,9 @@ pub fn setup(app: &AppHandle) -> Result<(), String> {
             revision,
         };
         state.applied_revision = revision.wrapping_sub(1);
+        state.notice_revision = state.notice_revision.wrapping_add(1);
     }
+    reset_applied_warning()?;
 
     let sender = start_update_worker(app.clone())?;
     {
@@ -119,6 +148,9 @@ pub fn setup(app: &AppHandle) -> Result<(), String> {
     }
     app.listen(WARNING_READY_EVENT, |_| {
         PAGE_READY.store(true, Ordering::Release);
+        if let Err(error) = reset_applied_warning() {
+            eprintln!("Remember capture warning applied state could not reset: {error}");
+        }
         if let Err(error) = notify_update_worker() {
             eprintln!("Remember capture warning ready update failed: {error}");
         }
@@ -148,7 +180,7 @@ pub fn show_playback_waiting_at_cursor(
         WarningKind::PlaybackWaiting,
         "回放正在等待",
         message,
-        &format!("检测到目标后会自动继续 · 还剩 {seconds_remaining} 秒 · 按停止快捷键可取消"),
+        &format!("自动继续 · 剩余 {seconds_remaining} 秒 · 停止快捷键可取消"),
         cursor_x,
         cursor_y,
     )?;
@@ -168,7 +200,7 @@ pub fn show_playback_stopped_at_cursor(_app: &AppHandle, message: &str) -> Resul
     )?;
     thread::spawn(move || {
         thread::sleep(PLAYBACK_ERROR_VISIBLE_FOR);
-        hide_if_revision(revision);
+        hide_if_notice_revision(revision);
     });
     Ok(())
 }
@@ -193,20 +225,17 @@ fn show_notice(
     cursor_x: i32,
     cursor_y: i32,
 ) -> Result<u64, String> {
-    let revision;
+    let notice_revision;
     {
         let mut state = STATE
             .lock()
             .map_err(|_| "capture warning state lock poisoned while showing".to_string())?;
-        if state.desired.visible
-            && state.desired.kind == kind
-            && state.desired.title == title
-            && state.desired.message == message
-            && state.desired.detail == detail
-            && state.desired.cursor_x == cursor_x
-            && state.desired.cursor_y == cursor_y
-        {
-            return Ok(state.desired.revision);
+        let content_changed = state.desired.kind != kind
+            || state.desired.title != title
+            || state.desired.message != message
+            || state.desired.detail != detail;
+        if state.desired.visible && !content_changed {
+            return Ok(state.notice_revision);
         }
         state.desired.visible = true;
         state.desired.kind = kind;
@@ -219,10 +248,11 @@ fn show_notice(
         state.desired.cursor_x = cursor_x;
         state.desired.cursor_y = cursor_y;
         state.desired.revision = state.desired.revision.wrapping_add(1);
-        revision = state.desired.revision;
+        state.notice_revision = state.notice_revision.wrapping_add(1);
+        notice_revision = state.notice_revision;
     }
     notify_update_worker()?;
-    Ok(revision)
+    Ok(notice_revision)
 }
 
 pub fn hide(_app: &AppHandle) -> Result<(), String> {
@@ -238,13 +268,14 @@ pub fn hide(_app: &AppHandle) -> Result<(), String> {
         state.desired.message.clear();
         state.desired.detail.clear();
         state.desired.revision = state.desired.revision.wrapping_add(1);
+        state.notice_revision = state.notice_revision.wrapping_add(1);
     }
     notify_update_worker()
 }
 
-fn hide_if_revision(revision: u64) {
+fn hide_if_notice_revision(revision: u64) {
     let changed = STATE.lock().map(|mut state| {
-        if !state.desired.visible || state.desired.revision != revision {
+        if !state.desired.visible || state.notice_revision != revision {
             return false;
         }
         state.desired.visible = false;
@@ -252,6 +283,7 @@ fn hide_if_revision(revision: u64) {
         state.desired.message.clear();
         state.desired.detail.clear();
         state.desired.revision = state.desired.revision.wrapping_add(1);
+        state.notice_revision = state.notice_revision.wrapping_add(1);
         true
     });
     if matches!(changed, Ok(true)) {
@@ -269,20 +301,27 @@ fn start_update_worker(app: AppHandle) -> Result<SyncSender<()>, String> {
 }
 
 fn run_update_worker(app: AppHandle, receiver: Receiver<()>) {
+    let mut cursor_error_reported = false;
     loop {
-        if receiver.recv().is_err() {
-            return;
+        if !warning_is_visible() {
+            if receiver.recv().is_err() {
+                return;
+            }
+            let _ = refresh_visible_cursor(&mut cursor_error_reported);
+            schedule_main_flush(&app);
+            continue;
         }
 
         let started = Instant::now();
+        let mut notified = false;
         let mut disconnected = false;
         loop {
-            let remaining = UPDATE_INTERVAL.saturating_sub(started.elapsed());
+            let remaining = CURSOR_FRAME_INTERVAL.saturating_sub(started.elapsed());
             if remaining.is_zero() {
                 break;
             }
             match receiver.recv_timeout(remaining) {
-                Ok(()) => {}
+                Ok(()) => notified = true,
                 Err(RecvTimeoutError::Timeout) => break,
                 Err(RecvTimeoutError::Disconnected) => {
                     disconnected = true;
@@ -291,11 +330,51 @@ fn run_update_worker(app: AppHandle, receiver: Receiver<()>) {
             }
         }
 
-        schedule_main_flush(&app);
         if disconnected {
             return;
         }
+        let cursor_changed = refresh_visible_cursor(&mut cursor_error_reported);
+        if notified || cursor_changed || has_unapplied_state() {
+            schedule_main_flush(&app);
+        }
     }
+}
+
+fn warning_is_visible() -> bool {
+    STATE
+        .lock()
+        .map(|state| state.desired.visible)
+        .unwrap_or(false)
+}
+
+fn refresh_visible_cursor(error_reported: &mut bool) -> bool {
+    let cursor = match current_cursor_position() {
+        Ok(cursor) => {
+            *error_reported = false;
+            cursor
+        }
+        Err(error) => {
+            if !*error_reported {
+                eprintln!("Remember capture warning cursor tracking failed: {error}");
+                *error_reported = true;
+            }
+            return false;
+        }
+    };
+    STATE
+        .lock()
+        .map(|mut state| update_visible_cursor(&mut state, cursor))
+        .unwrap_or(false)
+}
+
+fn update_visible_cursor(state: &mut WarningState, cursor: (i32, i32)) -> bool {
+    if !state.desired.visible || (state.desired.cursor_x, state.desired.cursor_y) == cursor {
+        return false;
+    }
+    state.desired.cursor_x = cursor.0;
+    state.desired.cursor_y = cursor.1;
+    state.desired.revision = state.desired.revision.wrapping_add(1);
+    true
 }
 
 fn schedule_main_flush(app: &AppHandle) {
@@ -357,6 +436,24 @@ fn desired_snapshot() -> Result<DesiredWarning, String> {
         .map_err(|_| "capture warning state lock poisoned while applying".to_string())
 }
 
+fn applied_warning_snapshot() -> Result<AppliedWarning, String> {
+    APPLIED_WARNING
+        .lock()
+        .map(|applied| applied.clone())
+        .map_err(|_| "capture warning applied state lock poisoned".to_string())
+}
+
+fn set_applied_warning(applied: AppliedWarning) -> Result<(), String> {
+    *APPLIED_WARNING
+        .lock()
+        .map_err(|_| "capture warning applied state lock poisoned".to_string())? = applied;
+    Ok(())
+}
+
+fn reset_applied_warning() -> Result<(), String> {
+    set_applied_warning(AppliedWarning::hidden())
+}
+
 fn mark_applied(revision: u64) {
     if let Ok(mut state) = STATE.lock() {
         state.applied_revision = revision;
@@ -373,10 +470,16 @@ fn apply_latest_on_main(app: &AppHandle) -> Result<(), String> {
 fn apply_desired_on_main(app: &AppHandle, desired: &DesiredWarning) -> Result<(), String> {
     if !desired.visible {
         if let Some(window) = app.get_webview_window(WINDOW_LABEL) {
-            window
-                .hide()
-                .map_err(|error| format!("capture warning could not hide: {error}"))?;
+            let visible = window.is_visible().map_err(|error| {
+                format!("capture warning visibility could not be read: {error}")
+            })?;
+            if visible {
+                window
+                    .hide()
+                    .map_err(|error| format!("capture warning could not hide: {error}"))?;
+            }
         }
+        reset_applied_warning()?;
         return Ok(());
     }
 
@@ -435,34 +538,59 @@ fn configure_window(window: &WebviewWindow) -> Result<(), String> {
 }
 
 fn apply_visible_warning(window: &WebviewWindow, desired: &DesiredWarning) -> Result<(), String> {
-    let window_size = window
-        .outer_size()
-        .map_err(|error| format!("capture warning size could not be read: {error}"))?;
-    let bounds = virtual_desktop_bounds()?;
-    let (x, y) = warning_position(
-        desired.cursor_x,
-        desired.cursor_y,
-        window_size.width,
-        window_size.height,
-        bounds,
-    );
-    window
-        .set_position(PhysicalPosition::new(x, y))
-        .map_err(|error| format!("capture warning position could not update: {error}"))?;
-    window
-        .emit(
-            WARNING_EVENT,
-            CaptureWarningPayload {
-                kind: desired.kind,
-                title: desired.title.clone(),
-                message: desired.message.clone(),
-                detail: desired.detail.clone(),
-            },
-        )
-        .map_err(|error| format!("capture warning message could not emit: {error}"))?;
-    window
-        .show()
-        .map_err(|error| format!("capture warning could not show: {error}"))
+    let payload = CaptureWarningPayload {
+        kind: desired.kind,
+        title: desired.title.clone(),
+        message: desired.message.clone(),
+        detail: desired.detail.clone(),
+    };
+    let cursor = (desired.cursor_x, desired.cursor_y);
+    let applied = applied_warning_snapshot()?;
+    let delta = visible_update_delta(&applied, &payload, cursor);
+
+    if delta.move_window {
+        let window_size = window
+            .outer_size()
+            .map_err(|error| format!("capture warning size could not be read: {error}"))?;
+        let bounds = virtual_desktop_bounds()?;
+        let (x, y) = warning_position(
+            desired.cursor_x,
+            desired.cursor_y,
+            window_size.width,
+            window_size.height,
+            bounds,
+        );
+        window
+            .set_position(PhysicalPosition::new(x, y))
+            .map_err(|error| format!("capture warning position could not update: {error}"))?;
+    }
+    if delta.emit_payload {
+        window
+            .emit(WARNING_EVENT, payload.clone())
+            .map_err(|error| format!("capture warning message could not emit: {error}"))?;
+    }
+    if delta.show_window {
+        window
+            .show()
+            .map_err(|error| format!("capture warning could not show: {error}"))?;
+    }
+    set_applied_warning(AppliedWarning {
+        visible: true,
+        payload: Some(payload),
+        cursor: Some(cursor),
+    })
+}
+
+fn visible_update_delta(
+    applied: &AppliedWarning,
+    payload: &CaptureWarningPayload,
+    cursor: (i32, i32),
+) -> VisibleUpdateDelta {
+    VisibleUpdateDelta {
+        move_window: !applied.visible || applied.cursor != Some(cursor),
+        emit_payload: !applied.visible || applied.payload.as_ref() != Some(payload),
+        show_window: !applied.visible,
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -553,7 +681,12 @@ fn clamp_i64_to_i32(value: i64) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{truncate_message, warning_position, DesktopBounds};
+    use super::{
+        truncate_message, update_visible_cursor, visible_update_delta, warning_position,
+        AppliedWarning, CaptureWarningPayload, DesktopBounds, VisibleUpdateDelta, WarningKind,
+        WarningState, CURSOR_FRAME_INTERVAL,
+    };
+    use std::time::Duration;
 
     const BOUNDS: DesktopBounds = DesktopBounds {
         left: 0,
@@ -603,5 +736,73 @@ mod tests {
     fn stopped_notice_truncation_preserves_short_text_and_marks_long_text() {
         assert_eq!(truncate_message("Mihomo 不存在", 20), "Mihomo 不存在");
         assert_eq!(truncate_message("一二三四五六", 5), "一二三四…");
+    }
+
+    #[test]
+    fn cursor_following_targets_about_sixty_frames_per_second() {
+        assert_eq!(CURSOR_FRAME_INTERVAL, Duration::from_micros(16_667));
+        let frames_per_second = 1.0 / CURSOR_FRAME_INTERVAL.as_secs_f64();
+        assert!((59.9..=60.1).contains(&frames_per_second));
+    }
+
+    #[test]
+    fn cursor_frames_do_not_invalidate_the_stopped_notice_timer() {
+        let mut state = WarningState::new();
+        state.desired.visible = true;
+        state.notice_revision = 7;
+
+        assert!(update_visible_cursor(&mut state, (200, 300)));
+        assert_eq!(state.notice_revision, 7);
+        assert_eq!(state.desired.revision, 1);
+    }
+
+    #[test]
+    fn moving_a_visible_notice_does_not_emit_or_show_it_again() {
+        let payload = CaptureWarningPayload {
+            kind: WarningKind::PlaybackWaiting,
+            title: "回放正在等待".to_string(),
+            message: "请展开下拉框".to_string(),
+            detail: "还剩 30 秒".to_string(),
+        };
+        let applied = AppliedWarning {
+            visible: true,
+            payload: Some(payload.clone()),
+            cursor: Some((100, 100)),
+        };
+
+        assert_eq!(
+            visible_update_delta(&applied, &payload, (200, 200)),
+            VisibleUpdateDelta {
+                move_window: true,
+                emit_payload: false,
+                show_window: false,
+            }
+        );
+    }
+
+    #[test]
+    fn changing_notice_text_only_emits_a_new_payload() {
+        let original = CaptureWarningPayload {
+            kind: WarningKind::PlaybackWaiting,
+            title: "回放正在等待".to_string(),
+            message: "请展开下拉框".to_string(),
+            detail: "还剩 30 秒".to_string(),
+        };
+        let mut changed = original.clone();
+        changed.detail = "还剩 29 秒".to_string();
+        let applied = AppliedWarning {
+            visible: true,
+            payload: Some(original),
+            cursor: Some((100, 100)),
+        };
+
+        assert_eq!(
+            visible_update_delta(&applied, &changed, (100, 100)),
+            VisibleUpdateDelta {
+                move_window: false,
+                emit_payload: true,
+                show_window: false,
+            }
+        );
     }
 }
