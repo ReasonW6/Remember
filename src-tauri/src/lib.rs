@@ -3,6 +3,7 @@ pub mod advanced_settings;
 pub mod app_state;
 pub mod capture_warning;
 pub mod clock;
+pub mod combo_box;
 pub mod commands;
 pub mod hotkeys;
 pub mod input;

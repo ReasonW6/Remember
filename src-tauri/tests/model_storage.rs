@@ -1,7 +1,7 @@
 use remember_lib::model::{
-    ButtonState, ClientSize, KeyState, MacroStep, MouseButton, PointerPosition, Recording,
-    TargetWindowAvailability, TargetWindowId, WindowPointerIntent, WindowTarget,
-    RECORDING_VERSION_V1, RECORDING_VERSION_V2,
+    ButtonState, ClientSize, ControlBounds, KeyState, MacroStep, MouseButton, PointerPosition,
+    PointerSemanticAction, Recording, TargetWindowAvailability, TargetWindowId,
+    WindowPointerIntent, WindowTarget, RECORDING_VERSION_V1, RECORDING_VERSION_V2,
 };
 use remember_lib::recorder::MAX_RECORDING_STEPS;
 use remember_lib::storage::{
@@ -89,6 +89,7 @@ fn sample_window_relative_recording() -> Recording {
                 },
                 button: MouseButton::Left,
                 state: ButtonState::Pressed,
+                semantic_action: None,
             },
             MacroStep::TargetedKey {
                 elapsed_ms: 40,
@@ -110,6 +111,54 @@ fn sample_window_relative_recording() -> Recording {
             },
         ],
     )
+}
+
+#[test]
+fn semantic_combo_option_round_trips_as_an_optional_v2_pointer_field() {
+    let mut recording = sample_window_relative_recording();
+    let action = PointerSemanticAction::SelectComboOption {
+        control_id: 1_042,
+        control_bounds: ControlBounds {
+            x: 70,
+            y: 220,
+            width: 493,
+            height: 31,
+        },
+        option_name: "Mihomo".to_string(),
+    };
+    recording.steps = vec![
+        MacroStep::PointerButton {
+            elapsed_ms: 20,
+            position: PointerPosition::WindowRelative {
+                target_id: TargetWindowId(1),
+                x: 126,
+                y: 297,
+                intent: WindowPointerIntent::Foreground,
+            },
+            button: MouseButton::Left,
+            state: ButtonState::Pressed,
+            semantic_action: Some(action.clone()),
+        },
+        MacroStep::PointerButton {
+            elapsed_ms: 80,
+            position: PointerPosition::WindowRelative {
+                target_id: TargetWindowId(1),
+                x: 126,
+                y: 297,
+                intent: WindowPointerIntent::Foreground,
+            },
+            button: MouseButton::Left,
+            state: ButtonState::Released,
+            semantic_action: Some(action),
+        },
+    ];
+    recording.duration_ms = 80;
+
+    let json = recording_to_json(&recording).expect("serialize semantic V2");
+    assert!(json.contains("\"action\": \"select_combo_option\""));
+    assert!(json.contains("\"option_name\": \"Mihomo\""));
+    let decoded = recording_from_json(&json).expect("deserialize semantic V2");
+    assert_eq!(decoded, recording);
 }
 
 fn targeted_key(
@@ -308,6 +357,7 @@ fn rejects_pointer_button_intents_with_the_wrong_button_edge() {
             },
             button: MouseButton::Left,
             state,
+            semantic_action: None,
         }];
         recording.duration_ms = 0;
 
@@ -327,6 +377,7 @@ fn rejects_pointer_button_intents_with_the_wrong_button_edge() {
             },
             button: MouseButton::Left,
             state: ButtonState::Pressed,
+            semantic_action: None,
         },
         MacroStep::PointerButton {
             elapsed_ms: 1,
@@ -338,6 +389,7 @@ fn rejects_pointer_button_intents_with_the_wrong_button_edge() {
             },
             button: MouseButton::Left,
             state: ButtonState::Released,
+            semantic_action: None,
         },
     ];
     valid_edges.duration_ms = 1;

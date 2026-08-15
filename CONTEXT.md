@@ -56,6 +56,10 @@ _Avoid_: Child control, menu surface
 A short-lived interactive surface such as a menu, dropdown, or context menu that uses its owning target window's coordinate reference rather than becoming a target itself.
 _Avoid_: Deferred target window, independent popup
 
+**Semantic combo selection**:
+A V2 pointer action captured from a standard Windows ComboBox dropdown. It keeps the original pointer coordinates as a legacy fallback and additionally stores the owning control locator plus visible option name, allowing current playback to select the same option even when its list position changes.
+_Avoid_: OCR selection, list index replay, generic control automation
+
 **System surface**:
 Windows Shell UI such as the desktop, taskbar, Start menu, notification area, or task switcher. It always uses screen-relative input and never becomes a target window.
 _Avoid_: Target window, owned transient surface
@@ -81,20 +85,28 @@ A background window where a pointer drag is completed. Movement that merely cros
 _Avoid_: Hovered window, drag path window
 
 **Targeted input**:
-Recorded pointer or keyboard input whose effect belongs to a target window. A minimized or hidden target is restored only when its next targeted input is about to run.
+Recorded pointer or keyboard input whose state-changing effect belongs to a target window, such as a button press, wheel action, drag gesture, or keyboard sequence. A minimized or hidden target is restored only when its next targeted input is about to run; unheld pointer motion alone is not targeted input.
 _Avoid_: Global input, window wake-up request
+
+**Passive pointer trajectory**:
+Recorded pointer motion while no key or mouse button is held. Playback may follow an already visible compatible target, but never waits for, restores, activates, or foreground-checks a window solely to replay this trajectory; unavailable motion is skipped while its elapsed time is preserved.
+_Avoid_: Targeted input, hover activation, preflight movement
 
 **Keyboard sequence**:
 A group beginning with the first key press and ending when every key has been released. It is associated with and checked against the foreground target only at its start, so a readable sequence continues normally through focus changes such as Alt+Tab; a sequence starting on an unreadable target is omitted as a whole.
 _Avoid_: Individual targeted keystroke, text entry
 
 **Just-in-time restoration**:
-Restoring and activating a minimized or hidden target window immediately before its next targeted input, without opening or waking windows earlier in playback.
+Restoring and activating a minimized or hidden target window immediately before its next targeted input, without opening or waking windows earlier in playback. Foreground is established at the start of each effective pointer operation or keyboard sequence, while an already-started gesture may finish naturally if its action opens another foreground window.
 _Avoid_: Preflight wake-up, continuous focus enforcement
 
 **Window binding**:
 The automatically selected association between a recorded target window and one compatible target window currently available for playback. Every target is bound just before its first targeted action. With no held input, binding may wait a bounded time for the window; while input is held, it may only bind an already available compatible window without waiting, restoring, or changing focus, and otherwise stops playback. Binding never asks the user to choose a window.
 _Avoid_: Manual binding, window guess, handle reuse
+
+**Playback wait notice**:
+A non-interactive, always-on-top status card that follows the cursor while bounded target binding is waiting. It states the exact user action that can let playback continue, the remaining wait time, and how to cancel; it disappears as soon as binding succeeds or playback stops.
+_Avoid_: Target picker, modal error dialog, silent wait
 
 **Compatible target window**:
 A currently available, unoccupied window whose executable path and class exactly match the recorded identity and whose client-area size and DPI match when binding begins. A position change alone does not make a target incompatible; a recorded window adjustment may change the bound window's current size, while DPI remains fixed.

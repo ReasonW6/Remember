@@ -1,7 +1,7 @@
 use remember_lib::model::{
-    ButtonState, ClientSize, KeyState, MacroStep, MouseButton, PointerPosition,
-    TargetWindowAvailability, TargetWindowId, WindowPointerIntent, RECORDING_VERSION_V1,
-    RECORDING_VERSION_V2,
+    ButtonState, ClientSize, ControlBounds, KeyState, MacroStep, MouseButton, PointerPosition,
+    PointerSemanticAction, TargetWindowAvailability, TargetWindowId, WindowPointerIntent,
+    RECORDING_VERSION_V1, RECORDING_VERSION_V2,
 };
 use remember_lib::recorder::{
     CaptureOutcome, CaptureSurface, CapturedWindow, RawInputEvent, Recorder, WindowInstanceId,
@@ -33,7 +33,93 @@ fn captured_window(
 }
 
 fn window_surface(window: CapturedWindow, intent: WindowPointerIntent) -> CaptureSurface {
-    CaptureSurface::Window { window, intent }
+    CaptureSurface::Window {
+        window,
+        intent,
+        semantic_action: None,
+    }
+}
+
+fn combo_option_surface(window: CapturedWindow, option_name: &str) -> CaptureSurface {
+    CaptureSurface::Window {
+        window,
+        intent: WindowPointerIntent::Foreground,
+        semantic_action: Some(PointerSemanticAction::SelectComboOption {
+            control_id: 1_042,
+            control_bounds: ControlBounds {
+                x: 70,
+                y: 220,
+                width: 493,
+                height: 31,
+            },
+            option_name: option_name.to_string(),
+        }),
+    }
+}
+
+#[test]
+fn records_combo_option_name_on_press_and_keeps_it_when_popup_closes_before_release() {
+    let mut recorder = Recorder::new(50);
+    recorder
+        .start_window_relative("combo option", 1_000, "2026-08-15T00:00:00Z")
+        .expect("start V2");
+    let window = captured_window(0x30C44, 0, (100, 200), TargetWindowAvailability::Deferred);
+
+    assert_eq!(
+        recorder.capture_with_surface(
+            RawInputEvent::MouseButton {
+                at_ms: 1_020,
+                x: 226,
+                y: 497,
+                button: MouseButton::Left,
+                state: ButtonState::Pressed,
+            },
+            combo_option_surface(window, "Mihomo"),
+        ),
+        CaptureOutcome::Continue
+    );
+    assert_eq!(
+        recorder.capture_with_surface(
+            RawInputEvent::MouseButton {
+                at_ms: 1_080,
+                x: 226,
+                y: 497,
+                button: MouseButton::Left,
+                state: ButtonState::Released,
+            },
+            CaptureSurface::Screen,
+        ),
+        CaptureOutcome::Continue
+    );
+
+    let recording = recorder.stop(1_100).expect("stop V2");
+    recording.validate().expect("semantic recording validates");
+    assert_eq!(recording.targets.len(), 1);
+    assert_eq!(recording.steps.len(), 2);
+    for (step, state) in recording
+        .steps
+        .iter()
+        .zip([ButtonState::Pressed, ButtonState::Released])
+    {
+        assert!(matches!(
+            step,
+            MacroStep::PointerButton {
+                position: PointerPosition::WindowRelative {
+                    target_id: TargetWindowId(1),
+                    x: 126,
+                    y: 297,
+                    intent: WindowPointerIntent::Foreground,
+                },
+                button: MouseButton::Left,
+                state: actual_state,
+                semantic_action: Some(PointerSemanticAction::SelectComboOption {
+                    option_name,
+                    ..
+                }),
+                ..
+            } if *actual_state == state && option_name == "Mihomo"
+        ));
+    }
 }
 
 #[test]
@@ -416,6 +502,7 @@ fn v2_records_explicit_screen_and_multi_window_positions_with_stable_target_ids(
                 },
                 button: MouseButton::Left,
                 state: ButtonState::Pressed,
+                semantic_action: None,
             },
             MacroStep::PointerWheel {
                 elapsed_ms: 30,
@@ -900,6 +987,7 @@ fn v2_safely_splits_a_drag_around_an_unreadable_pointer_interval() {
             position: PointerPosition::ScreenRelative { x: 15, y: 16 },
             button: MouseButton::Left,
             state: ButtonState::Released,
+            semantic_action: None,
         }
     );
     assert_eq!(
@@ -914,6 +1002,7 @@ fn v2_safely_splits_a_drag_around_an_unreadable_pointer_interval() {
             },
             button: MouseButton::Left,
             state: ButtonState::Pressed,
+            semantic_action: None,
         }
     );
     assert_eq!(

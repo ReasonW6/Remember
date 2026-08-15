@@ -150,7 +150,7 @@ mod capture {
             ControlHotkeyRuntime,
         },
         clock::now_ms,
-        commands,
+        combo_box, commands,
         input::{OwnWindowHandles, WindowLifetimeToken, REMEMBER_INPUT_EXTRA_INFO},
         model::{
             ButtonState, KeyState, MouseButton, TargetWindowAvailability, WindowPointerIntent,
@@ -1215,6 +1215,7 @@ mod capture {
                     Ok(Some(window)) => CaptureSurface::Window {
                         window: captured_window(&window, generations, true),
                         intent: WindowPointerIntent::Foreground,
+                        semantic_action: None,
                     },
                     Ok(None) => CaptureSurface::Screen,
                     Err(error) => unreadable_surface(error),
@@ -1324,10 +1325,42 @@ mod capture {
         lifetimes: &WindowLifetimeRegistry,
         pointer_snapshots: &mut PointerSnapshotCache,
     ) -> CaptureSurface {
-        let normalized_context = match normalize_event_window_context(window_context, lifetimes) {
+        let owner_hint = window_context
+            .foreground_root
+            .map(|window| WindowHandle::from_raw(window.root_hwnd));
+        let combo_owner = window_context.pointed_root.and_then(|window| {
+            combo_box::stable_owner_for_popup(WindowHandle::from_raw(window.root_hwnd), owner_hint)
+        });
+        let semantic_combo_option = match event {
+            RawInputEvent::MouseButton {
+                x,
+                y,
+                button: MouseButton::Left,
+                state: ButtonState::Pressed,
+                ..
+            } => window_context.pointed_root.and_then(|window| {
+                combo_box::option_at_point(
+                    WindowHandle::from_raw(window.root_hwnd),
+                    owner_hint,
+                    window_target::ScreenPoint { x, y },
+                )
+                .ok()
+                .flatten()
+            }),
+            _ => None,
+        };
+        let mut normalized_context = match normalize_event_window_context(window_context, lifetimes)
+        {
             Ok(context) => context,
             Err(error) => return unreadable_surface(error),
         };
+        if let Some(owner) = combo_owner.or_else(|| {
+            semantic_combo_option
+                .as_ref()
+                .map(|selection| selection.owner)
+        }) {
+            normalized_context.pointed = Some(owner);
+        }
         let decision = pointer_surface_decision(event, normalized_context);
         let PointerSurfaceDecision::Window(intent) = decision else {
             return CaptureSurface::Screen;
@@ -1365,6 +1398,7 @@ mod capture {
                 pointed_root.root_hwnd == normalized_handle.raw(),
             ),
             intent,
+            semantic_action: semantic_combo_option.map(|selection| selection.action),
         }
     }
 
