@@ -8,7 +8,7 @@ use remember_lib::model::{
 use remember_lib::recorder::{
     CaptureSurface, CapturedWindow, RawInputEvent, WindowInstanceId, MAX_RECORDING_STEPS,
 };
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
 fn recording() -> Recording {
     Recording::new(
@@ -173,11 +173,90 @@ fn stopped_recording_stays_pending_until_the_matching_recording_is_saved() {
     let stale = Arc::new((*recording).clone());
     assert_eq!(stale, recording);
     assert!(!Arc::ptr_eq(&stale, &recording));
-    app.mark_recording_saved(&stale);
+    app.mark_recording_saved(&stale, Some(PathBuf::from("stale.remember.json")));
     assert_eq!(app.recording_pending_save(), Some(&recording));
+    assert!(app.ui_state().recording_path.is_none());
 
-    app.mark_recording_saved(&recording);
+    let revision_before_save = app.ui_state().revision;
+    app.mark_recording_saved(&recording, Some(PathBuf::from("pending-1.remember.json")));
     assert!(app.recording_pending_save().is_none());
+    assert_eq!(
+        app.ui_state().recording_path.as_deref(),
+        Some("pending-1.remember.json")
+    );
+    assert!(app.ui_state().revision > revision_before_save);
+}
+
+#[test]
+fn recording_file_identity_tracks_load_rename_delete_and_new_recording() {
+    let mut app = AppController::new();
+    let first = PathBuf::from("first.remember.json");
+    let other = PathBuf::from("same-name.remember.json");
+    let renamed = PathBuf::from("renamed.remember.json");
+    app.set_recording_from_file(recording(), first.clone())
+        .expect("load first");
+    assert_eq!(app.ui_state().recording_path.as_deref(), first.to_str());
+
+    let loaded = app.saveable_recording().expect("loaded recording");
+    let revision = app.ui_state().revision;
+    app.recording_file_deleted(&other);
+    app.recording_file_renamed(&other, renamed.clone(), "other");
+    assert_eq!(app.ui_state().revision, revision);
+    assert_eq!(app.ui_state().recording_path.as_deref(), first.to_str());
+    assert!(Arc::ptr_eq(
+        &loaded,
+        &app.saveable_recording().expect("still loaded")
+    ));
+
+    app.recording_file_renamed(&first, renamed.clone(), " renamed ");
+    assert_eq!(app.ui_state().recording_path.as_deref(), renamed.to_str());
+    assert_eq!(app.ui_state().recording_name.as_deref(), Some("renamed"));
+    assert_eq!(
+        app.current_recording().expect("renamed recording").steps,
+        loaded.steps
+    );
+    assert!(app.ui_state().revision > revision);
+    let revision = app.ui_state().revision;
+
+    app.recording_file_deleted(&renamed);
+    assert!(app.ui_state().recording_path.is_none());
+    assert_eq!(app.ui_state().recording_name.as_deref(), Some("renamed"));
+    assert_eq!(
+        app.current_recording()
+            .expect("deleted file stays loaded")
+            .steps,
+        loaded.steps
+    );
+    assert!(app.ui_state().revision > revision);
+
+    app.set_recording_from_file(recording(), first)
+        .expect("load again");
+    app.start_recording_from_hotkey("new", 100, "2026-06-29T00:00:00Z")
+        .expect("start recording");
+    assert!(app.ui_state().recording_path.is_none());
+    app.stop_recording(150).expect("stop recording");
+    assert!(app.ui_state().recording_path.is_none());
+}
+
+#[test]
+fn export_preserves_library_identity_and_stale_save_cannot_replace_a_new_load() {
+    let mut app = AppController::new();
+    let first = PathBuf::from("first.remember.json");
+    let second = PathBuf::from("second.remember.json");
+    app.set_recording_from_file(recording(), first.clone())
+        .expect("load first");
+    let previous = app.saveable_recording().expect("snapshot");
+    app.mark_recording_saved(&previous, None);
+    assert_eq!(app.ui_state().recording_path.as_deref(), first.to_str());
+
+    app.set_recording_from_file(recording(), second.clone())
+        .expect("load second");
+    let revision = app.ui_state().revision;
+    app.mark_recording_saved(&previous, Some(first));
+    assert_eq!(app.ui_state().recording_path.as_deref(), second.to_str());
+    assert_eq!(app.ui_state().revision, revision);
+    let serialized = serde_json::to_value(app.ui_state()).expect("serialize UI state");
+    assert_eq!(serialized["recording_path"], "second.remember.json");
 }
 
 #[test]

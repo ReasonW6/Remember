@@ -10,6 +10,7 @@ import { RecordingList } from "./RecordingList";
 const idleState: UiState = {
   mode: "idle",
   recording_name: null,
+  recording_path: null,
   step_count: 0,
   duration_ms: 0,
   message: "就绪",

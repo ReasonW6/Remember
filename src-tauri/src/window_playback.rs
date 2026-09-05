@@ -386,15 +386,21 @@ impl StepExecutor for WindowPlaybackExecutor {
         input_held: bool,
     ) -> Result<u64, String> {
         let (handle, pause_ms) = self.prepare_foreground_target(target, input_held)?;
-        combo_box::select_option(handle, control_id, control_bounds, option_name).map_err(
-            |error| {
-                format!(
-                    "无法在目标窗口 {} 中选择下拉选项“{}”：{}",
-                    target.id.0, option_name, error
-                )
-            },
-        )?;
+        let result = combo_box::select_option(
+            handle,
+            control_id,
+            control_bounds,
+            option_name,
+            &self.stop_token,
+        );
+        // Keep cancellation recognizable by the playback completion handler.
         ensure_playback_running(&self.stop_token)?;
+        result.map_err(|error| {
+            format!(
+                "无法在目标窗口 {} 中选择下拉选项“{}”：{}",
+                target.id.0, option_name, error
+            )
+        })?;
         Ok(pause_ms)
     }
 

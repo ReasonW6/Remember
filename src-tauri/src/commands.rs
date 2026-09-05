@@ -88,11 +88,12 @@ fn recording_library_dir_for_executable(executable: &Path) -> Result<PathBuf, St
 fn mark_recording_saved(
     state: &SharedApp,
     recording: &Arc<crate::model::Recording>,
+    library_path: Option<PathBuf>,
 ) -> Result<(), String> {
     let mut controller = state
         .lock()
         .map_err(|_| "state lock poisoned".to_string())?;
-    controller.mark_recording_saved(recording);
+    controller.mark_recording_saved(recording, library_path);
     Ok(())
 }
 
@@ -102,9 +103,9 @@ fn save_recording_to_library_shared(
     recording: &Arc<crate::model::Recording>,
 ) -> Result<(), String> {
     let library_dir = recording_library_dir(app)?;
-    storage::save_recording_to_library(&library_dir, recording)
+    let path = storage::save_recording_to_library(&library_dir, recording)
         .map_err(|error| error.to_string())?;
-    mark_recording_saved(state, recording)?;
+    mark_recording_saved(state, recording, Some(path))?;
     if let Err(error) = emit_recordings_changed(app) {
         eprintln!("Remember recordings-changed event failed after saving: {error}");
     }
@@ -265,6 +266,10 @@ fn stop_recording_impl(
     }
     match save_pending_recording_shared(&app, &state) {
         Ok(()) => {
+            let ui_state = state
+                .lock()
+                .map_err(|_| "state lock poisoned".to_string())?
+                .ui_state();
             emit_state(&app, ui_state.clone())?;
             Ok(ui_state)
         }
@@ -292,18 +297,49 @@ pub fn list_recordings(app: AppHandle) -> Result<Vec<RecordingFile>, String> {
 }
 
 #[tauri::command]
-pub fn delete_recording(app: AppHandle, path: PathBuf) -> Result<(), String> {
+pub fn delete_recording(
+    app: AppHandle,
+    state: State<'_, SharedApp>,
+    path: PathBuf,
+) -> Result<(), String> {
+    let _save_guard = RECORDING_SAVE_LOCK
+        .lock()
+        .map_err(|_| "recording save lock poisoned".to_string())?;
     let library_dir = recording_library_dir(&app)?;
     storage::delete_recording_from_library(&library_dir, &path)
         .map_err(|error| error.to_string())?;
+    let ui_state = {
+        let mut controller = state
+            .lock()
+            .map_err(|_| "state lock poisoned".to_string())?;
+        controller.recording_file_deleted(&path);
+        controller.ui_state()
+    };
+    emit_state(&app, ui_state)?;
     emit_recordings_changed(&app)
 }
 
 #[tauri::command]
-pub fn rename_recording(app: AppHandle, path: PathBuf, new_name: String) -> Result<String, String> {
+pub fn rename_recording(
+    app: AppHandle,
+    state: State<'_, SharedApp>,
+    path: PathBuf,
+    new_name: String,
+) -> Result<String, String> {
+    let _save_guard = RECORDING_SAVE_LOCK
+        .lock()
+        .map_err(|_| "recording save lock poisoned".to_string())?;
     let library_dir = recording_library_dir(&app)?;
     let renamed_path = storage::rename_recording_in_library(&library_dir, &path, &new_name)
         .map_err(|error| error.to_string())?;
+    let ui_state = {
+        let mut controller = state
+            .lock()
+            .map_err(|_| "state lock poisoned".to_string())?;
+        controller.recording_file_renamed(&path, renamed_path.clone(), &new_name);
+        controller.ui_state()
+    };
+    emit_state(&app, ui_state)?;
     emit_recordings_changed(&app)?;
     Ok(renamed_path.to_string_lossy().to_string())
 }
@@ -314,12 +350,15 @@ pub fn open_recording(
     state: State<'_, SharedApp>,
     path: PathBuf,
 ) -> Result<UiState, String> {
+    let _save_guard = RECORDING_SAVE_LOCK
+        .lock()
+        .map_err(|_| "recording save lock poisoned".to_string())?;
     let recording = storage::load_recording(&path).map_err(|error| error.to_string())?;
     let ui_state = {
         let mut controller = state
             .lock()
             .map_err(|_| "state lock poisoned".to_string())?;
-        controller.set_recording(recording)?;
+        controller.set_recording_from_file(recording, path)?;
         controller.ui_state()
     };
     emit_state(&app, ui_state.clone())?;
@@ -328,6 +367,9 @@ pub fn open_recording(
 
 #[tauri::command]
 pub fn save_current_recording(state: State<'_, SharedApp>, path: PathBuf) -> Result<(), String> {
+    let _save_guard = RECORDING_SAVE_LOCK
+        .lock()
+        .map_err(|_| "recording save lock poisoned".to_string())?;
     let recording = {
         let controller = state
             .lock()
@@ -335,7 +377,7 @@ pub fn save_current_recording(state: State<'_, SharedApp>, path: PathBuf) -> Res
         controller.saveable_recording()?
     };
     storage::save_recording(&path, &recording).map_err(|error| error.to_string())?;
-    mark_recording_saved(state.inner(), &recording)
+    mark_recording_saved(state.inner(), &recording, None)
 }
 
 #[tauri::command]

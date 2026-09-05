@@ -9,6 +9,7 @@ use crate::{
 use serde::Serialize;
 use std::{
     collections::HashSet,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard},
 };
 
@@ -24,6 +25,7 @@ pub enum AppMode {
 pub struct UiState {
     pub mode: AppMode,
     pub recording_name: Option<String>,
+    pub recording_path: Option<String>,
     pub step_count: usize,
     pub duration_ms: u64,
     pub message: String,
@@ -173,6 +175,7 @@ pub struct AppController {
     control_hotkeys: ControlHotkeyRuntime,
     playback_settings: PlaybackSettings,
     recording: Option<Arc<Recording>>,
+    recording_path: Option<PathBuf>,
     recording_needs_save: bool,
     stop_token: StopToken,
     next_playback_id: u64,
@@ -201,6 +204,7 @@ impl AppController {
                 loop_delay_ms: 0,
             },
             recording: None,
+            recording_path: None,
             recording_needs_save: false,
             stop_token: StopToken::default(),
             next_playback_id: 0,
@@ -224,6 +228,10 @@ impl AppController {
                 .recording
                 .as_ref()
                 .map(|recording| recording.name.clone()),
+            recording_path: self
+                .recording_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
             step_count: self
                 .recording
                 .as_ref()
@@ -331,6 +339,7 @@ impl AppController {
             self.recorder.start(name, started_at_ms, created_at)?;
         }
         self.recording = None;
+        self.recording_path = None;
         self.recording_needs_save = false;
         self.window_relative_recording = window_relative;
         self.initial_window_handles = initial_window_handles;
@@ -447,12 +456,41 @@ impl AppController {
         self.ensure_recording_saved_before_replace()?;
         recording.validate()?;
         self.recording = Some(Arc::new(recording));
+        self.recording_path = None;
         self.recording_needs_save = false;
         self.control_hotkeys.set_mode(AppMode::Idle);
         self.message = "Recording loaded".to_string();
         self.message_is_error = false;
         self.bump_revision();
         Ok(())
+    }
+
+    pub fn set_recording_from_file(
+        &mut self,
+        recording: Recording,
+        path: PathBuf,
+    ) -> Result<(), String> {
+        self.set_recording(recording)?;
+        self.recording_path = Some(path);
+        Ok(())
+    }
+
+    pub fn recording_file_deleted(&mut self, path: &Path) {
+        if self.recording_path.as_deref() == Some(path) {
+            // Keep the loaded contents available for playback and explicit export.
+            self.recording_path = None;
+            self.bump_revision();
+        }
+    }
+
+    pub fn recording_file_renamed(&mut self, path: &Path, renamed_path: PathBuf, name: &str) {
+        if self.recording_path.as_deref() == Some(path) {
+            if let Some(recording) = self.recording.as_mut() {
+                Arc::make_mut(recording).name = name.trim().to_string();
+            }
+            self.recording_path = Some(renamed_path);
+            self.bump_revision();
+        }
     }
 
     pub fn current_recording(&self) -> Option<&Recording> {
@@ -467,13 +505,21 @@ impl AppController {
         }
     }
 
-    pub fn mark_recording_saved(&mut self, recording: &Arc<Recording>) {
+    pub fn mark_recording_saved(
+        &mut self,
+        recording: &Arc<Recording>,
+        library_path: Option<PathBuf>,
+    ) {
         if self
             .recording
             .as_ref()
             .is_some_and(|current| Arc::ptr_eq(current, recording))
         {
             self.recording_needs_save = false;
+            if let Some(path) = library_path {
+                self.recording_path = Some(path);
+                self.bump_revision();
+            }
         }
     }
 

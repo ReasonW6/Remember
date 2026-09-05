@@ -13,6 +13,7 @@ vi.mock("./lib/rememberApi", () => apiMocks);
 const recordingState: UiState = {
   mode: "recording",
   recording_name: null,
+  recording_path: null,
   step_count: 0,
   duration_ms: 0,
   message: "Recording",
