@@ -22,6 +22,7 @@ import type {
 const idleState: UiState = {
   mode: "idle",
   recording_name: null,
+  recording_path: null,
   step_count: 0,
   duration_ms: 0,
   message: "Idle",
@@ -78,7 +79,7 @@ export function App() {
   const [actionError, setActionError] = useState("");
   const [initializationErrors, setInitializationErrors] = useState<string[]>([]);
   const [recordings, setRecordings] = useState<RecordingFile[]>([]);
-  const [selectedRecordingPath, setSelectedRecordingPath] = useState<string | null>(null);
+  const selectedRecordingPath = state.recording_path;
   const [hotkeys, setHotkeys] = useState(defaultHotkeys);
   const [isElevated, setIsElevated] = useState(false);
   const [windowRelativeEnabled, setWindowRelativeEnabled] = useState(false);
@@ -91,7 +92,7 @@ export function App() {
   const pendingCommandRef = useRef(false);
   const playbackSettingsSyncRef = useRef(0);
   const playbackSettingsQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const latestRevisionRef = useRef(idleState.revision);
+  const latestStateRef = useRef(idleState);
   const previousModeRef = useRef(idleState.mode);
   const advancedSettingsRef = useRef(defaultAdvancedSettings);
   const recordingsChangeVersionRef = useRef(0);
@@ -295,21 +296,28 @@ export function App() {
     }
 
     async function restoreLastRecording() {
+      if (
+        disposed ||
+        latestStateRef.current.mode !== "idle" ||
+        latestStateRef.current.recording_name
+      ) {
+        return;
+      }
       const path = readLastRecordingPath();
       if (!path) {
         return;
       }
       try {
         const loadedState = await rememberApi.loadRecording(path);
-        if (!disposed && applyUiState(loadedState)) {
-          setSelectedRecordingPath(path);
+        if (!disposed) {
+          applyUiState(loadedState);
         }
       } catch {
         clearLastRecordingPath();
       }
     }
 
-    void initializeState();
+    const stateInitialization = initializeState();
     void initializeMainWindowPreferences();
     deferredInitializationFrame = window.requestAnimationFrame(() => {
       deferredInitializationFrame = undefined;
@@ -319,7 +327,7 @@ export function App() {
       void initializeRecordings();
       void initializeHotkeys();
       void initializeAdvancedSettings();
-      void restoreLastRecording();
+      void stateInitialization.then(restoreLastRecording);
       void rememberApi
         .getPrivilegeState()
         .then((privilegeState) => {
@@ -400,25 +408,6 @@ export function App() {
       });
   }, [loopCount, speedMultiplier, effectiveLoopDelayMs, validationError]);
 
-  useEffect(() => {
-    if (state.mode === "recording") {
-      setSelectedRecordingPath(null);
-    }
-  }, [state.mode]);
-
-  useEffect(() => {
-    if (state.mode !== "idle" || selectedRecordingPath || !state.recording_name) {
-      return;
-    }
-    const recording = recordings.find(
-      (candidate) => !candidate.load_error && candidate.name === state.recording_name
-    );
-    if (recording) {
-      setSelectedRecordingPath(recording.path);
-      writeLastRecordingPath(recording.path);
-    }
-  }, [recordings, selectedRecordingPath, state.mode, state.recording_name]);
-
   function addInitializationError(error: unknown) {
     const message = displayErrorMessage(error);
     setInitializationErrors((current) =>
@@ -463,14 +452,19 @@ export function App() {
   }
 
   function applyUiState(nextState: UiState) {
-    if (nextState.revision < latestRevisionRef.current) {
+    if (nextState.revision < latestStateRef.current.revision) {
       return false;
     }
 
     const previousMode = previousModeRef.current;
-    latestRevisionRef.current = nextState.revision;
+    latestStateRef.current = nextState;
     announceModeTransition(nextState.mode);
     setState(nextState);
+    if (nextState.recording_path) {
+      writeLastRecordingPath(nextState.recording_path);
+    } else if (nextState.mode === "recording" || nextState.recording_name) {
+      clearLastRecordingPath();
+    }
     if (previousMode === "recording" && nextState.mode === "idle") {
       void refreshRecordings().catch((refreshError: unknown) => {
         setActionError(displayErrorMessage(refreshError));
@@ -581,9 +575,8 @@ export function App() {
   function handleOpen() {
     void applyCommand(async () => {
       const opened = await rememberApi.openRecording();
-      if (opened && applyUiState(opened.state)) {
-        setSelectedRecordingPath(opened.path);
-        writeLastRecordingPath(opened.path);
+      if (opened) {
+        applyUiState(opened.state);
       }
     });
   }
@@ -591,10 +584,7 @@ export function App() {
   function handleSelectRecording(path: string) {
     void applyCommand(async () => {
       const loadedState = await rememberApi.loadRecording(path);
-      if (applyUiState(loadedState)) {
-        setSelectedRecordingPath(path);
-        writeLastRecordingPath(path);
-      }
+      applyUiState(loadedState);
     });
   }
 
@@ -658,24 +648,15 @@ export function App() {
       }
 
       await rememberApi.deleteRecording(recording.path);
-      if (selectedRecordingPath === recording.path) {
-        setSelectedRecordingPath(null);
-        clearLastRecordingPath();
-      }
+      applyUiState(await rememberApi.getState());
       await refreshRecordings();
     });
   }
 
   function handleRenameRecording(recording: RecordingFile, newName: string) {
     void applyCommand(async () => {
-      const renamedPath = await rememberApi.renameRecording(recording.path, newName);
-      if (selectedRecordingPath === recording.path) {
-        const loadedState = await rememberApi.loadRecording(renamedPath);
-        if (applyUiState(loadedState)) {
-          setSelectedRecordingPath(renamedPath);
-          writeLastRecordingPath(renamedPath);
-        }
-      }
+      await rememberApi.renameRecording(recording.path, newName);
+      applyUiState(await rememberApi.getState());
       await refreshRecordings();
     });
   }

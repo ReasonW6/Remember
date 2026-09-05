@@ -10,6 +10,7 @@ describe("StatusPanel", () => {
         state={{
           mode: "idle",
           recording_name: "demo",
+          recording_path: null,
           step_count: 3,
           duration_ms: 1200,
           message: "SendInput failed",

@@ -50,6 +50,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 const loadedState: UiState = {
   mode: "idle",
   recording_name: "loaded.remember.json",
+  recording_path: "C:\\Recordings\\loaded.remember.json",
   step_count: 3,
   duration_ms: 1200,
   message: "Loaded recording",

@@ -82,6 +82,7 @@ function render(ui: ReactElement) {
 const idleState: UiState = {
   mode: "idle",
   recording_name: null,
+  recording_path: null,
   step_count: 0,
   duration_ms: 0,
   message: "Idle",
@@ -92,6 +93,7 @@ const idleState: UiState = {
 const recordingState: UiState = {
   mode: "recording",
   recording_name: null,
+  recording_path: null,
   step_count: 0,
   duration_ms: 0,
   message: "Recording",
@@ -102,6 +104,7 @@ const recordingState: UiState = {
 const playingState: UiState = {
   mode: "playing",
   recording_name: "demo",
+  recording_path: null,
   step_count: 3,
   duration_ms: 1200,
   message: "Playing",
@@ -112,6 +115,7 @@ const playingState: UiState = {
 const stoppedState: UiState = {
   mode: "idle",
   recording_name: "demo",
+  recording_path: null,
   step_count: 3,
   duration_ms: 1200,
   message: "Playback stopped",
@@ -481,6 +485,7 @@ describe("App", () => {
     apiMocks.loadRecording.mockResolvedValue({
       ...stoppedState,
       recording_name: recordingFile.name,
+      recording_path: recordingFile.path,
       revision: 3
     });
     renderCompact(<App />);
@@ -495,6 +500,7 @@ describe("App", () => {
     apiMocks.loadRecording.mockResolvedValue({
       ...stoppedState,
       recording_name: recordingFile.name,
+      recording_path: recordingFile.path,
       revision: 3
     });
     const user = userEvent.setup();
@@ -509,6 +515,28 @@ describe("App", () => {
     expect(
       screen.getByRole("option", { name: `${recordingFile.name} [V1]` })
     ).toBeInTheDocument();
+  });
+
+  it("keeps the backend loaded recording instead of restoring an older local path", async () => {
+    window.localStorage.setItem("remember:last-recording-path", "C:\\Recordings\\old.remember.json");
+    apiMocks.listRecordings.mockResolvedValue([recordingFile]);
+    let resolveSnapshot!: (state: UiState) => void;
+    apiMocks.getState.mockReturnValue(new Promise<UiState>((resolve) => {
+      resolveSnapshot = resolve;
+    }));
+    renderCompact(<App />);
+    await waitFor(() => expect(apiMocks.listRecordings).toHaveBeenCalled());
+    expect(apiMocks.loadRecording).not.toHaveBeenCalled();
+
+    act(() => resolveSnapshot({
+      ...stoppedState,
+      recording_name: recordingFile.name,
+      recording_path: recordingFile.path
+    }));
+    const selector = screen.getByRole("combobox", { name: "选择录制文件" });
+    await waitFor(() => expect(selector).toHaveValue(recordingFile.path));
+    expect(apiMocks.loadRecording).not.toHaveBeenCalled();
+    expect(window.localStorage.getItem("remember:last-recording-path")).toBe(recordingFile.path);
   });
 
   it("restarts as administrator from the compact window", async () => {
@@ -856,6 +884,7 @@ describe("App", () => {
     const loadedState = {
       mode: "idle",
       recording_name: "loaded.remember.json",
+      recording_path: "C:\\Recordings\\loaded.remember.json",
       step_count: 4,
       duration_ms: 2400,
       message: "Loaded recording",
@@ -880,6 +909,7 @@ describe("App", () => {
     const loadedState = {
       ...stoppedState,
       recording_name: "demo-auto",
+      recording_path: recordingFile.path,
       message: "Recording loaded"
     };
     apiMocks.loadRecording.mockResolvedValue(loadedState);
@@ -926,6 +956,111 @@ describe("App", () => {
     expect(apiMocks.confirmDeleteRecording).not.toHaveBeenCalled();
   });
 
+  it("does not select a same-name file after deleting the loaded recording", async () => {
+    const duplicate = { ...recordingFile, path: `${recordingFile.path}-second` };
+    const loadedState = {
+      ...stoppedState,
+      recording_name: recordingFile.name,
+      recording_path: recordingFile.path,
+      revision: 10
+    };
+    apiMocks.getState
+      .mockResolvedValueOnce(loadedState)
+      .mockResolvedValue({ ...loadedState, recording_path: null, revision: 11 });
+    apiMocks.listRecordings
+      .mockResolvedValueOnce([recordingFile, duplicate])
+      .mockResolvedValue([duplicate]);
+    const user = userEvent.setup();
+    render(<App />);
+
+    const choices = await screen.findAllByRole("button", { name: "选择 demo-auto" });
+    expect(choices[0]).toHaveAttribute("aria-pressed", "true");
+    expect(choices[1]).toHaveAttribute("aria-pressed", "false");
+    await user.click(screen.getAllByRole("button", { name: "删除 demo-auto" })[0]);
+
+    await waitFor(() => expect(apiMocks.listRecordings).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole("button", { name: "选择 demo-auto" })).toHaveAttribute(
+      "aria-pressed", "false"
+    );
+    expect(window.localStorage.getItem("remember:last-recording-path")).toBeNull();
+    expect(apiMocks.loadRecording).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "播放" })).toBeEnabled();
+  });
+
+  it("selects the exact auto-saved path from hotkey state even when names collide", async () => {
+    const saved = { ...recordingFile, path: `${recordingFile.path}-second` };
+    apiMocks.listRecordings.mockResolvedValue([recordingFile, saved]);
+    renderCompact(<App />);
+    const selector = await screen.findByRole("combobox", { name: "选择录制文件" });
+    await waitFor(() => expect(apiMocks.subscribeToState).toHaveBeenCalled());
+
+    act(() => stateListener?.({ ...recordingState, revision: 10 }));
+    act(() => stateListener?.({
+      ...stoppedState,
+      recording_name: saved.name,
+      recording_path: saved.path,
+      revision: 12
+    }));
+    await waitFor(() => expect(selector).toHaveValue(saved.path));
+    expect(window.localStorage.getItem("remember:last-recording-path")).toBe(saved.path);
+
+    act(() => stateListener?.({
+      ...stoppedState,
+      recording_name: saved.name,
+      recording_path: null,
+      revision: 11
+    }));
+    expect(selector).toHaveValue(saved.path);
+    expect(apiMocks.loadRecording).not.toHaveBeenCalled();
+  });
+
+  it("does not infer a file identity for an unsaved same-name recording", async () => {
+    apiMocks.listRecordings.mockResolvedValue([recordingFile]);
+    apiMocks.getState.mockResolvedValue({
+      ...stoppedState,
+      recording_name: recordingFile.name,
+      recording_path: null,
+      message: "Recording stopped"
+    });
+    renderCompact(<App />);
+    const selector = await screen.findByRole("combobox", { name: "选择录制文件" });
+    await waitFor(() => expect(apiMocks.listRecordings).toHaveBeenCalled());
+    expect(selector).toHaveValue("");
+    expect(apiMocks.loadRecording).not.toHaveBeenCalled();
+  });
+
+  it("updates the loaded identity after rename without reloading or replacing the backend recording", async () => {
+    const renamed = { ...recordingFile, name: "renamed", path: "C:\\Recordings\\renamed.remember.json" };
+    apiMocks.getState
+      .mockResolvedValueOnce({
+        ...stoppedState,
+        recording_name: recordingFile.name,
+        recording_path: recordingFile.path,
+        revision: 10
+      })
+      .mockResolvedValue({
+        ...stoppedState,
+        recording_name: renamed.name,
+        recording_path: renamed.path,
+        revision: 11
+      });
+    apiMocks.renameRecording.mockResolvedValue(renamed.path);
+    apiMocks.listRecordings.mockResolvedValueOnce([recordingFile]).mockResolvedValue([renamed]);
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "重命名 demo-auto" }));
+    const input = screen.getByRole("textbox", { name: "重命名 demo-auto" });
+    await user.clear(input);
+    await user.type(input, renamed.name);
+    await user.click(screen.getByRole("button", { name: "保存 demo-auto 的新名称" }));
+
+    expect(await screen.findByRole("button", { name: "选择 renamed" })).toHaveAttribute(
+      "aria-pressed", "true"
+    );
+    expect(window.localStorage.getItem("remember:last-recording-path")).toBe(renamed.path);
+    expect(apiMocks.loadRecording).not.toHaveBeenCalled();
+  });
+
   it("renames a recording from the pencil action", async () => {
     const renamedPath =
       "C:\\Users\\WangXuan\\AppData\\Roaming\\com.remember.desktop\\recordings\\weekly-report.remember.json";
@@ -959,6 +1094,7 @@ describe("App", () => {
     const currentState = {
       mode: "idle",
       recording_name: "current",
+      recording_path: null,
       step_count: 2,
       duration_ms: 1500,
       message: "Ready",
@@ -1188,7 +1324,11 @@ describe("App", () => {
 
   it("clears the selected recording highlight when a new recording starts", async () => {
     apiMocks.listRecordings.mockResolvedValue([recordingFile]);
-    apiMocks.loadRecording.mockResolvedValue({ ...stoppedState, revision: 3 });
+    apiMocks.loadRecording.mockResolvedValue({
+      ...stoppedState,
+      recording_path: recordingFile.path,
+      revision: 3
+    });
     const user = userEvent.setup();
     render(<App />);
 

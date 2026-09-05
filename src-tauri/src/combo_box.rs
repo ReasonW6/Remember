@@ -1,5 +1,6 @@
 use crate::{
     model::{ControlBounds, PointerSemanticAction},
+    player::StopToken,
     window_target::{ScreenPoint, WindowHandle},
 };
 
@@ -29,8 +30,18 @@ pub fn select_option(
     control_id: i32,
     control_bounds: ControlBounds,
     option_name: &str,
+    stop_token: &StopToken,
 ) -> Result<(), String> {
-    platform::select_option(owner, control_id, control_bounds, option_name)
+    ensure_playback_running(stop_token)?;
+    platform::select_option(owner, control_id, control_bounds, option_name, stop_token)
+}
+
+fn ensure_playback_running(stop_token: &StopToken) -> Result<(), String> {
+    if stop_token.is_stopped() {
+        Err("playback stopped".to_string())
+    } else {
+        Ok(())
+    }
 }
 
 fn choose_option_index(options: &[String], requested: &str) -> Result<usize, String> {
@@ -139,6 +150,7 @@ mod platform {
         control_id: i32,
         control_bounds: ControlBounds,
         option_name: &str,
+        stop_token: &StopToken,
     ) -> Result<(), String> {
         let owner = hwnd(owner);
         if !unsafe { IsWindow(owner).as_bool() } {
@@ -150,10 +162,10 @@ mod platform {
                 control_bounds.x, control_bounds.y, control_bounds.width, control_bounds.height
             )
         })?;
-        let options = read_combo_options(combo)?;
+        let options = read_combo_options(combo, stop_token)?;
         let index = choose_option_index(&options, option_name)?;
-        send_message(combo, CB_SHOWDROPDOWN, 0, 0)?;
-        let selected = send_message(combo, CB_SETCURSEL, index, 0)?;
+        send_playback_message(combo, CB_SHOWDROPDOWN, 0, 0, stop_token)?;
+        let selected = send_playback_message(combo, CB_SETCURSEL, index, 0, stop_token)?;
         if selected == CB_ERR as isize || usize::try_from(selected).ok() != Some(index) {
             return Err(format!("Windows 拒绝选择下拉选项“{option_name}”。"));
         }
@@ -162,11 +174,11 @@ mod platform {
             .map_err(|error| format!("无法读取下拉框所属控件：{error}"))?;
         let current_control_id = unsafe { GetDlgCtrlID(combo) };
         let command = command_wparam(current_control_id, CBN_SELCHANGE);
-        send_message(parent, WM_COMMAND, command, combo.0 as isize)?;
+        send_playback_message(parent, WM_COMMAND, command, combo.0 as isize, stop_token)?;
         let accepted = command_wparam(current_control_id, CBN_SELENDOK);
-        send_message(parent, WM_COMMAND, accepted, combo.0 as isize)?;
+        send_playback_message(parent, WM_COMMAND, accepted, combo.0 as isize, stop_token)?;
 
-        let current = send_message(combo, CB_GETCURSEL, 0, 0)?;
+        let current = send_playback_message(combo, CB_GETCURSEL, 0, 0, stop_token)?;
         if usize::try_from(current).ok() != Some(index) {
             return Err(format!("选择“{option_name}”后验证当前选项失败。"));
         }
@@ -429,8 +441,8 @@ mod platform {
         }
     }
 
-    fn read_combo_options(combo: HWND) -> Result<Vec<String>, String> {
-        let count = send_message(combo, CB_GETCOUNT, 0, 0)?;
+    fn read_combo_options(combo: HWND, stop_token: &StopToken) -> Result<Vec<String>, String> {
+        let count = send_playback_message(combo, CB_GETCOUNT, 0, 0, stop_token)?;
         if count == CB_ERR as isize || count < 0 {
             return Err("无法读取下拉框选项数量。".to_string());
         }
@@ -438,7 +450,7 @@ mod platform {
             usize::try_from(count).map_err(|_| "下拉框选项数量超出支持范围。".to_string())?;
         let mut options = Vec::with_capacity(count);
         for index in 0..count {
-            let length = send_message(combo, CB_GETLBTEXTLEN, index, 0)?;
+            let length = send_playback_message(combo, CB_GETLBTEXTLEN, index, 0, stop_token)?;
             if length == CB_ERR as isize || length < 0 {
                 return Err(format!("无法读取下拉框第 {} 项的文本长度。", index + 1));
             }
@@ -448,7 +460,13 @@ mod platform {
                 return Err(format!("下拉框第 {} 项文本过长。", index + 1));
             }
             let mut buffer = vec![0u16; length.saturating_add(1)];
-            let copied = send_message(combo, CB_GETLBTEXT, index, buffer.as_mut_ptr() as isize)?;
+            let copied = send_playback_message(
+                combo,
+                CB_GETLBTEXT,
+                index,
+                buffer.as_mut_ptr() as isize,
+                stop_token,
+            )?;
             if copied == CB_ERR as isize || copied < 0 {
                 return Err(format!("无法读取下拉框第 {} 项的文本。", index + 1));
             }
@@ -465,6 +483,19 @@ mod platform {
         let mut buffer = [0u16; 256];
         let length = unsafe { GetClassNameW(hwnd, &mut buffer) };
         (length > 0).then(|| String::from_utf16_lossy(&buffer[..length as usize]))
+    }
+
+    fn send_playback_message(
+        hwnd: HWND,
+        message: u32,
+        wparam: usize,
+        lparam: isize,
+        stop_token: &StopToken,
+    ) -> Result<isize, String> {
+        ensure_playback_running(stop_token)?;
+        let result = send_message(hwnd, message, wparam, lparam);
+        ensure_playback_running(stop_token)?;
+        result
     }
 
     fn send_message(
@@ -529,6 +560,7 @@ mod platform {
         _control_id: i32,
         _control_bounds: ControlBounds,
         _option_name: &str,
+        _stop_token: &StopToken,
     ) -> Result<(), String> {
         Err("标准 Windows 下拉框语义回放仅支持 Windows。".to_string())
     }
@@ -684,11 +716,266 @@ mod tests {
         assert_eq!(captured_id, control_id);
         assert_eq!(option_name, "Mihomo");
 
-        select_option(captured.owner, captured_id, control_bounds, &option_name)
-            .expect("select standard combo option by name");
+        select_option(
+            captured.owner,
+            captured_id,
+            control_bounds,
+            &option_name,
+            &crate::player::StopToken::default(),
+        )
+        .expect("select standard combo option by name");
         let selected = unsafe { SendMessageW(combo, CB_GETCURSEL, WPARAM(0), LPARAM(0)) };
         assert_eq!(selected.0, 1);
 
         drop(owner_guard);
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod cancellation_tests {
+    use super::{select_option, ControlBounds, StopToken, WindowHandle};
+    use std::{cell::Cell, ffi::c_void};
+    use windows::{
+        core::w,
+        Win32::{
+            Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
+            UI::{
+                Shell::{DefSubclassProc, SetWindowSubclass},
+                WindowsAndMessaging::{
+                    CreateWindowExW, DestroyWindow, SendMessageW, CBN_SELCHANGE, CBN_SELENDOK,
+                    CBS_DROPDOWNLIST, CB_ADDSTRING, CB_GETCOUNT, CB_GETCURSEL, CB_GETLBTEXT,
+                    CB_GETLBTEXTLEN, CB_SETCURSEL, CB_SHOWDROPDOWN, HMENU, WINDOW_EX_STYLE,
+                    WINDOW_STYLE, WM_COMMAND, WS_CHILD, WS_EX_NOACTIVATE, WS_OVERLAPPEDWINDOW,
+                },
+            },
+        },
+    };
+
+    const CONTROL_ID: usize = 71;
+
+    struct Probe {
+        stop_token: StopToken,
+        stop_on: Option<(u32, usize)>,
+        messages_after_stop: Cell<usize>,
+        selection_changes: Cell<usize>,
+        notifications: Cell<usize>,
+    }
+
+    unsafe extern "system" fn observe_message(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _subclass_id: usize,
+        data: usize,
+    ) -> LRESULT {
+        let probe = &*(data as *const Probe);
+        if matches!(
+            message,
+            CB_GETCOUNT
+                | CB_GETCURSEL
+                | CB_GETLBTEXT
+                | CB_GETLBTEXTLEN
+                | CB_SETCURSEL
+                | CB_SHOWDROPDOWN
+                | WM_COMMAND
+        ) && probe.stop_token.is_stopped()
+        {
+            probe
+                .messages_after_stop
+                .set(probe.messages_after_stop.get() + 1);
+        }
+        if message == CB_SETCURSEL {
+            probe
+                .selection_changes
+                .set(probe.selection_changes.get() + 1);
+        }
+        if message == WM_COMMAND {
+            probe.notifications.set(probe.notifications.get() + 1);
+        }
+        let result = DefSubclassProc(hwnd, message, wparam, lparam);
+        if probe.stop_on == Some((message, wparam.0)) {
+            probe.stop_token.request_stop();
+        }
+        result
+    }
+
+    struct ComboFixture {
+        owner: HWND,
+        combo: HWND,
+        probe: Box<Probe>,
+    }
+
+    impl ComboFixture {
+        fn new(stop_on: Option<(u32, usize)>) -> Self {
+            let owner = unsafe {
+                CreateWindowExW(
+                    WS_EX_NOACTIVATE,
+                    w!("STATIC"),
+                    w!("Remember combo cancellation test"),
+                    WS_OVERLAPPEDWINDOW,
+                    -32_000,
+                    -32_000,
+                    320,
+                    200,
+                    HWND::default(),
+                    HMENU::default(),
+                    HINSTANCE::default(),
+                    None,
+                )
+            }
+            .expect("create hidden owner window");
+            let mut fixture = Self {
+                owner,
+                combo: HWND::default(),
+                probe: Box::new(Probe {
+                    stop_token: StopToken::default(),
+                    stop_on,
+                    messages_after_stop: Cell::new(0),
+                    selection_changes: Cell::new(0),
+                    notifications: Cell::new(0),
+                }),
+            };
+            fixture.combo = unsafe {
+                CreateWindowExW(
+                    WINDOW_EX_STYLE::default(),
+                    w!("COMBOBOX"),
+                    w!(""),
+                    WS_CHILD | WINDOW_STYLE(CBS_DROPDOWNLIST as u32),
+                    20,
+                    30,
+                    180,
+                    120,
+                    owner,
+                    HMENU(CONTROL_ID as *mut c_void),
+                    HINSTANCE::default(),
+                    None,
+                )
+            }
+            .expect("create standard combo box");
+            for option in [w!("以太网"), w!("Mihomo")] {
+                assert!(unsafe {
+                    SendMessageW(
+                        fixture.combo,
+                        CB_ADDSTRING,
+                        WPARAM(0),
+                        LPARAM(option.as_ptr() as isize),
+                    )
+                    .0 >= 0
+                });
+            }
+            unsafe {
+                SendMessageW(fixture.combo, CB_SETCURSEL, WPARAM(0), LPARAM(0));
+            }
+            for hwnd in [fixture.owner, fixture.combo] {
+                assert!(unsafe {
+                    SetWindowSubclass(
+                        hwnd,
+                        Some(observe_message),
+                        1,
+                        (&*fixture.probe as *const Probe) as usize,
+                    )
+                    .as_bool()
+                });
+            }
+            fixture
+        }
+
+        fn select(&self) -> Result<(), String> {
+            select_option(
+                WindowHandle::from_raw(self.owner.0 as usize),
+                CONTROL_ID as i32,
+                ControlBounds {
+                    x: 20,
+                    y: 30,
+                    width: 180,
+                    height: 120,
+                },
+                "Mihomo",
+                &self.probe.stop_token,
+            )
+        }
+
+        fn selected_index(&self) -> isize {
+            unsafe { SendMessageW(self.combo, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0 }
+        }
+    }
+
+    impl Drop for ComboFixture {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = DestroyWindow(self.owner);
+            }
+        }
+    }
+
+    #[test]
+    fn already_stopped_combo_playback_sends_no_messages() {
+        let fixture = ComboFixture::new(None);
+        fixture.probe.stop_token.request_stop();
+
+        assert_eq!(fixture.select(), Err("playback stopped".to_string()));
+        assert_eq!(fixture.probe.messages_after_stop.get(), 0);
+        assert_eq!(fixture.probe.selection_changes.get(), 0);
+        assert_eq!(fixture.probe.notifications.get(), 0);
+        assert_eq!(fixture.selected_index(), 0);
+    }
+
+    #[test]
+    fn stopping_during_combo_enumeration_or_selection_sends_no_later_messages() {
+        for (stop_on, expected_selection, expected_notifications) in [
+            ((CB_GETCOUNT, 0), 0, 0),
+            ((CB_GETLBTEXTLEN, 0), 0, 0),
+            ((CB_GETLBTEXT, 0), 0, 0),
+            ((CB_GETLBTEXTLEN, 1), 0, 0),
+            ((CB_GETLBTEXT, 1), 0, 0),
+            ((CB_SHOWDROPDOWN, 0), 0, 0),
+            ((CB_SETCURSEL, 1), 1, 0),
+            (
+                (WM_COMMAND, CONTROL_ID | ((CBN_SELCHANGE as usize) << 16)),
+                1,
+                1,
+            ),
+            (
+                (WM_COMMAND, CONTROL_ID | ((CBN_SELENDOK as usize) << 16)),
+                1,
+                2,
+            ),
+        ] {
+            let fixture = ComboFixture::new(Some(stop_on));
+
+            assert_eq!(
+                fixture.select(),
+                Err("playback stopped".to_string()),
+                "{stop_on:?}"
+            );
+            assert!(fixture.probe.stop_token.is_stopped(), "{stop_on:?}");
+            assert_eq!(fixture.probe.messages_after_stop.get(), 0, "{stop_on:?}");
+            assert_eq!(
+                fixture.probe.selection_changes.get(),
+                expected_selection,
+                "{stop_on:?}"
+            );
+            assert_eq!(
+                fixture.probe.notifications.get(),
+                expected_notifications,
+                "{stop_on:?}"
+            );
+            assert_eq!(
+                fixture.selected_index(),
+                expected_selection as isize,
+                "{stop_on:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn uninterrupted_combo_selection_notifies_the_host_and_verifies_the_result() {
+        let fixture = ComboFixture::new(None);
+
+        assert_eq!(fixture.select(), Ok(()));
+        assert_eq!(fixture.probe.selection_changes.get(), 1);
+        assert_eq!(fixture.probe.notifications.get(), 2);
+        assert_eq!(fixture.selected_index(), 1);
     }
 }
